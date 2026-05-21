@@ -2,7 +2,6 @@ name: Auto Fetch Stock Data
 
 on:
   schedule:
-    # Chạy vào 00:00 UTC (7:00 AM VN) từ Thứ 2 đến Thứ 6
     - cron: '0 0 * * 1-5' 
   workflow_dispatch: 
 
@@ -10,10 +9,10 @@ jobs:
   update-data:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Setup Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
