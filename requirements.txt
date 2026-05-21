@@ -1,0 +1,5 @@
+Plaintext
+gspread
+google-auth
+pandas
+yfinance
