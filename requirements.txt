@@ -1,5 +1,5 @@
-Plaintext
 gspread
 google-auth
 pandas
-yfinance
+requests
+vnstock
