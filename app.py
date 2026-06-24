@@ -55,31 +55,36 @@ if ticker_input:
 
         # --- TAB CHỨC NĂNG ---
         tab_tech_view, tab_financial_view, tab_independent_view, tab_news_digest = st.tabs([
-            "📈 Phân Tích Kỹ Thuật (Real data)",
+            "📊 Khối Lượng Giao Dịch (Volume)",
             "📋 Kết Quả Kinh Doanh 5 Năm",
             "💡 Special Insights (Bull/Bear)",
             "📰 Bản Tin Thời Sự 30 Ngày"
         ])
 
         with tab_tech_view:
-            st.markdown("### Động lượng Xu hướng & Phân tích Đột biến dòng tiền")
-            fig_candlestick = go.Figure()
-            fig_candlestick.add_trace(go.Candlestick(
-                x=df_price_clean['time'], open=df_price_clean['open_vnd'],
-                high=df_price_clean['high_vnd'], low=df_price_clean['low_vnd'], close=df_price_clean['close_vnd'],
-                name="Nến giá", increasing_line_color='#10d98a', decreasing_line_color='#ff4d6d'
+            st.markdown("### Phân tích Khối lượng Giao dịch (Volume) 20 ngày")
+            fig_volume = go.Figure()
+            fig_volume.add_trace(go.Bar(
+                x=df_price_clean['time'], y=df_price_clean['volume'],
+                name="Khối lượng GD", marker_color='#a855f7', opacity=0.6
             ))
-            fig_candlestick.add_trace(go.Scatter(
-                x=df_price_clean['time'], y=df_price_clean['MA20'],
-                line=dict(color='#06b6d4', width=2), name="Đường MA20"
+            fig_volume.add_trace(go.Scatter(
+                x=df_price_clean['time'], y=df_price_clean['volume_ma20'],
+                line=dict(color='#ec4899', width=2), name="Volume MA20"
             ))
-            fig_candlestick.update_layout(template='plotly_dark', paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', xaxis_rangeslider_visible=False)
-            st.plotly_chart(fig_candlestick, use_container_width=True)
+            fig_volume.update_layout(template='plotly_dark', paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
+            st.plotly_chart(fig_volume, use_container_width=True)
 
             stat_col1, stat_col2, stat_col3 = st.columns(3)
-            stat_col1.metric("Chỉ báo RSI (14)", f"{tech['rsi']:.1f}")
-            stat_col2.metric("Trạng Thái Ngắn Hạn", tech['trend_signal'])
-            stat_col3.metric("Khối Lượng Lưu Hành", f"{metrics['issue_share_million']:,.1f} Tr CP")
+            stat_col1.metric("KL Phiên Gần Nhất", f"{tech['latest_volume']:,.0f} CP")
+            stat_col2.metric("KL Trung Bình 20 Ngày", f"{tech['avg_volume_20d']:,.0f} CP")
+            stat_col3.metric(
+                "So Với TB 20 Ngày",
+                f"{tech['volume_vs_avg_pct']:+.1f}%",
+                delta=f"{tech['volume_vs_avg_pct']:+.1f}%"
+            )
+
+            st.caption(f"Trạng Thái Xu Hướng Giá: **{tech['trend_signal']}**　|　Khối Lượng Lưu Hành: **{metrics['issue_share_million']:,.1f} Tr CP**")
 
             if tech['oil_correlation'] != 0.0:
                 st.warning(f"🛢️ **Mô hình tương quan đặc thù:** Mã `{ticker_input}` có hệ số tương quan đồng biến với giá dầu thô WTI là **{tech['oil_correlation']:.2f}**.")
