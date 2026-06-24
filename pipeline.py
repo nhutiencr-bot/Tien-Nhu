@@ -103,10 +103,75 @@ def execute_equity_research_pipeline(ticker):
 
         # --- TRỊ BẪY DỮ LIỆU SỐ 4 & 5B: STALE RATIO & SPLIT-ADJUSTMENT ---
         current_price = float(df_price['close_vnd'].iloc[-1])
-        market_cap = float(df_overview['market_cap'].iloc[0]) if not df_overview.empty and 'market_cap' in df_overview.columns else 0
 
-        pe_fresh = float(df_overview['pe'].iloc[0]) if not df_overview.empty and 'pe' in df_overview.columns else 0.0
-        pb_fresh = float(df_overview['pb'].iloc[0]) if not df_overview.empty and 'pb' in df_overview.columns else 0.0
+        # ⚠️ BẪY NGUỒN DỮ LIỆU: overview() của KBS/DNSE KHÔNG có sẵn các cột
+        # market_cap/pe/pb/issue_share như VCI (KBS chỉ có 'outstanding_shares'
+        # trong hồ sơ doanh nghiệp, không có vốn hóa/PE/PB tính sẵn).
+        # => Không tin cột có sẵn của từng nguồn. Tự tính market_cap/PE/PB
+        # bằng công thức cơ bản, nhất quán cho MỌI nguồn dữ liệu.
+
+        # 1. Số CP lưu hành: thử các tên cột khác nhau theo từng nguồn
+        issue_share = 0.0
+        if not df_overview.empty:
+            for col in ['issue_share', 'outstanding_shares', 'listed_volume']:
+                if col in df_overview.columns and pd.notna(df_overview[col].iloc[0]):
+                    issue_share = float(df_overview[col].iloc[0])
+                    break
+
+        # 2. Nếu vẫn không có số CP, back-calc từ vốn điều lệ / mệnh giá (10,000đ)
+        if issue_share == 0.0 and not df_overview.empty and 'charter_capital' in df_overview.columns:
+            try:
+                charter_capital = float(df_overview['charter_capital'].iloc[0])
+                issue_share = charter_capital / 10000  # mệnh giá chuẩn 10,000đ/CP
+            except Exception:
+                pass
+
+        # 3. Tự tính market_cap = giá hiện tại x số CP lưu hành
+        market_cap = current_price * issue_share if issue_share > 0 else 0.0
+
+        # 4. EPS: lấy từ income_statement (kỳ/dòng gần nhất), thử nhiều tên cột
+        eps = 0.0
+        if not df_income.empty:
+            for col in ['eps', 'earnings_per_share', 'Lãi cơ bản trên cổ phiếu (VND)']:
+                if col in df_income.columns:
+                    series = df_income[col].dropna()
+                    if not series.empty:
+                        eps = float(series.iloc[-1])
+                        break
+                elif 'item' in df_income.columns:
+                    # Trường hợp dữ liệu dạng long-format (item theo dòng)
+                    row = df_income[df_income['item'].astype(str).str.contains('cổ phiếu|EPS', case=False, na=False)]
+                    if not row.empty:
+                        numeric_cols = [c for c in row.columns if c not in ('item', 'item_en', 'item_id')]
+                        if numeric_cols:
+                            val = pd.to_numeric(row[numeric_cols[-1]], errors='coerce').dropna()
+                            if not val.empty:
+                                eps = float(val.iloc[0])
+                                break
+
+        # 5. VCSH (equity) cho BVPS: thử nhiều tên cột
+        equity = 0.0
+        if not df_balance.empty:
+            for col in ['equity', 'owners_equity', 'VỐN CHỦ SỞ HỮU']:
+                if col in df_balance.columns:
+                    series = df_balance[col].dropna()
+                    if not series.empty:
+                        equity = float(series.iloc[-1])
+                        break
+                elif 'item' in df_balance.columns:
+                    row = df_balance[df_balance['item'].astype(str).str.contains('VỐN CHỦ SỞ HỮU', case=False, na=False)]
+                    if not row.empty:
+                        numeric_cols = [c for c in row.columns if c not in ('item', 'item_en', 'item_id')]
+                        if numeric_cols:
+                            val = pd.to_numeric(row[numeric_cols[-1]], errors='coerce').dropna()
+                            if not val.empty:
+                                equity = float(val.iloc[0])
+                                break
+
+        bvps = (equity / issue_share) if issue_share > 0 else 0.0
+
+        pe_fresh = (current_price / eps) if eps > 0 else 0.0
+        pb_fresh = (current_price / bvps) if bvps > 0 else 0.0
 
         clean_metrics = {
             "is_bank": is_bank,
@@ -114,20 +179,24 @@ def execute_equity_research_pipeline(ticker):
             "market_cap_billion": market_cap / 1e9,
             "pe": pe_fresh,
             "pb": pb_fresh,
-            "issue_share_million": float(df_overview['issue_share'].iloc[0]) / 1e6 if not df_overview.empty and 'issue_share' in df_overview.columns else 0,
+            "issue_share_million": issue_share / 1e6 if issue_share > 0 else 0,
             "source_used": source_used,
         }
 
-        # --- [BƯỚC 4]: Phân tích Kỹ thuật & Tương quan Giá Dầu ---
-        df_price['MA20'] = df_price['close_vnd'].rolling(window=20).mean()
-        df_price['MA50'] = df_price['close_vnd'].rolling(window=50).mean()
+        # --- [BƯỚC 4]: Phân tích Khối lượng giao dịch (Volume) 20 ngày ---
+        # Theo yêu cầu: bỏ chart nến/MA kỹ thuật, tập trung vào volume.
+        if 'volume' not in df_price.columns:
+            df_price['volume'] = 0  # fallback an toàn nếu nguồn không trả volume
 
-        # Tính RSI
-        delta = df_price['close_vnd'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        rs = gain / loss
-        df_price['RSI'] = 100 - (100 / (1 + rs))
+        df_price['volume_ma20'] = df_price['volume'].rolling(window=20).mean()
+
+        latest_volume = float(df_price['volume'].iloc[-1])
+        avg_volume_20d = float(df_price['volume_ma20'].iloc[-1]) if not pd.isna(df_price['volume_ma20'].iloc[-1]) else 0.0
+        volume_vs_avg_pct = ((latest_volume / avg_volume_20d - 1) * 100) if avg_volume_20d > 0 else 0.0
+
+        # Vẫn giữ MA20 giá để xác định xu hướng (KHẢ QUAN/RỦI RO), nhưng
+        # không vẽ chart nến nữa -- chỉ dùng để tính trend_signal.
+        df_price['MA20'] = df_price['close_vnd'].rolling(window=20).mean()
 
         # Tương quan dầu WTI
         oil_corr_score = 0.0
@@ -135,9 +204,10 @@ def execute_equity_research_pipeline(ticker):
             oil_corr_score = 0.74  # Chỉ báo tương quan lịch sử tĩnh (để tối ưu tốc độ test)
 
         technical_summary = {
-            "rsi": df_price['RSI'].iloc[-1] if not pd.isna(df_price['RSI'].iloc[-1]) else 50.0,
+            "latest_volume": latest_volume,
+            "avg_volume_20d": avg_volume_20d,
+            "volume_vs_avg_pct": volume_vs_avg_pct,
             "ma20": df_price['MA20'].iloc[-1],
-            "ma50": df_price['MA50'].iloc[-1],
             "oil_correlation": oil_corr_score,
             "trend_signal": "KHẢ QUAN (Uptrend)" if current_price > df_price['MA20'].iloc[-1] else "RỦI RO (Downtrend)"
         }
