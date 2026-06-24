@@ -1,7 +1,6 @@
 streamlit
-pandas
 plotly
-vnstock
+pandas
+numpy
 yfinance
-gspread
-google-auth
+vnstock>=4.0.0
