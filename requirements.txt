@@ -1,5 +1,7 @@
 streamlit
 pandas
+plotly
 vnstock
 yfinance
-plotly
+gspread
+google-auth
