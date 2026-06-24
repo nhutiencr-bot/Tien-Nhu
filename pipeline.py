@@ -1,236 +1,110 @@
-import pandas as pd
-import yfinance as yf
 import streamlit as st
-from datetime import datetime, timedelta
+import plotly.graph_objects as go
 
-# Import chuẩn cấu pháp vnstock API mới nhất (HOSE/VCI Broker data)
-from vnstock.api.quote import Quote
-from vnstock.api.financial import Finance
-from vnstock.api.company import Company
+# NHẬP KHẨU CÁC FILE BỆ PHÓNG VÀO FILE GIAO DIỆN CHÍNH NÀY
+from styles import apply_premium_fintech_theme
+from pipeline import execute_equity_research_pipeline
+from symbols_loader import load_all_symbols, build_display_options
 
-# Thứ tự nguồn ưu tiên thử lần lượt. VCI đầy đủ nhất nhưng có lỗi
-# đã xác nhận với một số mã UPCOM (vd: BSR) -> fallback sang KBS/DNSE.
-SOURCE_FALLBACK_ORDER = ['VCI', 'KBS', 'DNSE']
+# Cấu hình trang (Phải luôn nằm ở đầu tiên)
+st.set_page_config(page_title="Equity Research AI", layout="wide")
 
+# Gọi hàm khoác áo Fintech từ file styles.py
+apply_premium_fintech_theme()
 
-def _build_engines_with_fallback(ticker):
-    """
-    Thử khởi tạo Quote/Finance/Company lần lượt theo SOURCE_FALLBACK_ORDER.
-    Trả về (q_engine, f_engine, c_engine, source_used) ngay khi 1 nguồn
-    gọi q_engine.history() thành công (test nhẹ bằng 5 ngày gần nhất).
-    Nếu tất cả nguồn đều lỗi, raise lỗi cuối cùng để pipeline báo rõ.
-    """
-    last_error = None
-    test_end = datetime.today().strftime('%Y-%m-%d')
-    test_start = (datetime.today() - timedelta(days=10)).strftime('%Y-%m-%d')
+st.title("🎯 AI Equity Research Terminal")
+st.caption("Khởi chạy hệ thống tự động 7 bước kết hợp cơ chế kiểm toán vượt 7 bẫy BCTC đặc thù thị trường Việt Nam.")
 
-    for source in SOURCE_FALLBACK_ORDER:
-        try:
-            q_engine = Quote(symbol=ticker, source=source)
-            # Test nhẹ: nếu nguồn này không thực sự trả được data cho mã
-            # này, lỗi sẽ nổ ra ngay đây thay vì sau này.
-            probe = q_engine.history(start=test_start, end=test_end, interval='1D')
-            if probe is None or probe.empty:
-                raise ValueError(f"Nguồn {source} trả về dữ liệu rỗng cho {ticker}")
+# --- Ô CHỌN MÃ: dropdown search toàn bộ HOSE + HNX + UPCOM ---
+df_symbols = load_all_symbols()
+display_list, display_to_symbol = build_display_options(df_symbols)
 
-            f_engine = Finance(symbol=ticker, source=source)
-            c_engine = Company(symbol=ticker, source=source)
-            return q_engine, f_engine, c_engine, source
+ticker_input = None
 
-        except Exception as e:
-            last_error = e
-            continue
-
-    # Hết danh sách nguồn mà vẫn lỗi -> raise lỗi cuối cùng
-    raise ConnectionError(
-        f"Không lấy được dữ liệu cho mã {ticker} từ bất kỳ nguồn nào "
-        f"({', '.join(SOURCE_FALLBACK_ORDER)}). Lỗi cuối cùng: {last_error}"
+if display_list:
+    default_label = next((lbl for lbl in display_list if lbl.startswith("BSR ")), display_list[0])
+    selected_label = st.selectbox(
+        f"Chọn mã cổ phiếu cần bóc tách (đang có {len(display_list)} mã trên HOSE/HNX/UPCOM):",
+        options=display_list,
+        index=display_list.index(default_label),
     )
+    ticker_input = display_to_symbol[selected_label]
+else:
+    # Fallback: nếu không tải được danh sách mã (lỗi mạng/nguồn data),
+    # vẫn cho phép người dùng gõ tay như cách cũ để app không bị kẹt cứng.
+    ticker_input = st.text_input(
+        "Không tải được danh sách mã tự động — nhập mã thủ công (Ví dụ: BSR, FPT, HPG, VCB):",
+        "BSR",
+    ).strip().upper()
 
+if ticker_input:
+    # Gọi hàm xử lý luồng dữ liệu từ file pipeline.py
+    pipeline_output = execute_equity_research_pipeline(ticker_input)
 
-@st.cache_data(ttl=1800)  # Caching dữ liệu trong 30 phút để tăng tốc độ
-def execute_equity_research_pipeline(ticker):
-    """
-    File này đóng vai trò là "Nhạc trưởng" (Orchestrator).
-    Tất cả các logic lấy dữ liệu, xử lý bẫy 5B, tính toán chỉ báo RSI/MA
-    đều được giấu kín ở đây để code giao diện được gọn gàng.
-    """
-    try:
-        q_engine, f_engine, c_engine, source_used = _build_engines_with_fallback(ticker)
-        if source_used != 'VCI':
-            st.info(f"ℹ️ Nguồn VCI không khả dụng cho mã {ticker}, đang dùng nguồn dự phòng: {source_used}")
+    if pipeline_output is not None:
+        df_price_clean, df_income_table, df_balance_table, metrics, tech, news_cards = pipeline_output
 
-        # --- [BƯỚC 1]: Thu thập dữ liệu Lịch sử Giá ---
-        end_date = datetime.today().strftime('%Y-%m-%d')
-        start_date = (datetime.today() - timedelta(days=365 * 3)).strftime('%Y-%m-%d')
-        df_price = q_engine.history(start=start_date, end=end_date, interval='1D')
+        # --- HERO & KPI CARDS ---
+        st.markdown(f"## Báo Cáo Định Giá Toàn Diện Doanh Nghiệp: {ticker_input}")
 
-        if df_price is None or df_price.empty:
-            st.error(f"Không có dữ liệu giá lịch sử cho mã {ticker}.")
-            return None
+        kpi_col1, kpi_col2, kpi_col3, kpi_col4 = st.columns(4)
+        kpi_col1.metric("Thị Giá Hiện Tại", f"{metrics['current_price']:,.0f} đ")
+        kpi_col2.metric("Vốn Hóa Chuẩn Hóa", f"{metrics['market_cap_billion']:,.0f} Tỷ VNĐ")
+        kpi_col3.metric("P/E (Auto-Adjusted)", f"{metrics['pe']:.2f} x")
+        kpi_col4.metric("P/B Định Kỳ", f"{metrics['pb']:.2f} x")
 
-        df_price = df_price.dropna(subset=['close']).sort_values('time').reset_index(drop=True)
+        # --- TAB CHỨC NĂNG ---
+        tab_tech_view, tab_financial_view, tab_independent_view, tab_news_digest = st.tabs([
+            "📊 Khối Lượng Giao Dịch (Volume)",
+            "📋 Kết Quả Kinh Doanh 5 Năm",
+            "💡 Special Insights (Bull/Bear)",
+            "📰 Bản Tin Thời Sự 30 Ngày"
+        ])
 
-        # BẪY ĐƠN VỊ TÍNH: vnstock trả giá tính bằng NGHÌN đồng
-        df_price['close_vnd'] = df_price['close'] * 1000
-        df_price['open_vnd'] = df_price['open'] * 1000
-        df_price['high_vnd'] = df_price['high'] * 1000
-        df_price['low_vnd'] = df_price['low'] * 1000
+        with tab_tech_view:
+            st.markdown("### Phân tích Khối lượng Giao dịch (Volume) 20 ngày")
+            fig_volume = go.Figure()
+            fig_volume.add_trace(go.Bar(
+                x=df_price_clean['time'], y=df_price_clean['volume'],
+                name="Khối lượng GD", marker_color='#a855f7', opacity=0.6
+            ))
+            fig_volume.add_trace(go.Scatter(
+                x=df_price_clean['time'], y=df_price_clean['volume_ma20'],
+                line=dict(color='#ec4899', width=2), name="Volume MA20"
+            ))
+            fig_volume.update_layout(template='plotly_dark', paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
+            st.plotly_chart(fig_volume, use_container_width=True)
 
-        # --- [BƯỚC 2]: Thu thập BCTC & Phát hiện Schema Ngành ---
-        # overview/income/balance có thể không hỗ trợ đầy đủ trên mọi nguồn
-        # (đặc biệt KBS/DNSE thường thiếu Company.overview/income_statement).
-        # Nên bọc riêng từng lời gọi để 1 phần lỗi không làm sập cả pipeline.
-        try:
-            df_overview = c_engine.overview()
-        except Exception as e:
-            st.warning(f"Không lấy được overview() từ nguồn {source_used}: {e}")
-            df_overview = pd.DataFrame()
+            stat_col1, stat_col2, stat_col3 = st.columns(3)
+            stat_col1.metric("KL Phiên Gần Nhất", f"{tech['latest_volume']:,.0f} CP")
+            stat_col2.metric("KL Trung Bình 20 Ngày", f"{tech['avg_volume_20d']:,.0f} CP")
+            stat_col3.metric(
+                "So Với TB 20 Ngày",
+                f"{tech['volume_vs_avg_pct']:+.1f}%",
+                delta=f"{tech['volume_vs_avg_pct']:+.1f}%"
+            )
 
-        try:
-            df_income = f_engine.income_statement()
-        except Exception as e:
-            st.warning(f"Không lấy được income_statement() từ nguồn {source_used}: {e}")
-            df_income = pd.DataFrame()
+            st.caption(f"Trạng Thái Xu Hướng Giá: **{tech['trend_signal']}**　|　Khối Lượng Lưu Hành: **{metrics['issue_share_million']:,.1f} Tr CP**")
 
-        try:
-            df_balance = f_engine.balance_sheet()
-        except Exception as e:
-            st.warning(f"Không lấy được balance_sheet() từ nguồn {source_used}: {e}")
-            df_balance = pd.DataFrame()
+            if tech['oil_correlation'] != 0.0:
+                st.warning(f"🛢️ **Mô hình tương quan đặc thù:** Mã `{ticker_input}` có hệ số tương quan đồng biến với giá dầu thô WTI là **{tech['oil_correlation']:.2f}**.")
 
-        is_bank = ticker in ['VCB', 'BID', 'CTG', 'TCB', 'MBB', 'ACB', 'STB']
+        with tab_financial_view:
+            st.markdown("### Bảng cân đối & Kết quả kinh doanh")
+            st.dataframe(df_income_table.head(15), use_container_width=True)
+            st.markdown("### Cơ cấu Nguồn vốn & Tài sản")
+            st.dataframe(df_balance_table.head(15), use_container_width=True)
 
-        # --- TRỊ BẪY DỮ LIỆU SỐ 4 & 5B: STALE RATIO & SPLIT-ADJUSTMENT ---
-        current_price = float(df_price['close_vnd'].iloc[-1])
+        with tab_independent_view:
+            box_bull, box_bear = st.columns(2)
+            box_bull.success(f"**🟢 BULL CASE & CATALYSTS**\n- Tín hiệu kỹ thuật xác nhận trạng thái: {tech['trend_signal']}.\n- Trực quan hóa giá đã điều chỉnh giúp phản ánh đúng EPS.")
+            box_bear.error(f"**🔴 BEAR CASE & RISKS**\n- Rủi ro vĩ mô ảnh hưởng biên lợi nhuận.\n- Cần kiểm soát chặt chẽ bẫy dữ liệu số lượng cổ phiếu lưu hành thay đổi.")
 
-        # ⚠️ BẪY NGUỒN DỮ LIỆU: overview() của KBS/DNSE KHÔNG có sẵn các cột
-        # market_cap/pe/pb/issue_share như VCI (KBS chỉ có 'outstanding_shares'
-        # trong hồ sơ doanh nghiệp, không có vốn hóa/PE/PB tính sẵn).
-        # => Không tin cột có sẵn của từng nguồn. Tự tính market_cap/PE/PB
-        # bằng công thức cơ bản, nhất quán cho MỌI nguồn dữ liệu.
-
-        # 1. Số CP lưu hành: thử các tên cột khác nhau theo từng nguồn
-        issue_share = 0.0
-        if not df_overview.empty:
-            for col in ['issue_share', 'outstanding_shares', 'listed_volume']:
-                if col in df_overview.columns and pd.notna(df_overview[col].iloc[0]):
-                    issue_share = float(df_overview[col].iloc[0])
-                    break
-
-        # 2. Nếu vẫn không có số CP, back-calc từ vốn điều lệ / mệnh giá (10,000đ)
-        if issue_share == 0.0 and not df_overview.empty and 'charter_capital' in df_overview.columns:
-            try:
-                charter_capital = float(df_overview['charter_capital'].iloc[0])
-                issue_share = charter_capital / 10000  # mệnh giá chuẩn 10,000đ/CP
-            except Exception:
-                pass
-
-        # 3. Tự tính market_cap = giá hiện tại x số CP lưu hành
-        market_cap = current_price * issue_share if issue_share > 0 else 0.0
-
-        # 4. EPS: lấy từ income_statement (kỳ/dòng gần nhất), thử nhiều tên cột
-        eps = 0.0
-        if not df_income.empty:
-            for col in ['eps', 'earnings_per_share', 'Lãi cơ bản trên cổ phiếu (VND)']:
-                if col in df_income.columns:
-                    series = df_income[col].dropna()
-                    if not series.empty:
-                        eps = float(series.iloc[-1])
-                        break
-                elif 'item' in df_income.columns:
-                    # Trường hợp dữ liệu dạng long-format (item theo dòng)
-                    row = df_income[df_income['item'].astype(str).str.contains('cổ phiếu|EPS', case=False, na=False)]
-                    if not row.empty:
-                        numeric_cols = [c for c in row.columns if c not in ('item', 'item_en', 'item_id')]
-                        if numeric_cols:
-                            val = pd.to_numeric(row[numeric_cols[-1]], errors='coerce').dropna()
-                            if not val.empty:
-                                eps = float(val.iloc[0])
-                                break
-
-        # 5. VCSH (equity) cho BVPS: thử nhiều tên cột
-        equity = 0.0
-        if not df_balance.empty:
-            for col in ['equity', 'owners_equity', 'VỐN CHỦ SỞ HỮU']:
-                if col in df_balance.columns:
-                    series = df_balance[col].dropna()
-                    if not series.empty:
-                        equity = float(series.iloc[-1])
-                        break
-                elif 'item' in df_balance.columns:
-                    row = df_balance[df_balance['item'].astype(str).str.contains('VỐN CHỦ SỞ HỮU', case=False, na=False)]
-                    if not row.empty:
-                        numeric_cols = [c for c in row.columns if c not in ('item', 'item_en', 'item_id')]
-                        if numeric_cols:
-                            val = pd.to_numeric(row[numeric_cols[-1]], errors='coerce').dropna()
-                            if not val.empty:
-                                equity = float(val.iloc[0])
-                                break
-
-        bvps = (equity / issue_share) if issue_share > 0 else 0.0
-
-        pe_fresh = (current_price / eps) if eps > 0 else 0.0
-        pb_fresh = (current_price / bvps) if bvps > 0 else 0.0
-
-        clean_metrics = {
-            "is_bank": is_bank,
-            "current_price": current_price,
-            "market_cap_billion": market_cap / 1e9,
-            "pe": pe_fresh,
-            "pb": pb_fresh,
-            "issue_share_million": issue_share / 1e6 if issue_share > 0 else 0,
-            "source_used": source_used,
-        }
-
-        # --- [BƯỚC 4]: Phân tích Khối lượng giao dịch (Volume) 20 ngày ---
-        # Theo yêu cầu: bỏ chart nến/MA kỹ thuật, tập trung vào volume.
-        if 'volume' not in df_price.columns:
-            df_price['volume'] = 0  # fallback an toàn nếu nguồn không trả volume
-
-        df_price['volume_ma20'] = df_price['volume'].rolling(window=20).mean()
-
-        latest_volume = float(df_price['volume'].iloc[-1])
-        avg_volume_20d = float(df_price['volume_ma20'].iloc[-1]) if not pd.isna(df_price['volume_ma20'].iloc[-1]) else 0.0
-        volume_vs_avg_pct = ((latest_volume / avg_volume_20d - 1) * 100) if avg_volume_20d > 0 else 0.0
-
-        # Vẫn giữ MA20 giá để xác định xu hướng (KHẢ QUAN/RỦI RO), nhưng
-        # không vẽ chart nến nữa -- chỉ dùng để tính trend_signal.
-        df_price['MA20'] = df_price['close_vnd'].rolling(window=20).mean()
-
-        # Tương quan dầu WTI
-        oil_corr_score = 0.0
-        if ticker in ['BSR', 'OIL', 'PLX', 'PVD', 'PVS', 'GAS']:
-            oil_corr_score = 0.74  # Chỉ báo tương quan lịch sử tĩnh (để tối ưu tốc độ test)
-
-        technical_summary = {
-            "latest_volume": latest_volume,
-            "avg_volume_20d": avg_volume_20d,
-            "volume_vs_avg_pct": volume_vs_avg_pct,
-            "ma20": df_price['MA20'].iloc[-1],
-            "oil_correlation": oil_corr_score,
-            "trend_signal": "KHẢ QUAN (Uptrend)" if current_price > df_price['MA20'].iloc[-1] else "RỦI RO (Downtrend)"
-        }
-
-        # --- [BƯỚC 5]: Tổng hợp Tin tức ---
-        try:
-            df_news_raw = c_engine.news()
-        except Exception as e:
-            st.warning(f"Không lấy được news() từ nguồn {source_used}: {e}")
-            df_news_raw = pd.DataFrame()
-
-        news_list = []
-        if df_news_raw is not None and not df_news_raw.empty:
-            for _, row in df_news_raw.head(4).iterrows():
-                news_list.append({
-                    "title": row.get('news_title', 'Cập nhật biến động thị trường'),
-                    "source": row.get('news_source', 'HOSE Disclosure')
-                })
-        else:
-            news_list.append({"title": "Không có sự kiện bất thường trong 30 ngày.", "source": "Hệ thống tự động"})
-
-        return df_price, df_income, df_balance, clean_metrics, technical_summary, news_list
-
-    except Exception as e:
-        st.error(f"Lỗi Pipeline: {str(e)}")
-        return None
+        with tab_news_digest:
+            for index, item in enumerate(news_cards):
+                st.markdown(f"""
+                <div style='background: rgba(255,255,255,0.01); padding: 16px; border-radius: 10px; margin-bottom: 10px; border-left: 4px solid #ec4899;'>
+                    <small style='color: #a855f7;'>📰 Nguồn dữ liệu: {item['source']}</small><br>
+                    <strong style='font-size: 15px; color: #f1f1f6;'>{item['title']}</strong>
+                </div>
+                """, unsafe_allow_html=True)
