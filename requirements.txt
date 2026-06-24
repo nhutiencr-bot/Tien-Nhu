@@ -1,5 +1,5 @@
-gspread
-google-auth
+streamlit
 pandas
-requests
-vnstock==0.2.9.2
+vnstock
+yfinance
+plotly
