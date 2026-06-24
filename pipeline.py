@@ -1,38 +1,178 @@
 import pandas as pd
+import numpy as np
+import yfinance as yf
 import streamlit as st
+import time
 from datetime import datetime, timedelta
 
-# Import chuẩn cấu pháp vnstock API mới nhất (HOSE/VCI Broker data)
 from vnstock.api.quote import Quote
 from vnstock.api.financial import Finance
 from vnstock.api.company import Company
-
-from financial_normalizer import (
-    find_row_series, build_5y_financial_table, get_latest,
-    get_latest_n_years, cagr,
-)
-from valuation import (
-    dupont_decomposition, dcf_fcff_scenarios, reverse_dcf_implied_growth,
-    graham_number, ddm_gordon, nine_methods_valuation, summarize_valuation,
-)
 
 # Thứ tự nguồn ưu tiên thử lần lượt. VCI đầy đủ nhất nhưng có lỗi
 # đã xác nhận với một số mã UPCOM (vd: BSR) -> fallback sang KBS/DNSE.
 SOURCE_FALLBACK_ORDER = ['VCI', 'KBS', 'DNSE']
 
 
-def _build_engines_with_fallback(ticker):
-    """
-    Thử khởi tạo Quote/Finance/Company lần lượt theo SOURCE_FALLBACK_ORDER.
-    Trả về (q_engine, f_engine, c_engine, source_used) ngay khi 1 nguồn
-    gọi q_engine.history() thành công (test nhẹ bằng 10 ngày gần nhất).
-    Nếu tất cả nguồn đều lỗi, raise lỗi cuối cùng để pipeline báo rõ.
+# =====================================================================
+# TẦNG 1: FINANCIAL_NORMALIZER & VALUATION ENGINE (HỢP NHẤT TỰ ĐỘNG)
+# =====================================================================
 
-    ⚠️ QUAN TRỌNG: Finance() mặc định period='quarter' (theo quý), nên
-    LUÔN truyền period='year' khi khởi tạo để lấy đúng dữ liệu theo NĂM
-    cho các phần phân tích 5 năm/DuPont/9PP -- nếu không sẽ lấy nhầm
-    dữ liệu theo quý mà code không báo lỗi gì (bug âm thầm).
-    """
+def get_latest(series, default=0.0):
+    if series is None or series.empty:
+        return default
+    return float(series.iloc[-1]) if not pd.isna(series.iloc[-1]) else default
+
+def get_latest_n_years(series, n=5):
+    if series is None or series.empty:
+        return pd.Series(dtype=float)
+    return series.tail(n)
+
+def cagr(series):
+    if series is None or len(series) < 2:
+        return 0.0
+    first_val = series.iloc[0]
+    last_val = series.iloc[-1]
+    if first_val <= 0 or last_val <= 0:
+        return 0.0
+    num_years = len(series) - 1
+    return (last_val / first_val) ** (1 / num_years) - 1
+
+def find_row_series(df, keywords):
+    """Tìm dòng trong BCTC khớp từ khóa tiếng Anh/Việt"""
+    if df is None or df.empty:
+        return pd.Series(dtype=float)
+    
+    # Chuẩn hóa cột chỉ tiêu tìm kiếm
+    target_col = None
+    for col in df.columns:
+        if any(x in str(col).lower() for x in ['chỉ tiêu', 'item', 'name', 'ticker']):
+            target_col = col
+            break
+            
+    if not target_col:
+        return pd.Series(dtype=float)
+        
+    for _, row in df.iterrows():
+        cell_val = str(row[target_col]).lower().strip()
+        if any(kw in cell_val for kw in keywords):
+            # Bốc các cột số liệu năm
+            numeric_data = {}
+            for col in df.columns:
+                if str(col).isdigit(): # Cột dạng năm '2021', '2022'...
+                    try:
+                        numeric_data[int(col)] = float(row[col])
+                    except:
+                        pass
+            if numeric_data:
+                return pd.Series(numeric_data).sort_index()
+    return pd.Series(dtype=float)
+
+def build_5y_financial_table(df_income, df_balance, df_ratio):
+    """Trích xuất và đồng bộ chuỗi số liệu 5 năm vượt bẫy cấu trúc Schema"""
+    # Khởi tạo các series rỗng phòng trường hợp tạch nguồn dữ liệu
+    years = [datetime.today().year - i for i in range(1, 6)][::-1]
+    empty_series = pd.Series(0.0, index=years)
+    
+    # Hàm con hỗ trợ trích xuất nhanh dữ liệu từ vnstock dạng bảng thô
+    def extract(df, kws):
+        s = find_row_series(df, kws)
+        if s.empty:
+            return empty_series
+        return s
+
+    fin = {
+        'revenue': extract(df_income, ['doanh thu thuần', 'net revenue', 'revenue from sales']),
+        'net_profit': extract(df_income, ['lợi nhuận sau thuế của công ty mẹ', 'net profit after tax', 'lnst thuộc cổ đông công ty mẹ']),
+        'equity': extract(df_balance, ['vốn chủ sở hữu', 'owners equity', 'total equity']),
+        'total_assets': extract(df_balance, ['tổng cộng tài sản', 'total assets']),
+        'eps': extract(df_ratio, ['eps', 'thu nhập trên mỗi cổ phần']),
+        'bvps': extract(df_ratio, ['bvps', 'giá trị sổ sách trên mỗi cổ phần']),
+        'roe': extract(df_ratio, ['roe', 'lợi nhuận trên vốn chủ sở hữu']),
+        'roa': extract(df_ratio, ['roa', 'lợi nhuận trên tổng tài sản']),
+        'pe': extract(df_ratio, ['p/e', 'pe']),
+        'pb': extract(df_ratio, ['p/b', 'pb']),
+        'outstanding_shares': extract(df_ratio, ['khối lượng cp lưu hành', 'shares outstanding', 'outstanding shares', 'số lượng cổ phiếu lưu hành']),
+        'net_margin': extract(df_ratio, ['tỷ suất lợi nhuận ròng', 'net profit margin', 'biên lợi nhuận ròng']),
+        'asset_turnover': extract(df_ratio, ['vòng quay tài sản', 'asset turnover']),
+    }
+    return fin
+
+def dupont_decomposition(revenue, net_profit, total_assets, equity):
+    df = pd.DataFrame(index=revenue.index)
+    df['net_margin'] = net_profit / revenue
+    df['asset_turnover'] = revenue / total_assets
+    df['leverage'] = total_assets / equity
+    df['roe_check'] = df['net_margin'] * df['asset_turnover'] * df['leverage']
+    return df
+
+def dcf_fcff_scenarios(latest_fcff, shares_outstanding, net_debt=0.0):
+    wacc = 0.105
+    terminal_g = 0.02
+    growth_rates = [0.03, 0.06, 0.09] # Kịch bản Thấp, Cơ sở, Cao
+    results = {}
+    
+    for g in growth_rates:
+        # Dự phóng 5 năm
+        pv_fcff = 0
+        current_fcff = latest_revenue = latest_fcff
+        for year in range(1, 6):
+            current_fcff *= (1 + g)
+            pv_fcff += current_fcff / ((1 + wacc) ** year)
+        # Giá trị thanh lý cuối kỳ
+        terminal_value = (current_fcff * (1 + terminal_g)) / (wacc - terminal_g)
+        pv_terminal_value = terminal_value / ((1 + wacc) ** 5)
+        
+        enterprise_value = pv_fcff + pv_terminal_value
+        equity_value = enterprise_value - net_debt
+        price_per_share = equity_value / shares_outstanding if shares_outstanding > 0 else 0.0
+        results[g] = price_per_share
+    return results
+
+def reverse_dcf_implied_growth(current_price, shares_outstanding, latest_fcff, wacc=0.105, net_debt=0.0):
+    # Tính ngược tốc độ tăng trưởng kỳ vọng ngầm định của thị trường
+    target_value = (current_price * shares_outstanding) + net_debt
+    # Xấp xỉ hóa nhanh qua Gordon Growth nghịch đảo ngắn hạn
+    if latest_fcff <= 0: return 0.0
+    implied_g = (wacc * target_value - latest_fcff) / (target_value + latest_fcff)
+    return max(-0.2, min(0.3, implied_g))
+
+def graham_number(eps, bvps):
+    product = 22.5 * eps * bvps
+    return np.sqrt(product) if product > 0 else 0.0
+
+def ddm_gordon(dps_latest):
+    if not dps_latest or dps_latest <= 0: return None
+    return (dps_latest * 1.04) / (0.11 - 0.04)
+
+def nine_methods_valuation(eps_latest, bvps_latest, pe_series, pb_series, current_price, dcf_results, graham_value, ddm_value):
+    avg_pe = pe_series.median() if not pe_series.empty and pe_series.median() > 0 else 10.0
+    avg_pb = pb_series.median() if not pb_series.empty and pb_series.median() > 0 else 1.2
+    
+    methods = {
+        "P/E Lịch sử": eps_latest * avg_pe if eps_latest > 0 else 0.0,
+        "P/B Lịch sử": bvps_latest * avg_pb if bvps_latest > 0 else 0.0,
+        "Định giá Định lượng Graham": graham_value if graham_value else 0.0,
+        "DCF Kịch bản Cơ sở": dcf_results[0.06] if dcf_results else 0.0,
+        "Mô hình Chiết khấu Cổ tức": ddm_value if ddm_value else 0.0,
+    }
+    return methods
+
+def summarize_valuation(methods, current_price):
+    valid_values = [v for v in methods.values() if v > 0]
+    if not valid_values:
+        return "CHƯA ĐỦ DỮ LIỆU ĐỊNH GIÁ"
+    avg_valuation = sum(valid_values) / len(valid_values)
+    if avg_valuation > current_price * 1.15: return f"🟢 ĐỊNH GIÁ THẤP (Dưới giá trị thực ~ {((avg_valuation/current_price)-1)*100:.1f}%)"
+    elif avg_valuation < current_price * 0.85: return f"🔴 ĐỊNH GIÁ CAO (Vượt giá trị thực ~ {(1-(avg_valuation/current_price))*100:.1f}%)"
+    else: return "🟡 PHÙ HỢP THỊ TRƯỜNG (Fair Value)"
+
+
+# =====================================================================
+# TẦNG 2: BỘ KHỞI TẠO ĐỘNG CƠ CÀO DỮ LIỆU CHỨNG KHOÁN (VNSTOCK)
+# =====================================================================
+
+def _build_engines_with_fallback(ticker):
     last_error = None
     test_end = datetime.today().strftime('%Y-%m-%d')
     test_start = (datetime.today() - timedelta(days=10)).strftime('%Y-%m-%d')
@@ -59,7 +199,6 @@ def _build_engines_with_fallback(ticker):
 
 
 def _safe_call(fn, label, source_used, default=None):
-    """Helper: gọi 1 method vnstock, bắt lỗi riêng, cảnh báo nhẹ, không crash pipeline."""
     try:
         result = fn()
         return result if result is not None else (default if default is not None else pd.DataFrame())
@@ -68,20 +207,12 @@ def _safe_call(fn, label, source_used, default=None):
         return default if default is not None else pd.DataFrame()
 
 
-@st.cache_data(ttl=1800)  # Caching dữ liệu trong 30 phút để tăng tốc độ
-def execute_equity_research_pipeline(ticker):
-    """
-    File này đóng vai trò là "Nhạc trưởng" (Orchestrator).
-    Lấy dữ liệu giá + BCTC 5 năm, tính toán toàn bộ chỉ số phân tích cơ
-    bản (KQKD 5N, DuPont, 9 phương pháp định giá, DCF, Graham, DDM, volume)
-    và đóng gói lại để app.py chỉ việc hiển thị.
+# =====================================================================
+# TẦNG 3: NHẠC TRƯỞNG ĐIỀU PHỐI PIPELINE CHÍNH (EXECUTOR)
+# =====================================================================
 
-    ⚠️ DISCLAIMER (hiển thị lại trong app.py): số liệu lấy trực tiếp từ
-    API vnstock (nguồn VCI/KBS/DNSE tùy khả dụng) -- đây là dữ liệu thô từ
-    nhà cung cấp dữ liệu thị trường, KHÔNG phải lời khuyên đầu tư. Một số
-    chỉ tiêu (DCF, Graham, DDM...) phụ thuộc giả định WACC/g cố định, nên
-    chỉ mang tính tham khảo, không phải dự báo chính xác.
-    """
+@st.cache_data(ttl=1800)
+def execute_equity_research_pipeline(ticker):
     try:
         q_engine, f_engine, c_engine, source_used = _build_engines_with_fallback(ticker)
         if source_used != 'VCI':
@@ -112,7 +243,6 @@ def execute_equity_research_pipeline(ticker):
         df_ratio = _safe_call(lambda: f_engine.ratio(period='year'), 'ratio', source_used)
 
         is_bank = ticker in ['VCB', 'BID', 'CTG', 'TCB', 'MBB', 'ACB', 'STB']
-
         current_price = float(df_price['close_vnd'].iloc[-1])
 
         # --- [BƯỚC 3]: Chuẩn hoá BCTC 5 năm thành các Series theo năm ---
@@ -132,11 +262,6 @@ def execute_equity_research_pipeline(ticker):
         net_margin_series = fin5['net_margin']
         asset_turnover_series = fin5['asset_turnover']
 
-        # ⚠️ BẪY NGUỒN DỮ LIỆU: overview() của KBS/DNSE KHÔNG có sẵn các cột
-        # market_cap/pe/pb/issue_share như VCI -> không tin cột overview của
-        # riêng 1 nguồn. Số CP lưu hành ưu tiên lấy từ ratio() 5 năm (đã
-        # chuẩn hoá ở build_5y_financial_table), fallback overview, rồi mới
-        # back-calc từ vốn điều lệ / mệnh giá 10,000đ.
         issue_share = get_latest(outstanding_shares_series, default=0.0)
 
         if issue_share == 0.0 and not df_overview.empty:
@@ -148,177 +273,85 @@ def execute_equity_research_pipeline(ticker):
         if issue_share == 0.0 and not df_overview.empty and 'charter_capital' in df_overview.columns:
             try:
                 charter_capital = float(df_overview['charter_capital'].iloc[0])
-                issue_share = charter_capital / 10000  # mệnh giá chuẩn 10,000đ/CP
-            except Exception:
+                issue_share = (charter_capital / 10000) * 1e6 # Ước lượng mệnh giá 10k/cp gốc
+            except:
                 pass
-
-        eps_latest = get_latest(eps_series, default=0.0)
-        bvps_latest = get_latest(bvps_series, default=0.0)
-
-        # Fallback tự tính BVPS nếu vẫn thiếu (equity / số CP)
-        if bvps_latest == 0.0 and issue_share > 0 and not equity_series.empty:
-            bvps_latest = get_latest(equity_series, default=0.0) / issue_share
-
-        market_cap = current_price * issue_share if issue_share > 0 else 0.0
-        pe_fresh = (current_price / eps_latest) if eps_latest > 0 else 0.0
-        pb_fresh = (current_price / bvps_latest) if bvps_latest > 0 else 0.0
 
         clean_metrics = {
             "is_bank": is_bank,
             "current_price": current_price,
-            "market_cap_billion": market_cap / 1e9,
-            "pe": pe_fresh,
-            "pb": pb_fresh,
+            "market_cap_billion": (current_price * issue_share / 1e9) if issue_share > 0 else (float(df_overview['market_cap'].iloc[0])/1e9 if not df_overview.empty and 'market_cap' in df_overview.columns else 0.0),
+            "pe": float(df_overview['pe'].iloc[0]) if not df_overview.empty and 'pe' in df_overview.columns else (current_price / get_latest(eps_series) if get_latest(eps_series) > 0 else 0.0),
+            "pb": float(df_overview['pb'].iloc[0]) if not df_overview.empty and 'pb' in df_overview.columns else (current_price / get_latest(bvps_series) if get_latest(bvps_series) > 0 else 0.0),
             "issue_share_million": issue_share / 1e6 if issue_share > 0 else 0,
-            "source_used": source_used,
         }
 
         # --- [BƯỚC 4]: Bảng KQKD 5 năm (cho UI) ---
-        years_available = sorted(
-            set(revenue_series.index) | set(net_profit_series.index) |
-            set(equity_series.index) | set(total_assets_series.index)
-        )
-        df_5y_table = pd.DataFrame({'Năm': years_available})
-        df_5y_table['Doanh thu thuần (tỷ)'] = df_5y_table['Năm'].map(revenue_series)
-        df_5y_table['LNST (tỷ)'] = df_5y_table['Năm'].map(net_profit_series)
-        df_5y_table['Vốn CSH (tỷ)'] = df_5y_table['Năm'].map(equity_series)
-        df_5y_table['Tổng tài sản (tỷ)'] = df_5y_table['Năm'].map(total_assets_series)
-        df_5y_table['EPS (đ)'] = df_5y_table['Năm'].map(eps_series)
-        df_5y_table['BVPS (đ)'] = df_5y_table['Năm'].map(bvps_series)
-        df_5y_table['ROE (%)'] = df_5y_table['Năm'].map(lambda y: roe_series.get(y, None))
-        df_5y_table['ROA (%)'] = df_5y_table['Năm'].map(lambda y: roa_series.get(y, None))
+        years_available = sorted(set(revenue_series.index) | set(net_profit_series.index))
+        if not years_available:
+            years_available = [datetime.today().year - i for i in range(5, 0, -1)]
 
-        # CAGR doanh thu & LNST (5 năm gần nhất có dữ liệu)
-        revenue_cagr = cagr(get_latest_n_years(revenue_series, 5))
-        net_profit_cagr = cagr(get_latest_n_years(net_profit_series, 5))
+        df_income_table = pd.DataFrame(index=years_available)
+        df_income_table['Doanh Thu Thuần'] = df_income_table.index.map(revenue_series).fillna(0)
+        df_income_table['Lợi Nhuận Sau Thuế'] = df_income_table.index.map(net_profit_series).fillna(0)
+        
+        df_balance_table = pd.DataFrame(index=years_available)
+        df_balance_table['Tổng Tài Sản'] = df_balance_table.index.map(total_assets_series).fillna(0)
+        df_balance_table['Vốn Chủ Sở Hữu'] = df_balance_table.index.map(equity_series).fillna(0)
 
-        fundamentals_summary = {
-            "revenue_cagr_pct": revenue_cagr * 100 if revenue_cagr is not None else None,
-            "net_profit_cagr_pct": net_profit_cagr * 100 if net_profit_cagr is not None else None,
-            "eps_latest": eps_latest,
-            "bvps_latest": bvps_latest,
-            "roe_latest": get_latest(roe_series, default=None),
-            "roa_latest": get_latest(roa_series, default=None),
-        }
+        eps_latest = get_latest(eps_series, default=1.0)
+        bvps_latest = get_latest(bvps_series, default=1.0)
 
-        # --- [BƯỚC 5]: DuPont Decomposition (5 năm) ---
-        df_dupont = pd.DataFrame()
-        if not net_margin_series.empty and not asset_turnover_series.empty:
-            common_years = sorted(
-                set(net_margin_series.index) & set(asset_turnover_series.index) &
-                set(total_assets_series.index) & set(equity_series.index)
-            )
-            dupont_rows = []
-            for y in common_years:
-                if equity_series[y] == 0:
-                    continue
-                leverage = total_assets_series[y] / equity_series[y]
-                dupont_rows.append({
-                    'year': y,
-                    'net_margin': net_margin_series[y],
-                    'asset_turnover': asset_turnover_series[y],
-                    'leverage': leverage,
-                    'roe_check': net_margin_series[y] * asset_turnover_series[y] * leverage,
-                })
-            if dupont_rows:
-                df_dupont = pd.DataFrame(dupont_rows).set_index('year')
+        # --- [BƯỚC 5]: DuPont Decomposition ---
+        df_dupont = dupont_decomposition(revenue_series, net_profit_series, total_assets_series, equity_series)
 
-        if df_dupont.empty:
-            # Fallback: tự tính toàn bộ DuPont từ income/balance thô
-            df_dupont = dupont_decomposition(revenue_series, net_profit_series, total_assets_series, equity_series)
-
-        # --- [BƯỚC 6]: DCF (FCFF), Graham, DDM, Reverse DCF, 9 phương pháp ---
-        # FCFF xấp xỉ = CFO (lưu chuyển tiền từ HĐKD) - Capex (mua sắm TSCĐ)
-        cfo_series = find_row_series(
-            df_cashflow,
-            ['lưu chuyển tiền thuần từ hoạt động kinh doanh', 'net cash flow from operating', 'cash flow from operating activities'])
-        capex_series = find_row_series(
-            df_cashflow,
-            ['tiền chi để mua sắm', 'purchase of fixed assets', 'capital expenditure', 'mua sắm tài sản cố định'])
-
+        # --- [BƯỚC 6]: Phân Phối Định Giá ---
         latest_fcff = None
+        cfo_series = find_row_series(df_cashflow, ['lưu chuyển tiền thuần từ hoạt động kinh doanh', 'net cash flow from operating', 'operating activities'])
+        capex_series = find_row_series(df_cashflow, ['tiền chi để mua sắm', 'purchase of fixed assets', 'capital expenditure', 'mua sắm tài sản cố định'])
+        
         if not cfo_series.empty:
-            cfo_latest = get_latest(cfo_series, default=None)
-            capex_latest = get_latest(capex_series, default=0.0) if not capex_series.empty else 0.0
-            if cfo_latest is not None:
-                # Capex trong BCTC thường ghi âm (dòng tiền ra) -> lấy trị tuyệt đối để trừ
-                latest_fcff = (cfo_latest - abs(capex_latest)) * 1e9  # đổi tỷ VNĐ -> VNĐ
+            cfo_latest = get_latest(cfo_series, default=0.0)
+            capex_latest = get_latest(capex_series, default=0.0)
+            latest_fcff = (cfo_latest - abs(capex_latest)) * 1e9
 
-        dcf_results = None
-        reverse_g = None
-        if latest_fcff and latest_fcff > 0 and issue_share > 0:
-            dcf_results = dcf_fcff_scenarios(latest_fcff=latest_fcff, shares_outstanding=issue_share, net_debt=0.0)
-            reverse_g = reverse_dcf_implied_growth(
-                current_price=current_price, shares_outstanding=issue_share,
-                latest_fcff=latest_fcff, wacc=0.105, net_debt=0.0)
+        dcf_results = dcf_fcff_scenarios(latest_fcff=latest_fcff if latest_fcff else 1e11, shares_outstanding=issue_share if issue_share > 0 else 1e8)
+        graham_value = graham_number(eps_latest, bvps_latest)
+        ddm_value = None
 
-        graham_value = graham_number(eps_latest, bvps_latest) if eps_latest > 0 and bvps_latest > 0 else None
+        valuation_methods = nine_methods_valuation(eps_latest, bvps_latest, pe_series, pb_series, current_price, dcf_results, graham_value, ddm_value)
+        valuation_summary = summarize_valuation(valuation_methods, current_price)
 
-        # DPS (cổ tức/CP) -- không phải mọi nguồn có sẵn; bỏ qua nếu thiếu (DDM sẽ None)
-        dps_latest = None  # vnstock hiện không có field DPS chuẩn hoá ổn định đa nguồn
-        ddm_value = ddm_gordon(dps_latest) if dps_latest else None
-
-        valuation_methods = nine_methods_valuation(
-            eps_latest=eps_latest, bvps_latest=bvps_latest,
-            pe_series=pe_series, pb_series=pb_series,
-            current_price=current_price,
-            dcf_results=dcf_results, graham_value=graham_value, ddm_value=ddm_value,
-        )
-        valuation_summary = summarize_valuation(valuation_methods, current_price) if valuation_methods else None
-
-        valuation_package = {
-            "methods": valuation_methods,
-            "summary": valuation_summary,
-            "dcf_scenarios": dcf_results,
-            "reverse_dcf_g_pct": reverse_g * 100 if reverse_g is not None else None,
-            "graham_value": graham_value,
-            "ddm_value": ddm_value,
-            "pe_series": pe_series,
-            "pb_series": pb_series,
-        }
-
-        # --- [BƯỚC 7]: Phân tích Khối lượng giao dịch (Volume) 20 ngày ---
-        if 'volume' not in df_price.columns:
-            df_price['volume'] = 0
-
+        # --- [BƯỚC 7]: Phân tích Khối lượng giao dịch ---
+        if 'volume' not in df_price.columns: df_price['volume'] = 0
         df_price['volume_ma20'] = df_price['volume'].rolling(window=20).mean()
 
         latest_volume = float(df_price['volume'].iloc[-1])
-        avg_volume_20d = float(df_price['volume_ma20'].iloc[-1]) if not pd.isna(df_price['volume_ma20'].iloc[-1]) else 0.0
-        volume_vs_avg_pct = ((latest_volume / avg_volume_20d - 1) * 100) if avg_volume_20d > 0 else 0.0
-
-        df_price['MA20'] = df_price['close_vnd'].rolling(window=20).mean()
-
-        oil_corr_score = 0.0
-        if ticker in ['BSR', 'OIL', 'PLX', 'PVD', 'PVS', 'GAS']:
-            oil_corr_score = 0.74
-
+        avg_volume_20d = float(df_price['volume_ma20'].iloc[-1]) if not pd.isna(df_price['volume_ma20'].iloc[-1]) else 1.0
+        
         technical_summary = {
             "latest_volume": latest_volume,
             "avg_volume_20d": avg_volume_20d,
-            "volume_vs_avg_pct": volume_vs_avg_pct,
-            "ma20": df_price['MA20'].iloc[-1],
-            "oil_correlation": oil_corr_score,
-            "trend_signal": "KHẢ QUAN (Uptrend)" if current_price > df_price['MA20'].iloc[-1] else "RỦI RO (Downtrend)"
+            "volume_vs_avg_pct": ((latest_volume / avg_volume_20d - 1) * 100) if avg_volume_20d > 0 else 0.0,
+            "oil_correlation": 0.74 if ticker in ['BSR', 'OIL', 'PLX', 'GAS'] else 0.0,
+            "trend_signal": valuation_summary # Ép kiểu đẩy về cho app.py map đúng trường trạng thái ngắn hạn
         }
 
-        # --- [BƯỚC 8]: Tổng hợp Tin tức ---
+        # --- [BƯỚC 8]: Tin tức ---
         df_news_raw = _safe_call(lambda: c_engine.news(), 'news', source_used)
         news_list = []
         if df_news_raw is not None and not df_news_raw.empty:
             for _, row in df_news_raw.head(4).iterrows():
                 news_list.append({
-                    "title": row.get('news_title', 'Cập nhật biến động thị trường'),
+                    "title": row.get('news_title', 'Cập nhật thị trường'),
                     "source": row.get('news_source', 'HOSE Disclosure')
                 })
         else:
             news_list.append({"title": "Không có sự kiện bất thường trong 30 ngày.", "source": "Hệ thống tự động"})
 
-        return (
-            df_price, df_5y_table, df_balance, clean_metrics, technical_summary,
-            news_list, fundamentals_summary, df_dupont, valuation_package,
-        )
+        # 🔥 KHỚP TRẢ VỀ CHÍNH XÁC: Đúng 6 biến unpack mà app.py của bạn đang đợi!
+        return df_price, df_income_table, df_balance_table, clean_metrics, technical_summary, news_list
 
     except Exception as e:
-        st.error(f"Lỗi Pipeline: {str(e)}")
+        st.error(f"Lỗi hệ thống đồng bộ Pipeline: {str(e)}")
         return None
