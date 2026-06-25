@@ -162,9 +162,16 @@ if ticker_input:
                 fig_margin.update_layout(template='plotly_dark', paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
                 st.plotly_chart(fig_margin, use_container_width=True)
 
-        if not df_5y_table.empty: # Đảm bảo chữ 'if' này bằng lề với chữ 'else' bên dưới
+        if not df_5y_table.empty:
             st.markdown("### Bảng Tổng Hợp Tài Chính 5 Năm")
-            df_display = df_5y_table.set_index('Năm').T
+            # ... toàn bộ code xử lý bảng ...
+            st.dataframe(styled_df, use_container_width=True)
+
+        else:
+            st.warning("Không có đủ dữ liệu BCTC 5 năm cho mã này từ nguồn hiện tại.")
+
+    with tab_valuation:   # <-- cùng cấp indent với 'if', không thụt vào trong
+        ...
             
             # =========================================================
             # PHẦN 1: TÍNH CAGR (TỐC ĐỘ TĂNG TRƯỞNG KÉP HÀNG NĂM)
