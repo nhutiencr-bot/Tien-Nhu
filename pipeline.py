@@ -133,13 +133,11 @@ def execute_equity_research_pipeline(ticker):
         outstanding_shares_series = fin5['outstanding_shares']
         net_margin_series = fin5['net_margin']
        asset_turnover_series = fin5['asset_turnover']
-
         # DEBUG - xóa sau khi fix
         st.write("=== revenue_series gốc ===", revenue_series)
         st.write("=== net_profit_series gốc ===", net_profit_series)
         st.write("=== equity_series gốc ===", equity_series)
         st.write("=== total_assets_series gốc ===", total_assets_series)
-
         # ⚠️ BẪY NGUỒN DỮ LIỆU ...
         issue_share = get_latest(outstanding_shares_series, default=0.0)
 
