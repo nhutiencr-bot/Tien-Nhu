@@ -106,74 +106,19 @@ def build_5y_financial_table(df_income, df_balance, df_ratio=None):
     # --- Từ balance_sheet ---
     data['equity'] = find_row_series(
         df_balance,
-        ['vốn chủ sở hữu', "owner's equity", 'owners equity', 'total equity'],
-        exclude_keywords=['vốn điều lệ', 'charter'])
+        [
+            'vốn chủ sở hữu', "owner's equity", 'owners equity', 'total equity',
+            'equity', 'vốn csh', 'vcsh', 'shareholders equity',
+            'stockholders equity', 'net assets', 'book value',
+            'total stockholders', 'total shareholders'
+        ],
+        exclude_keywords=['vốn điều lệ', 'charter', 'minority', 'thiểu số'])
+
     data['total_assets'] = find_row_series(
-        df_balance, ['tổng cộng tài sản', 'total assets', 'tổng tài sản'])
-
-    # --- Từ ratio() nếu có (ưu tiên vì đã tính sẵn, ít lỗi hơn tự tính) ---
-    if df_ratio is not None and not df_ratio.empty:
-        data['eps'] = find_row_series(df_ratio, ['eps', 'earning per share', 'earnings per share'])
-        data['bvps'] = find_row_series(df_ratio, ['book value per share', 'bvps'])
-        data['roe'] = find_row_series(df_ratio, ['roe'])
-        data['roa'] = find_row_series(df_ratio, ['roa'])
-        data['pe'] = find_row_series(df_ratio, ['p/e', 'pe ratio', ' pe '])
-        data['pb'] = find_row_series(df_ratio, ['p/b', 'pb ratio', ' pb '])
-        data['market_cap'] = find_row_series(df_ratio, ['market cap', 'vốn hóa'])
-        data['outstanding_shares'] = find_row_series(df_ratio, ['outstanding shares', 'số cổ phiếu lưu hành', 'số lượng cổ phiếu'])
-        data['ev_ebitda'] = find_row_series(df_ratio, ['ev/ebitda', 'ev to ebitda'])
-        data['p_cf'] = find_row_series(df_ratio, ['price to cash flow', 'p/cf'])
-        data['net_margin'] = find_row_series(df_ratio, ['net margin', 'after tax profit margin', 'biên lợi nhuận sau thuế'])
-        data['asset_turnover'] = find_row_series(df_ratio, ['asset turnover', 'vòng quay tài sản', 'vòng quay tổng tài sản'])
-    else:
-        for k in ['eps', 'bvps', 'roe', 'roa', 'pe', 'pb', 'market_cap',
-                  'outstanding_shares', 'ev_ebitda', 'p_cf', 'net_margin', 'asset_turnover']:
-            data[k] = pd.Series(dtype=float)
-
-    # Nếu ratio() không có EPS/BVPS, fallback dùng EPS từ income_statement
-    # và tự tính BVPS = equity / outstanding_shares (nếu có outstanding_shares)
-    if data['eps'].empty and not data['eps_income_stmt'].empty:
-        data['eps'] = data['eps_income_stmt']
-
-    if data['bvps'].empty and not data['equity'].empty and not data['outstanding_shares'].empty:
-        common_years = data['equity'].index.intersection(data['outstanding_shares'].index)
-        if len(common_years) > 0:
-            data['bvps'] = (data['equity'].loc[common_years] / data['outstanding_shares'].loc[common_years])
-
-    return data
-
-
-def get_latest(series: pd.Series, default=0.0):
-    """Lấy giá trị năm gần nhất của 1 Series (đã sort theo năm), an toàn nếu rỗng."""
-    if series is None or series.empty:
-        return default
-    return float(series.iloc[-1])
-
-
-def get_latest_n_years(series: pd.Series, n=5):
-    """Lấy n năm gần nhất của Series (đã sort theo năm tăng dần)."""
-    if series is None or series.empty:
-        return series
-    return series.iloc[-n:]
-
-
-def cagr(series: pd.Series, n_years=None):
-    """
-    Tính CAGR (Compound Annual Growth Rate) từ giá trị đầu đến giá trị
-    cuối của Series. n_years: số năm giữa 2 mốc; nếu None, tự tính từ
-    số lượng điểm dữ liệu - 1.
-    Trả về None nếu không tính được (thiếu data, giá trị đầu <= 0...).
-    """
-    if series is None or len(series.dropna()) < 2:
-        return None
-    s = series.dropna()
-    start_val, end_val = float(s.iloc[0]), float(s.iloc[-1])
-    if start_val <= 0:
-        return None
-    periods = n_years if n_years else (len(s) - 1)
-    if periods <= 0:
-        return None
-    try:
-        return (end_val / start_val) ** (1 / periods) - 1
-    except Exception:
-        return None
+        df_balance,
+        [
+            'tổng cộng tài sản', 'total assets', 'tổng tài sản',
+            'assets', 'tổng cộng nguồn vốn', 'total nguồn vốn',
+            'tổng nguồn vốn', 'total liabilities and equity',
+            'total liabilities and stockholders'
+        ])
