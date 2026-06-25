@@ -162,7 +162,7 @@ if ticker_input:
                 fig_margin.update_layout(template='plotly_dark', paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
                 st.plotly_chart(fig_margin, use_container_width=True)
 
-                # ... (các đoạn code check dữ liệu if phía trên)
+                if dk_bctc_5_nam: # Đảm bảo chữ 'if' này bằng lề với chữ 'else' bên dưới
             st.markdown("### Bảng Tổng Hợp Tài Chính 5 Năm")
             df_display = df_5y_table.set_index('Năm').T
             
@@ -172,26 +172,26 @@ if ticker_input:
                 if len(years) > 1:
                     first_year = years[0]
                     last_year = years[-1]
-                    n_periods = len(years) - 1 # Khoảng cách số năm (Ví dụ: 5 năm là 4 thời kỳ)
+                    n_periods = len(years) - 1 # Khoảng cách số năm
                     
                     cagr_list = []
                     for index, row in df_display.iterrows():
                         start_val = row[first_year]
                         end_val = row[last_year]
                         
-                        # Chỉ tính được CAGR nếu giá trị năm đầu là số dương (để tránh lỗi toán học)
+                        # Chỉ tính được CAGR nếu giá trị năm đầu là số dương
                         if pd.notna(start_val) and pd.notna(end_val) and start_val > 0:
                             cagr = ((end_val / start_val) ** (1 / n_periods)) - 1
-                            cagr_list.append(f"{cagr * 100:.2f}%") # Format ra phần trăm
+                            cagr_list.append(f"{cagr * 100:.2f}%")
                         else:
-                            cagr_list.append("-") # Nếu bị âm hoặc thiếu dữ liệu thì gạch ngang
+                            cagr_list.append("-")
                             
                     # Thêm cột CAGR vào cuối bảng hiển thị
                     df_display['CAGR'] = cagr_list
             except Exception as e:
                 pass # Bỏ qua bước tính nếu cấu trúc bảng bị lỗi
             
-            # [ĐÃ SỬA] Cập nhật cú pháp mới của Streamlit để tránh lỗi vàng trong Log
+            # [ĐÃ SỬA] Cập nhật cú pháp mới của Streamlit
             st.dataframe(df_display, width='stretch')
         else:
             st.warning("Không có đủ dữ liệu BCTC 5 năm cho mã này từ nguồn hiện tại.")
