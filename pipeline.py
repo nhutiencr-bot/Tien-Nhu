@@ -132,6 +132,26 @@ def execute_equity_research_pipeline(ticker):
         net_margin_series = fin5['net_margin']
         asset_turnover_series = fin5['asset_turnover']
 
+        # ⚠️ BẪY 6 — VỐN HÓA SAI DO SỐ CP CŨ:
+        # outstanding_shares/market_cap theo NĂM TÀI CHÍNH (vd '2025') chỉ
+        # phản ánh số CP tại thời điểm BÁO CÁO gần nhất, có thể đã CŨ hơn
+        # số CP THỰC TẾ HIỆN TẠI nếu công ty mới phát hành thêm/chia cổ tức
+        # CP/ESOP sau đó. => Ưu tiên lấy market_cap_series_raw (nếu ratio()
+        # có sẵn field market_cap) làm nguồn chính, vì nhà cung cấp dữ liệu
+        # thường cập nhật field này theo số CP mới nhất thực tế, đáng tin
+        # cậy hơn việc tự nhân giá x số CP của kỳ báo cáo cũ.
+        market_cap_series_raw = fin5.get('market_cap', pd.Series(dtype=float))
+        market_cap_direct = get_latest(market_cap_series_raw, default=0.0)
+
+        # Sanity check market_cap_direct: số CP ngụ ý (market_cap / giá)
+        # phải nằm trong khoảng hợp lý cho 1 doanh nghiệp niêm yết VN
+        # (vài triệu đến vài chục tỷ CP). Nếu vô lý -> field market_cap
+        # của nguồn này không đáng tin (vd lỗi đơn vị/null giả) -> bỏ qua.
+        if market_cap_direct > 0 and current_price > 0:
+            implied_shares_check = market_cap_direct / current_price
+            if not (1_000_000 <= implied_shares_check <= 50_000_000_000):
+                market_cap_direct = 0.0
+
         # ⚠️ BẪY NGUỒN DỮ LIỆU: overview() của KBS/DNSE KHÔNG có sẵn các cột
         # market_cap/pe/pb/issue_share như VCI -> không tin cột overview của
         # riêng 1 nguồn. Số CP lưu hành ưu tiên lấy từ ratio() 5 năm (đã
@@ -151,6 +171,20 @@ def execute_equity_research_pipeline(ticker):
                 issue_share = charter_capital / 10000  # mệnh giá chuẩn 10,000đ/CP
             except Exception:
                 pass
+
+        # Sanity-check chéo: nếu có cả market_cap trực tiếp VÀ issue_share,
+        # nhưng market_cap_direct / current_price lệch > 20% so với
+        # issue_share -> dấu hiệu issue_share đang dùng số CP cũ (vd trước
+        # 1 lần phát hành thêm/chia cổ tức CP) -> ưu tiên suy ra issue_share
+        # MỚI từ market_cap_direct (đáng tin hơn) thay vì giữ issue_share cũ.
+        if market_cap_direct > 0 and current_price > 0:
+            implied_shares_from_cap = market_cap_direct / current_price
+            if issue_share > 0:
+                diff_pct = abs(implied_shares_from_cap - issue_share) / issue_share
+                if diff_pct > 0.20:
+                    issue_share = implied_shares_from_cap
+            else:
+                issue_share = implied_shares_from_cap
 
         eps_latest = get_latest(eps_series, default=0.0)
         bvps_latest = get_latest(bvps_series, default=0.0)
@@ -175,7 +209,14 @@ def execute_equity_research_pipeline(ticker):
         roe_series = _normalize_pct(roe_series)
         roa_series = _normalize_pct(roa_series)
 
-        market_cap = current_price * issue_share if issue_share > 0 else 0.0
+        # ⚠️ BẪY 6 (tiếp): ưu tiên market_cap LẤY TRỰC TIẾP từ ratio() khi
+        # có (số CP nhà cung cấp track mới nhất), chỉ tự tính giá x số CP
+        # làm phương án dự phòng khi field market_cap không tồn tại.
+        if market_cap_direct > 0:
+            market_cap = market_cap_direct
+        else:
+            market_cap = current_price * issue_share if issue_share > 0 else 0.0
+
         pe_fresh = (current_price / eps_latest) if eps_latest > 0 else 0.0
         pb_fresh = (current_price / bvps_latest) if bvps_latest > 0 else 0.0
 
