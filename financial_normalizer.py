@@ -1,13 +1,5 @@
 """
 financial_normalizer.py
-------------------------
-vnstock (cả VCI và KBS) trả income_statement()/balance_sheet()/ratio() theo
-format: mỗi DÒNG là 1 chỉ tiêu (cột 'item'/'item_en'/'item_id'), mỗi CỘT
-còn lại là 1 NĂM (ví dụ '2021', '2022', ..., '2025').
-
-Module này dò đúng dòng theo từ khoá, rồi trả ra 1 pandas Series có index
-là năm (int, tăng dần) và value là số liệu -- dùng chung cho mọi chỗ cần
-dữ liệu 5 năm (KQKD, DuPont, 9PP định giá, DCF...).
 """
 
 import pandas as pd
@@ -15,30 +7,19 @@ import re
 
 
 def _get_year_columns(df: pd.DataFrame):
-    """Lấy danh sách cột là năm (vd '2021', '2022'...), bỏ cột metadata."""
     meta_cols = {'item', 'item_en', 'item_id'}
     year_cols = []
     for c in df.columns:
         if c in meta_cols:
             continue
-        # Cột năm thường là string/int dạng '2021', đôi khi 'Q1/2021' (quý)
         c_str = str(c).strip()
         if re.fullmatch(r'\d{4}', c_str):
             year_cols.append(c)
-    # Sắp xếp theo năm tăng dần
     year_cols = sorted(year_cols, key=lambda x: int(str(x).strip()))
     return year_cols
 
 
 def find_row_series(df: pd.DataFrame, keywords, exclude_keywords=None):
-    """
-    Dò 1 dòng trong df (format item-theo-dòng) khớp với bất kỳ từ khoá nào
-    trong `keywords` (tìm trong cả item, item_en, item_id - không phân biệt
-    hoa thường, không phân biệt dấu tiếng Việt cơ bản).
-
-    Trả về pandas Series index=năm (int), value=số liệu (float), đã sort
-    theo năm tăng dần. Trả Series rỗng nếu không tìm được.
-    """
     if df is None or df.empty:
         return pd.Series(dtype=float)
 
@@ -64,7 +45,6 @@ def find_row_series(df: pd.DataFrame, keywords, exclude_keywords=None):
     if matched.empty:
         return pd.Series(dtype=float)
 
-    # Lấy dòng khớp đầu tiên (ưu tiên dòng có ít NaN nhất nếu có nhiều khớp)
     row = matched.iloc[0]
     if len(matched) > 1:
         non_na_counts = matched[year_cols].notna().sum(axis=1)
@@ -80,16 +60,6 @@ def find_row_series(df: pd.DataFrame, keywords, exclude_keywords=None):
 
 
 def build_5y_financial_table(df_income, df_balance, df_ratio=None):
-    """
-    Tổng hợp các chỉ tiêu cần cho KQKD 5 năm + phân tích cơ bản, dò từ
-    income_statement / balance_sheet / ratio (nếu có).
-
-    Trả về dict gồm các pandas Series (index = năm):
-        revenue, net_profit, equity, total_assets, eps, bvps, roe, roa,
-        pe, pb, market_cap, outstanding_shares, ev_ebitda, p_cf,
-        operating_cash_flow
-    Series rỗng nếu không dò được -- nơi gọi cần tự xử lý fallback.
-    """
     data = {}
 
     # --- Từ income_statement ---
@@ -122,3 +92,60 @@ def build_5y_financial_table(df_income, df_balance, df_ratio=None):
             'tổng nguồn vốn', 'total liabilities and equity',
             'total liabilities and stockholders'
         ])
+
+    # --- Từ ratio() ---
+    if df_ratio is not None and not df_ratio.empty:
+        data['eps'] = find_row_series(df_ratio, ['eps', 'earning per share', 'earnings per share'])
+        data['bvps'] = find_row_series(df_ratio, ['book value per share', 'bvps'])
+        data['roe'] = find_row_series(df_ratio, ['roe'])
+        data['roa'] = find_row_series(df_ratio, ['roa'])
+        data['pe'] = find_row_series(df_ratio, ['p/e', 'pe ratio', ' pe '])
+        data['pb'] = find_row_series(df_ratio, ['p/b', 'pb ratio', ' pb '])
+        data['market_cap'] = find_row_series(df_ratio, ['market cap', 'vốn hóa'])
+        data['outstanding_shares'] = find_row_series(df_ratio, ['outstanding shares', 'số cổ phiếu lưu hành', 'số lượng cổ phiếu'])
+        data['ev_ebitda'] = find_row_series(df_ratio, ['ev/ebitda', 'ev to ebitda'])
+        data['p_cf'] = find_row_series(df_ratio, ['price to cash flow', 'p/cf'])
+        data['net_margin'] = find_row_series(df_ratio, ['net margin', 'after tax profit margin', 'biên lợi nhuận sau thuế'])
+        data['asset_turnover'] = find_row_series(df_ratio, ['asset turnover', 'vòng quay tài sản', 'vòng quay tổng tài sản'])
+    else:
+        for k in ['eps', 'bvps', 'roe', 'roa', 'pe', 'pb', 'market_cap',
+                  'outstanding_shares', 'ev_ebitda', 'p_cf', 'net_margin', 'asset_turnover']:
+            data[k] = pd.Series(dtype=float)
+
+    if data['eps'].empty and not data['eps_income_stmt'].empty:
+        data['eps'] = data['eps_income_stmt']
+
+    if data['bvps'].empty and not data['equity'].empty and not data['outstanding_shares'].empty:
+        common_years = data['equity'].index.intersection(data['outstanding_shares'].index)
+        if len(common_years) > 0:
+            data['bvps'] = (data['equity'].loc[common_years] / data['outstanding_shares'].loc[common_years])
+
+    return data
+
+
+def get_latest(series: pd.Series, default=0.0):
+    if series is None or series.empty:
+        return default
+    return float(series.iloc[-1])
+
+
+def get_latest_n_years(series: pd.Series, n=5):
+    if series is None or series.empty:
+        return series
+    return series.iloc[-n:]
+
+
+def cagr(series: pd.Series, n_years=None):
+    if series is None or len(series.dropna()) < 2:
+        return None
+    s = series.dropna()
+    start_val, end_val = float(s.iloc[0]), float(s.iloc[-1])
+    if start_val <= 0:
+        return None
+    periods = n_years if n_years else (len(s) - 1)
+    if periods <= 0:
+        return None
+    try:
+        return (end_val / start_val) ** (1 / periods) - 1
+    except Exception:
+        return None
