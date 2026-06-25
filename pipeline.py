@@ -189,9 +189,28 @@ def execute_equity_research_pipeline(ticker):
         eps_latest = get_latest(eps_series, default=0.0)
         bvps_latest = get_latest(bvps_series, default=0.0)
 
+        # ⚠️ FALLBACK nếu dò trực tiếp 'equity' rỗng (vd cấu trúc item/levels
+        # của nguồn khác với giả định): equity = total_assets - total_liabilities
+        # (đẳng thức kế toán cơ bản), nếu có total_liabilities.
+        if equity_series.empty and not total_assets_series.empty:
+            total_liab_series = normalize_to_billion_vnd(find_row_series(
+                df_balance, ['tổng cộng nợ phải trả', 'tổng nợ phải trả', 'total liabilities'],
+                exclude_keywords=['vốn chủ sở hữu']))
+            if not total_liab_series.empty:
+                common_years = total_assets_series.index.intersection(total_liab_series.index)
+                if len(common_years) > 0:
+                    equity_series = (total_assets_series.loc[common_years] - total_liab_series.loc[common_years])
+
         # Fallback tự tính BVPS nếu vẫn thiếu (equity / số CP)
         if bvps_latest == 0.0 and issue_share > 0 and not equity_series.empty:
             bvps_latest = get_latest(equity_series, default=0.0) / issue_share
+
+        # Cảnh báo rõ ràng nếu vẫn không có Vốn CSH / Tổng tài sản, để dễ
+        # nhận biết khi gặp lại vấn đề cấu trúc dữ liệu khác với mã này.
+        if equity_series.empty:
+            st.warning(f"⚠️ Không dò được 'Vốn chủ sở hữu' cho {ticker} từ nguồn {source_used} (kể cả fallback). Các chỉ số BVPS/DuPont/9PP liên quan sẽ thiếu hoặc không chính xác.")
+        if total_assets_series.empty:
+            st.warning(f"⚠️ Không dò được 'Tổng tài sản' cho {ticker} từ nguồn {source_used}. DuPont sẽ không tính được.")
 
         def _normalize_pct(series):
             """
