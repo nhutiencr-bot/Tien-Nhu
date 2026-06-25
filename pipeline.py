@@ -117,12 +117,12 @@ def execute_equity_research_pipeline(ticker):
 
         # --- [BƯỚC 3]: Chuẩn hoá BCTC 5 năm thành các Series theo năm ---
         fin5 = build_5y_financial_table(df_income, df_balance, df_ratio)
-        # DEBUG TẠM THỜI - xóa sau khi fix
+        # DEBUG - xóa sau khi fix
         if df_balance is not None and not df_balance.empty:
             search_cols = [c for c in ['item', 'item_en', 'item_id'] if c in df_balance.columns]
             if search_cols:
-                st.write("**DEBUG balance_sheet items:**")
-                st.write(df_balance[search_cols].to_dict('records'))
+                st.write("**DEBUG balance_sheet:**")
+                st.dataframe(df_balance[search_cols])
                 
         revenue_series = fin5['revenue']
         net_profit_series = fin5['net_profit']
@@ -203,18 +203,18 @@ def execute_equity_research_pipeline(ticker):
         df_5y_table = pd.DataFrame({'Năm': years_available})
 
         def to_ty(series, year):
-            """Lấy giá trị theo năm, tự động chia về đơn vị tỷ nếu số quá lớn."""
-            val = series.get(year, None)
-            if val is None or (isinstance(val, float) and pd.isna(val)):
+            """Lấy giá trị theo năm, giữ nguyên nếu đã ở đơn vị tỷ."""
+            try:
+                val = series.get(year, None)
+                if val is None or (isinstance(val, float) and pd.isna(val)):
+                    return None
+                val = float(val)
+                # Chỉ chia nếu số > 1e11 (tức đang ở đơn vị đồng, không phải tỷ)
+                if abs(val) > 1e11:
+                    return round(val / 1e9, 2)
+                return round(val, 2)
+            except Exception:
                 return None
-            val = float(val)
-            # Nếu giá trị > 1e9 thì đang ở đơn vị đồng -> chia về tỷ
-            if abs(val) > 1e9:
-                return round(val / 1e9, 2)
-            # Nếu > 1e6 thì đang ở đơn vị triệu -> chia về tỷ
-            elif abs(val) > 1e6:
-                return round(val / 1e3, 2)
-            return round(val, 2)
 
         df_5y_table['Doanh thu thuần (tỷ)'] = df_5y_table['Năm'].map(lambda y: to_ty(revenue_series, y))
         df_5y_table['LNST (tỷ)'] = df_5y_table['Năm'].map(lambda y: to_ty(net_profit_series, y))
