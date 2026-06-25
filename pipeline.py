@@ -132,13 +132,15 @@ def execute_equity_research_pipeline(ticker):
         pb_series = fin5['pb']
         outstanding_shares_series = fin5['outstanding_shares']
         net_margin_series = fin5['net_margin']
-        asset_turnover_series = fin5['asset_turnover']
+       asset_turnover_series = fin5['asset_turnover']
 
-        # ⚠️ BẪY NGUỒN DỮ LIỆU: overview() của KBS/DNSE KHÔNG có sẵn các cột
-        # market_cap/pe/pb/issue_share như VCI -> không tin cột overview của
-        # riêng 1 nguồn. Số CP lưu hành ưu tiên lấy từ ratio() 5 năm (đã
-        # chuẩn hoá ở build_5y_financial_table), fallback overview, rồi mới
-        # back-calc từ vốn điều lệ / mệnh giá 10,000đ.
+        # DEBUG - xóa sau khi fix
+        st.write("=== revenue_series gốc ===", revenue_series)
+        st.write("=== net_profit_series gốc ===", net_profit_series)
+        st.write("=== equity_series gốc ===", equity_series)
+        st.write("=== total_assets_series gốc ===", total_assets_series)
+
+        # ⚠️ BẪY NGUỒN DỮ LIỆU ...
         issue_share = get_latest(outstanding_shares_series, default=0.0)
 
         if issue_share == 0.0 and not df_overview.empty:
