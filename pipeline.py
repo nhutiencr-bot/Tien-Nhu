@@ -9,7 +9,7 @@ from vnstock.api.company import Company
 
 from financial_normalizer import (
     find_row_series, build_5y_financial_table, get_latest,
-    get_latest_n_years, cagr,
+    get_latest_n_years, cagr, normalize_to_billion_vnd,
 )
 from valuation import (
     dupont_decomposition, dcf_fcff_scenarios, reverse_dcf_implied_growth,
@@ -118,10 +118,10 @@ def execute_equity_research_pipeline(ticker):
         # --- [BƯỚC 3]: Chuẩn hoá BCTC 5 năm thành các Series theo năm ---
         fin5 = build_5y_financial_table(df_income, df_balance, df_ratio)
 
-        revenue_series = fin5['revenue']
-        net_profit_series = fin5['net_profit']
-        equity_series = fin5['equity']
-        total_assets_series = fin5['total_assets']
+        revenue_series = normalize_to_billion_vnd(fin5['revenue'])
+        net_profit_series = normalize_to_billion_vnd(fin5['net_profit'])
+        equity_series = normalize_to_billion_vnd(fin5['equity'])
+        total_assets_series = normalize_to_billion_vnd(fin5['total_assets'])
         eps_series = fin5['eps']
         bvps_series = fin5['bvps']
         roe_series = fin5['roe']
@@ -228,12 +228,14 @@ def execute_equity_research_pipeline(ticker):
 
         # --- [BƯỚC 6]: DCF (FCFF), Graham, DDM, Reverse DCF, 9 phương pháp ---
         # FCFF xấp xỉ = CFO (lưu chuyển tiền từ HĐKD) - Capex (mua sắm TSCĐ)
-        cfo_series = find_row_series(
+        cfo_series = normalize_to_billion_vnd(find_row_series(
             df_cashflow,
-            ['lưu chuyển tiền thuần từ hoạt động kinh doanh', 'net cash flow from operating', 'cash flow from operating activities'])
-        capex_series = find_row_series(
+            ['lưu chuyển tiền thuần từ hoạt động kinh doanh', 'net cash flow from operating', 'cash flow from operating activities'],
+            item_ids=['operating_cash_flow', 'net_cash_flows_from_operating_activities']))
+        capex_series = normalize_to_billion_vnd(find_row_series(
             df_cashflow,
-            ['tiền chi để mua sắm', 'purchase of fixed assets', 'capital expenditure', 'mua sắm tài sản cố định'])
+            ['tiền chi để mua sắm', 'purchase of fixed assets', 'capital expenditure', 'mua sắm tài sản cố định'],
+            item_ids=['capex', 'purchase_of_fixed_assets']))
 
         latest_fcff = None
         if not cfo_series.empty:
