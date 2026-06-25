@@ -30,19 +30,24 @@ def _get_year_columns(df: pd.DataFrame):
     return year_cols
 
 
-def find_row_series(df: pd.DataFrame, keywords, exclude_keywords=None, item_ids=None):
+def find_row_series(df: pd.DataFrame, keywords, exclude_keywords=None, item_ids=None,
+                     prefer_top_level=True):
     """
     Dò 1 dòng trong df (format item-theo-dòng) khớp với dữ liệu cần lấy.
 
-    Ưu tiên 2 bước:
-    1) Nếu `item_ids` được cung cấp và cột 'item_id' tồn tại: thử khớp
-       CHÍNH XÁC (exact match, không phân biệt hoa thường) với item_id
-       trước -- vì nhiều nguồn (KBS) đã tự chuẩn hoá item_id thành tên
-       tiếng Anh snake_case ổn định (vd 'equity', 'total_assets'), đáng
-       tin cậy hơn dò từ khoá trong text tiếng Việt có thể viết khác nhau
-       giữa các nguồn.
-    2) Nếu không khớp item_id (hoặc không có), fallback dò từ khoá trong
-       item/item_en/item_id như cũ.
+    ⚠️ BẪY ITEM_ID KHÔNG ĐOÁN ĐƯỢC: với KBS, item_id không phải lúc nào
+    cũng là tên tiếng Anh chuẩn đẹp (vd 'equity') -- nhiều dòng quan trọng
+    (như "B. VỐN CHỦ SỞ HỮU (400=410+420)") có item_id là slug tự sinh từ
+    tiêu đề gốc (vd 'b_von_chu_so_huu_400410420'), không thể đoán trước.
+    => `item_ids` giờ chỉ là gợi ý PHỤ (thử trước nếu khớp chính xác), còn
+    cơ chế chính vẫn là dò từ khoá trong item/item_en.
+
+    ⚠️ BẪY DÒNG CON TRÙNG TỪ KHOÁ: BCTC có cấu trúc phân cấp (vd "B. VỐN
+    CHỦ SỞ HỮU" là dòng TỔNG cấp cao, nhưng "I. Vốn chủ sở hữu" lại là 1
+    dòng CON bên trong, cùng chứa từ khoá "vốn chủ sở hữu"). Nếu nhiều
+    dòng khớp từ khoá, ưu tiên dòng có cột 'levels' THẤP NHẤT (cấp càng
+    cao/tổng quát thường có levels nhỏ hơn) -- đây đáng tin hơn heuristic
+    "ít NaN nhất" vì dòng con đôi khi cũng đầy đủ số liệu không kém dòng tổng.
 
     Trả về pandas Series index=năm (int), value=số liệu (float), đã sort
     theo năm tăng dần. Trả Series rỗng nếu không tìm được.
@@ -60,7 +65,7 @@ def find_row_series(df: pd.DataFrame, keywords, exclude_keywords=None, item_ids=
 
     matched = pd.DataFrame()
 
-    # --- Bước 1: thử khớp chính xác theo item_id ---
+    # --- Bước 1: thử khớp chính xác theo item_id (gợi ý phụ, có thể miss) ---
     if item_ids and 'item_id' in df.columns:
         item_id_lower = df['item_id'].astype(str).str.lower().str.strip()
         target_ids = [i.lower().strip() for i in item_ids]
@@ -85,11 +90,27 @@ def find_row_series(df: pd.DataFrame, keywords, exclude_keywords=None, item_ids=
     if matched.empty:
         return pd.Series(dtype=float)
 
-    # Lấy dòng khớp đầu tiên (ưu tiên dòng có ít NaN nhất nếu có nhiều khớp)
+    # Chọn dòng đại diện khi có nhiều dòng khớp
     row = matched.iloc[0]
     if len(matched) > 1:
-        non_na_counts = matched[year_cols].notna().sum(axis=1)
-        row = matched.loc[non_na_counts.idxmax()]
+        if prefer_top_level and 'levels' in matched.columns:
+            levels_numeric = pd.to_numeric(matched['levels'], errors='coerce')
+            if levels_numeric.notna().any():
+                min_level = levels_numeric.min()
+                top_level_rows = matched[levels_numeric == min_level]
+                if len(top_level_rows) == 1:
+                    row = top_level_rows.iloc[0]
+                else:
+                    # Vẫn nhiều dòng cùng level thấp nhất -> tie-break bằng
+                    # số liệu non-NaN nhiều nhất trong nhóm đó
+                    non_na_counts = top_level_rows[year_cols].notna().sum(axis=1)
+                    row = top_level_rows.loc[non_na_counts.idxmax()]
+            else:
+                non_na_counts = matched[year_cols].notna().sum(axis=1)
+                row = matched.loc[non_na_counts.idxmax()]
+        else:
+            non_na_counts = matched[year_cols].notna().sum(axis=1)
+            row = matched.loc[non_na_counts.idxmax()]
 
     result = {}
     for yc in year_cols:
@@ -130,14 +151,16 @@ def build_5y_financial_table(df_income, df_balance, df_ratio=None):
         item_ids=['eps'])
 
     # --- Từ balance_sheet ---
+    # ⚠️ Không dùng item_ids cho equity/total_assets: item_id thật của KBS
+    # là slug tự sinh từ tiêu đề gốc (vd 'b_von_chu_so_huu_400410420'),
+    # không đoán trước được -> dò hoàn toàn theo từ khoá + ưu tiên cấp
+    # 'levels' thấp nhất (dòng TỔNG, không phải dòng con) trong find_row_series.
     data['equity'] = find_row_series(
         df_balance,
         ['vốn chủ sở hữu', "owner's equity", 'owners equity', 'total equity'],
-        exclude_keywords=['vốn điều lệ', 'charter'],
-        item_ids=['equity', 'owners_equity', 'total_equity'])
+        exclude_keywords=['vốn điều lệ', 'charter', 'cổ phần ưu đãi'])
     data['total_assets'] = find_row_series(
-        df_balance, ['tổng cộng tài sản', 'total assets', 'tổng tài sản'],
-        item_ids=['total_assets', 'assets'])
+        df_balance, ['tổng cộng tài sản', 'total assets', 'tổng tài sản'])
 
     # --- Từ ratio() nếu có (ưu tiên vì đã tính sẵn, ít lỗi hơn tự tính) ---
     if df_ratio is not None and not df_ratio.empty:
