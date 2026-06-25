@@ -199,19 +199,12 @@ def execute_equity_research_pipeline(ticker):
         df_5y_table = pd.DataFrame({'Năm': years_available})
 
         def to_ty(series, year):
+            """Giữ nguyên số gốc từ API, không chia hay nhân gì cả."""
             try:
                 val = series.get(year, None)
                 if val is None or (isinstance(val, float) and pd.isna(val)):
                     return None
-                val = float(val)
-                # Nếu > 1e9 thì đang ở đơn vị đồng -> chia về tỷ
-                if abs(val) > 1e9:
-                    return round(val / 1e9, 2)
-                # Nếu > 1e6 thì đang ở đơn vị triệu -> chia về tỷ
-                elif abs(val) > 1e6:
-                    return round(val / 1e3, 2)
-                # Đã ở tỷ rồi
-                return round(val, 2)
+                return float(val)
             except Exception:
                 return None
 
@@ -223,20 +216,6 @@ def execute_equity_research_pipeline(ticker):
         df_5y_table['BVPS (đ)'] = df_5y_table['Năm'].map(bvps_series)
         df_5y_table['ROE (%)'] = df_5y_table['Năm'].map(lambda y: roe_series.get(y, None))
         df_5y_table['ROA (%)'] = df_5y_table['Năm'].map(lambda y: roa_series.get(y, None))
-
-        # CAGR doanh thu & LNST (5 năm gần nhất có dữ liệu)
-        revenue_cagr = cagr(get_latest_n_years(revenue_series, 5))
-        net_profit_cagr = cagr(get_latest_n_years(net_profit_series, 5))
-
-        fundamentals_summary = {
-            "revenue_cagr_pct": revenue_cagr * 100 if revenue_cagr is not None else None,
-            "net_profit_cagr_pct": net_profit_cagr * 100 if net_profit_cagr is not None else None,
-            "eps_latest": eps_latest,
-            "bvps_latest": bvps_latest,
-            "roe_latest": get_latest(roe_series, default=None),
-            "roa_latest": get_latest(roa_series, default=None),
-        }
-
         # --- [BƯỚC 5]: DuPont Decomposition (5 năm) ---
         # ⚠️ BẪY ĐƠN VỊ: net_margin/asset_turnover lấy từ ratio() có thể ở
         # dạng % (vd 9.8) hoặc decimal (0.098) tùy nguồn -> không đáng tin
