@@ -226,7 +226,7 @@ if ticker_input:
 
         else:
             st.warning("Không có đủ dữ liệu BCTC 5 năm cho mã này từ nguồn hiện tại.")
-
+            
         # --- TAB: Định giá PE/PB + 9 phương pháp ---
         with tab_valuation:
             st.markdown("### Định Giá PE · PB · BV Trung Bình 5 Năm")
