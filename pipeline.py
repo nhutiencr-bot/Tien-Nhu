@@ -195,10 +195,25 @@ def execute_equity_research_pipeline(ticker):
             set(equity_series.index) | set(total_assets_series.index)
         )
         df_5y_table = pd.DataFrame({'Năm': years_available})
-        df_5y_table['Doanh thu thuần (tỷ)'] = df_5y_table['Năm'].map(revenue_series)
-        df_5y_table['LNST (tỷ)'] = df_5y_table['Năm'].map(net_profit_series)
-        df_5y_table['Vốn CSH (tỷ)'] = df_5y_table['Năm'].map(equity_series)
-        df_5y_table['Tổng tài sản (tỷ)'] = df_5y_table['Năm'].map(total_assets_series)
+
+        def to_ty(series, year):
+            """Lấy giá trị theo năm, tự động chia về đơn vị tỷ nếu số quá lớn."""
+            val = series.get(year, None)
+            if val is None or (isinstance(val, float) and pd.isna(val)):
+                return None
+            val = float(val)
+            # Nếu giá trị > 1e9 thì đang ở đơn vị đồng -> chia về tỷ
+            if abs(val) > 1e9:
+                return round(val / 1e9, 2)
+            # Nếu > 1e6 thì đang ở đơn vị triệu -> chia về tỷ
+            elif abs(val) > 1e6:
+                return round(val / 1e3, 2)
+            return round(val, 2)
+
+        df_5y_table['Doanh thu thuần (tỷ)'] = df_5y_table['Năm'].map(lambda y: to_ty(revenue_series, y))
+        df_5y_table['LNST (tỷ)'] = df_5y_table['Năm'].map(lambda y: to_ty(net_profit_series, y))
+        df_5y_table['Vốn CSH (tỷ)'] = df_5y_table['Năm'].map(lambda y: to_ty(equity_series, y))
+        df_5y_table['Tổng tài sản (tỷ)'] = df_5y_table['Năm'].map(lambda y: to_ty(total_assets_series, y))
         df_5y_table['EPS (đ)'] = df_5y_table['Năm'].map(eps_series)
         df_5y_table['BVPS (đ)'] = df_5y_table['Năm'].map(bvps_series)
         df_5y_table['ROE (%)'] = df_5y_table['Năm'].map(lambda y: roe_series.get(y, None))
