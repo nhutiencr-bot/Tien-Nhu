@@ -172,33 +172,71 @@ if ticker_input:
 
     with tab_valuation:   # <-- cùng cấp indent với 'if', không thụt vào trong
         ...
-            
-            # =========================================================
-            # PHẦN 1: TÍNH CAGR (TỐC ĐỘ TĂNG TRƯỞNG KÉP HÀNG NĂM)
-            # =========================================================
+          if not df_5y_table.empty:
+            st.markdown("### Bảng Tổng Hợp Tài Chính 5 Năm")
+            df_display = df_5y_table.set_index('Năm').T
+
+            # PHẦN 1: TÍNH CAGR
             try:
-                years = df_display.columns.tolist() # Lấy danh sách các năm làm cột
+                years = df_display.columns.tolist()
                 if len(years) > 1:
                     first_year = years[0]
                     last_year = years[-1]
-                    n_periods = len(years) - 1 # Khoảng cách số năm
-                    
+                    n_periods = len(years) - 1
+
                     cagr_list = []
                     for index, row in df_display.iterrows():
                         start_val = row[first_year]
                         end_val = row[last_year]
-                        
-                        # Chỉ tính được CAGR nếu giá trị năm đầu là số dương
+
                         if pd.notna(start_val) and pd.notna(end_val) and start_val > 0:
                             cagr = ((end_val / start_val) ** (1 / n_periods)) - 1
                             cagr_list.append(f"{cagr * 100:.2f}%")
                         else:
                             cagr_list.append("-")
-                            
-                    # Thêm cột CAGR vào cuối bảng hiển thị
+
                     df_display['CAGR'] = cagr_list
             except Exception as e:
-                pass # Bỏ qua bước tính nếu cấu trúc bảng bị lỗi
+                pass
+
+            # PHẦN 2: NÂNG CẤP UI/UX CHO BẢNG DỮ LIỆU
+            def format_big_numbers(val):
+                try:
+                    if isinstance(val, str):
+                        return val
+                    if val is None:
+                        return val
+                    import math
+                    if math.isnan(float(val)):
+                        return val
+                    return f"{float(val):,.0f}"
+                except (TypeError, ValueError):
+                    return val
+
+            def color_cagr(val):
+                if isinstance(val, str) and '%' in val:
+                    try:
+                        num = float(val.replace('%', ''))
+                        if num > 0:
+                            return 'color: #00e676; font-weight: bold;'
+                        elif num < 0:
+                            return 'color: #ff5252; font-weight: bold;'
+                    except:
+                        pass
+                return ''
+
+            styled_df = df_display.style.format(format_big_numbers)
+
+            if 'CAGR' in df_display.columns:
+                try:
+                    styled_df = styled_df.map(color_cagr, subset=['CAGR'])
+                except AttributeError:
+                    styled_df = styled_df.applymap(color_cagr, subset=['CAGR'])
+
+            st.dataframe(styled_df, use_container_width=True)
+
+        else:
+            st.warning("Không có đủ dữ liệu BCTC 5 năm cho mã này từ nguồn hiện tại.")
          
             # PHẦN 2: NÂNG CẤP UI/UX CHO BẢNG DỮ LIỆU
 # =========================================================
