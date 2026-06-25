@@ -192,11 +192,10 @@ if ticker_input:
                     df_display['CAGR'] = cagr_list
             except Exception as e:
                 pass # Bỏ qua bước tính nếu cấu trúc bảng bị lỗi
-            
-            # =========================================================
+         
             # PHẦN 2: NÂNG CẤP UI/UX CHO BẢNG DỮ LIỆU
             # =========================================================
-            # Hàm định dạng: Thêm dấu phẩy cho số lớn (VD: 1,585,640)
+            # Hàm định dạng: Thêm dấu phẩy cho số lớn
             def format_big_numbers(val):
                 if isinstance(val, (int, float)) and pd.notna(val):
                     return f"{val:,.0f}"
@@ -208,20 +207,21 @@ if ticker_input:
                     try:
                         num = float(val.replace('%', ''))
                         if num > 0:
-                            return 'color: #00e676; font-weight: bold;' # Xanh lá mạ Fintech
+                            return 'color: #00e676; font-weight: bold;' 
                         elif num < 0:
-                            return 'color: #ff5252; font-weight: bold;' # Đỏ san hô
+                            return 'color: #ff5252; font-weight: bold;'
                     except:
                         pass
                 return ''
 
-            # Khoác áo mới cho Dataframe (Áp dụng format số và tô màu cột CAGR)
-            try:
-                # Dành cho Pandas phiên bản mới
-                styled_df = df_display.style.format(format_big_numbers).map(color_cagr, subset=['CAGR'])
-            except AttributeError:
-                # Dành cho Pandas phiên bản cũ
-                styled_df = df_display.style.format(format_big_numbers).applymap(color_cagr, subset=['CAGR'])
+            # [MỚI] Kiểm tra cột CAGR tồn tại trước khi tô màu
+            styled_df = df_display.style.format(format_big_numbers)
+            
+            if 'CAGR' in df_display.columns:
+                try:
+                    styled_df = styled_df.map(color_cagr, subset=['CAGR'])
+                except AttributeError:
+                    styled_df = styled_df.applymap(color_cagr, subset=['CAGR'])
             
             # Hiển thị bảng đã được makeup tràn viền
             st.dataframe(styled_df, width='stretch')
