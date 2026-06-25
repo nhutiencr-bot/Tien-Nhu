@@ -118,12 +118,8 @@ def execute_equity_research_pipeline(ticker):
         # --- [BƯỚC 3]: Chuẩn hoá BCTC 5 năm thành các Series theo năm ---
         fin5 = build_5y_financial_table(df_income, df_balance, df_ratio)
         # DEBUG - xóa sau khi fix
-        if df_balance is not None and not df_balance.empty:
-            search_cols = [c for c in ['item', 'item_en', 'item_id'] if c in df_balance.columns]
-            if search_cols:
-                st.write("**DEBUG balance_sheet:**")
-                st.dataframe(df_balance[search_cols])
-                
+        st.write("=== DEBUG balance_sheet RAW ===")
+        st.write(df_balance)
         revenue_series = fin5['revenue']
         net_profit_series = fin5['net_profit']
         equity_series = fin5['equity']
