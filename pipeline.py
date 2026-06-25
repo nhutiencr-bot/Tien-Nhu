@@ -203,15 +203,18 @@ def execute_equity_research_pipeline(ticker):
         df_5y_table = pd.DataFrame({'Năm': years_available})
 
         def to_ty(series, year):
-            """Lấy giá trị theo năm, giữ nguyên nếu đã ở đơn vị tỷ."""
             try:
                 val = series.get(year, None)
                 if val is None or (isinstance(val, float) and pd.isna(val)):
                     return None
                 val = float(val)
-                # Chỉ chia nếu số > 1e11 (tức đang ở đơn vị đồng, không phải tỷ)
-                if abs(val) > 1e11:
+                # Nếu > 1e9 thì đang ở đơn vị đồng -> chia về tỷ
+                if abs(val) > 1e9:
                     return round(val / 1e9, 2)
+                # Nếu > 1e6 thì đang ở đơn vị triệu -> chia về tỷ
+                elif abs(val) > 1e6:
+                    return round(val / 1e3, 2)
+                # Đã ở tỷ rồi
                 return round(val, 2)
             except Exception:
                 return None
