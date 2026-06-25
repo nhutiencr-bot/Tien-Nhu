@@ -162,11 +162,13 @@ if ticker_input:
                 fig_margin.update_layout(template='plotly_dark', paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
                 st.plotly_chart(fig_margin, use_container_width=True)
 
-        if not df_5y_table.empty: # Kiểm tra xem bảng dữ liệu có trống hay không
+        if not df_5y_table.empty: # Đảm bảo chữ 'if' này bằng lề với chữ 'else' bên dưới
             st.markdown("### Bảng Tổng Hợp Tài Chính 5 Năm")
             df_display = df_5y_table.set_index('Năm').T
             
-            # [MỚI] TÍNH CAGR (Tốc độ tăng trưởng kép hàng năm)
+            # =========================================================
+            # PHẦN 1: TÍNH CAGR (TỐC ĐỘ TĂNG TRƯỞNG KÉP HÀNG NĂM)
+            # =========================================================
             try:
                 years = df_display.columns.tolist() # Lấy danh sách các năm làm cột
                 if len(years) > 1:
@@ -191,8 +193,39 @@ if ticker_input:
             except Exception as e:
                 pass # Bỏ qua bước tính nếu cấu trúc bảng bị lỗi
             
-            # [ĐÃ SỬA] Cập nhật cú pháp mới của Streamlit
-            st.dataframe(df_display, width='stretch')
+            # =========================================================
+            # PHẦN 2: NÂNG CẤP UI/UX CHO BẢNG DỮ LIỆU
+            # =========================================================
+            # Hàm định dạng: Thêm dấu phẩy cho số lớn (VD: 1,585,640)
+            def format_big_numbers(val):
+                if isinstance(val, (int, float)) and pd.notna(val):
+                    return f"{val:,.0f}"
+                return val
+            
+            # Hàm tô màu: Xanh lá nếu dương, Đỏ nếu âm
+            def color_cagr(val):
+                if isinstance(val, str) and '%' in val:
+                    try:
+                        num = float(val.replace('%', ''))
+                        if num > 0:
+                            return 'color: #00e676; font-weight: bold;' # Xanh lá mạ Fintech
+                        elif num < 0:
+                            return 'color: #ff5252; font-weight: bold;' # Đỏ san hô
+                    except:
+                        pass
+                return ''
+
+            # Khoác áo mới cho Dataframe (Áp dụng format số và tô màu cột CAGR)
+            try:
+                # Dành cho Pandas phiên bản mới
+                styled_df = df_display.style.format(format_big_numbers).map(color_cagr, subset=['CAGR'])
+            except AttributeError:
+                # Dành cho Pandas phiên bản cũ
+                styled_df = df_display.style.format(format_big_numbers).applymap(color_cagr, subset=['CAGR'])
+            
+            # Hiển thị bảng đã được makeup tràn viền
+            st.dataframe(styled_df, width='stretch')
+
         else:
             st.warning("Không có đủ dữ liệu BCTC 5 năm cho mã này từ nguồn hiện tại.")
 
