@@ -194,41 +194,45 @@ if ticker_input:
                 pass # Bỏ qua bước tính nếu cấu trúc bảng bị lỗi
          
             # PHẦN 2: NÂNG CẤP UI/UX CHO BẢNG DỮ LIỆU
-            # =========================================================
-            # Hàm định dạng: Thêm dấu phẩy cho số lớn
-            def format_big_numbers(val):
-                if isinstance(val, (int, float)) and pd.notna(val):
-                    return f"{val:,.0f}"
-                return val
-            
-            # Hàm tô màu: Xanh lá nếu dương, Đỏ nếu âm
-            def color_cagr(val):
-                if isinstance(val, str) and '%' in val:
-                    try:
-                        num = float(val.replace('%', ''))
-                        if num > 0:
-                            return 'color: #00e676; font-weight: bold;' 
-                        elif num < 0:
-                            return 'color: #ff5252; font-weight: bold;'
-                    except:
-                        pass
-                return ''
+# =========================================================
+# Hàm định dạng: Thêm dấu phẩy cho số lớn
+def format_big_numbers(val):
+    try:
+        if isinstance(val, str):
+            return val
+        if val is None:
+            return val
+        import math
+        if math.isnan(float(val)):
+            return val
+        return f"{float(val):,.0f}"
+    except (TypeError, ValueError):
+        return val
 
-            # [MỚI] Kiểm tra cột CAGR tồn tại trước khi tô màu
-            styled_df = df_display.style.format(format_big_numbers)
-            
-            if 'CAGR' in df_display.columns:
-                try:
-                    styled_df = styled_df.map(color_cagr, subset=['CAGR'])
-                except AttributeError:
-                    styled_df = styled_df.applymap(color_cagr, subset=['CAGR'])
-            
-            # Hiển thị bảng đã được makeup tràn viền
-            st.dataframe(styled_df, width='stretch')
+# Hàm tô màu: Xanh lá nếu dương, Đỏ nếu âm
+def color_cagr(val):
+    if isinstance(val, str) and '%' in val:
+        try:
+            num = float(val.replace('%', ''))
+            if num > 0:
+                return 'color: #00e676; font-weight: bold;' 
+            elif num < 0:
+                return 'color: #ff5252; font-weight: bold;'
+        except:
+            pass
+    return ''
 
-        else:
-            st.warning("Không có đủ dữ liệu BCTC 5 năm cho mã này từ nguồn hiện tại.")
+# Kiểm tra cột CAGR tồn tại trước khi tô màu
+styled_df = df_display.style.format(format_big_numbers)
 
+if 'CAGR' in df_display.columns:
+    try:
+        styled_df = styled_df.map(color_cagr, subset=['CAGR'])
+    except AttributeError:
+        styled_df = styled_df.applymap(color_cagr, subset=['CAGR'])
+
+# Hiển thị bảng đã được makeup tràn viền
+st.dataframe(styled_df, use_container_width=True)
         # --- TAB: Định giá PE/PB + 9 phương pháp ---
         with tab_valuation:
             st.markdown("### Định Giá PE · PB · BV Trung Bình 5 Năm")
