@@ -46,7 +46,10 @@ st.markdown(hide_streamlit_style, unsafe_allow_html=True)
 # Gọi hàm khoác áo Fintech từ file styles.py
 apply_premium_fintech_theme()
 
-st.title("🎯 AI Equity Research Terminal")
+st.title("🎯 AI Equity Research Terminal") 
+if st.button("🔄 Xóa cache & tải lại"):
+    st.cache_data.clear()
+    st.rerun()
 st.caption("Khởi chạy hệ thống tự động 7 bước kết hợp cơ chế kiểm toán vượt 7 bẫy BCTC đặc thù thị trường Việt Nam.")
 
 # --- Ô CHỌN MÃ: dropdown search toàn bộ HOSE + HNX + UPCOM ---
