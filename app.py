@@ -9,47 +9,10 @@ from symbols_loader import load_all_symbols, build_display_options
 # Cấu hình trang (Phải luôn nằm ở đầu tiên)
 st.set_page_config(page_title="Equity Research AI", layout="wide")
 
-# =========================================================================
-# [MỚI BỔ SUNG] - CODE ẨN THANH ĐEN ĐẦU TRANG & ĐỒNG BỘ MÀU NỀN FLAT 100%
-# =========================================================================
-hide_streamlit_style = """
-    <style>
-    /* 1. Xóa bỏ hoàn toàn thanh Header và dải màu mặc định của Streamlit ở trên cùng */
-    [data-testid="stHeader"] {
-        display: none !important;
-        height: 0px !important;
-    }
-    header {
-        visibility: hidden !important;
-    }
-    
-    /* 2. Triệt tiêu khoảng trống thừa ở đỉnh VÀ ĐÁY trang để nội dung khít màn hình */
-    .main .block-container {
-        padding-top: 1.5rem !important;
-        padding-bottom: 1.5rem !important;
-    }
-    
-    /* 3. Khít luôn khoảng trống của Sidebar bên trái */
-    [data-testid="stSidebarUserContent"] {
-        padding-top: 1.5rem !important;
-    }
-    
-    /* 4. Đảm bảo nền tổng thể ăn khớp với giao diện Fintech, không bị lỗi lởm chởm ở đáy */
-    .stApp {
-        background-color: transparent !important;
-    }
-    </style>
-"""
-st.markdown(hide_streamlit_style, unsafe_allow_html=True)
-# =========================================================================
-
 # Gọi hàm khoác áo Fintech từ file styles.py
 apply_premium_fintech_theme()
 
-st.title("🎯 AI Equity Research Terminal") 
-if st.button("🔄 Xóa cache & tải lại"):
-    st.cache_data.clear()
-    st.rerun()
+st.title("🎯 AI Equity Research Terminal")
 st.caption("Khởi chạy hệ thống tự động 7 bước kết hợp cơ chế kiểm toán vượt 7 bẫy BCTC đặc thù thị trường Việt Nam.")
 
 # --- Ô CHỌN MÃ: dropdown search toàn bộ HOSE + HNX + UPCOM ---
@@ -85,6 +48,19 @@ def fmt(value, suffix="", decimals=2, na="—"):
         return na
 
 
+def format_market_cap_billion(value_billion):
+    """
+    Format vốn hóa CHUẨN, tránh bẫy trùng đơn vị (vd "₫136.5B tỷ" - sai vì
+    B (billion) và tỷ trùng nghĩa). Input: vốn hóa tính bằng TỶ VNĐ.
+
+    Output ví dụ: "199,254 Tỷ VNĐ" (không bao giờ ghép thêm "B" hay "K"
+    cùng với chữ "Tỷ" để tránh trùng lặp đơn vị).
+    """
+    if value_billion is None or value_billion != value_billion or value_billion <= 0:
+        return "—"
+    return f"{value_billion:,.0f} Tỷ VNĐ"
+
+
 if ticker_input:
     pipeline_output = execute_equity_research_pipeline(ticker_input)
 
@@ -103,7 +79,7 @@ if ticker_input:
 
         kpi1, kpi2, kpi3, kpi4, kpi5, kpi6 = st.columns(6)
         kpi1.metric("Thị Giá Hiện Tại", f"{metrics['current_price']:,.0f} đ")
-        kpi2.metric("Vốn Hóa", f"{metrics['market_cap_billion']:,.0f} Tỷ VNĐ")
+        kpi2.metric("Vốn Hóa", format_market_cap_billion(metrics['market_cap_billion']))
         kpi3.metric("P/E (TTM)", f"{metrics['pe']:.2f} x")
         kpi4.metric("P/B (TTM)", f"{metrics['pb']:.2f} x")
         kpi5.metric("ROE Gần Nhất", fmt(fundamentals['roe_latest'], suffix="%"))
@@ -162,66 +138,15 @@ if ticker_input:
                         x=df_5y_table['Năm'], y=ros,
                         name='ROS - Biên LNST (%)', line=dict(color='#ec4899', width=2)
                     ))
-                fig_margin.update_layout(
-                    template='plotly_dark', paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)'
-                )
+                fig_margin.update_layout(template='plotly_dark', paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
                 st.plotly_chart(fig_margin, use_container_width=True)
 
-                # --- Bảng tổng hợp ---
                 st.markdown("### Bảng Tổng Hợp Tài Chính 5 Năm")
                 df_display = df_5y_table.set_index('Năm').T
-
-                try:
-                    years = df_display.columns.tolist()
-                    if len(years) > 1:
-                        n_periods = len(years) - 1
-                        first_year, last_year = years[0], years[-1]
-                        cagr_list = []
-                        for index, row in df_display.iterrows():
-                            start_val, end_val = row[first_year], row[last_year]
-                            if pd.notna(start_val) and pd.notna(end_val) and start_val > 0:
-                                cagr = ((end_val / start_val) ** (1 / n_periods)) - 1
-                                cagr_list.append(f"{cagr * 100:.2f}%")
-                            else:
-                                cagr_list.append("-")
-                        df_display['CAGR'] = cagr_list
-                except Exception:
-                    pass
-
-                def format_big_numbers(val):
-                    try:
-                        if isinstance(val, str) or val is None:
-                            return val
-                        import math
-                        if math.isnan(float(val)):
-                            return val
-                        return f"{float(val):,.0f}"
-                    except (TypeError, ValueError):
-                        return val
-
-                def color_cagr(val):
-                    if isinstance(val, str) and '%' in val:
-                        try:
-                            num = float(val.replace('%', ''))
-                            if num > 0:
-                                return 'color: #00e676; font-weight: bold;'
-                            elif num < 0:
-                                return 'color: #ff5252; font-weight: bold;'
-                        except Exception:
-                            pass
-                    return ''
-
-                styled_df = df_display.style.format(format_big_numbers)
-                if 'CAGR' in df_display.columns:
-                    try:
-                        styled_df = styled_df.map(color_cagr, subset=['CAGR'])
-                    except AttributeError:
-                        styled_df = styled_df.applymap(color_cagr, subset=['CAGR'])
-                st.dataframe(styled_df, use_container_width=True)
-
+                st.dataframe(df_display, use_container_width=True)
             else:
                 st.warning("Không có đủ dữ liệu BCTC 5 năm cho mã này từ nguồn hiện tại.")
-        
+
         # --- TAB: Định giá PE/PB + 9 phương pháp ---
         with tab_valuation:
             st.markdown("### Định Giá PE · PB · BV Trung Bình 5 Năm")
