@@ -162,7 +162,7 @@ if ticker_input:
                 fig_margin.update_layout(template='plotly_dark', paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
                 st.plotly_chart(fig_margin, use_container_width=True)
 
-        if dk_bctc_5_nam: # Đảm bảo chữ 'if' này bằng lề với chữ 'else' bên dưới
+        if not df_5y_table.empty: # Kiểm tra xem bảng dữ liệu có trống hay không
             st.markdown("### Bảng Tổng Hợp Tài Chính 5 Năm")
             df_display = df_5y_table.set_index('Năm').T
             
