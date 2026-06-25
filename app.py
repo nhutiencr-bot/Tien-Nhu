@@ -161,17 +161,8 @@ if ticker_input:
                     ))
                 fig_margin.update_layout(template='plotly_dark', paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
                 st.plotly_chart(fig_margin, use_container_width=True)
+        styled_df = None
 
-        if not df_5y_table.empty:
-            st.markdown("### Bảng Tổng Hợp Tài Chính 5 Năm")
-            # ... toàn bộ code xử lý bảng ...
-            st.dataframe(styled_df, use_container_width=True)
-
-        else:
-            st.warning("Không có đủ dữ liệu BCTC 5 năm cho mã này từ nguồn hiện tại.")
-
-    with tab_valuation:   # <-- cùng cấp indent với 'if', không thụt vào trong
-        
         if not df_5y_table.empty:
             st.markdown("### Bảng Tổng Hợp Tài Chính 5 Năm")
             df_display = df_5y_table.set_index('Năm').T
@@ -222,7 +213,9 @@ if ticker_input:
                     styled_df = styled_df.map(color_cagr, subset=['CAGR'])
                 except AttributeError:
                     styled_df = styled_df.applymap(color_cagr, subset=['CAGR'])
-            st.dataframe(styled_df, use_container_width=True)
+
+            if styled_df is not None:
+                st.dataframe(styled_df, use_container_width=True)
 
         else:
             st.warning("Không có đủ dữ liệu BCTC 5 năm cho mã này từ nguồn hiện tại.")
