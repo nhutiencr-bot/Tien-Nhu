@@ -117,13 +117,13 @@ def execute_equity_research_pipeline(ticker):
 
         # --- [BƯỚC 3]: Chuẩn hoá BCTC 5 năm thành các Series theo năm ---
         fin5 = build_5y_financial_table(df_income, df_balance, df_ratio)
-        # DEBUG - xóa sau khi fix xong
+        # DEBUG TẠM THỜI - xóa sau khi fix
         if df_balance is not None and not df_balance.empty:
-            st.write("📋 Cột balance_sheet:", df_balance.columns.tolist())
-            st.write("📋 5 dòng đầu balance_sheet:")
             search_cols = [c for c in ['item', 'item_en', 'item_id'] if c in df_balance.columns]
             if search_cols:
-                st.write(df_balance[search_cols].head(20))
+                st.write("**DEBUG balance_sheet items:**")
+                st.write(df_balance[search_cols].to_dict('records'))
+                
         revenue_series = fin5['revenue']
         net_profit_series = fin5['net_profit']
         equity_series = fin5['equity']
