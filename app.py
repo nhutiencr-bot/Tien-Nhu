@@ -159,66 +159,65 @@ if ticker_input:
                         x=df_5y_table['Năm'], y=ros,
                         name='ROS - Biên LNST (%)', line=dict(color='#ec4899', width=2)
                     ))
-                fig_margin.update_layout(template='plotly_dark', paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
+                fig_margin.update_layout(
+                    template='plotly_dark', paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)'
+                )
                 st.plotly_chart(fig_margin, use_container_width=True)
-        styled_df = None
 
-        if not df_5y_table.empty:
-            st.markdown("### Bảng Tổng Hợp Tài Chính 5 Năm")
-            df_display = df_5y_table.set_index('Năm').T
+                # --- Bảng tổng hợp ---
+                st.markdown("### Bảng Tổng Hợp Tài Chính 5 Năm")
+                df_display = df_5y_table.set_index('Năm').T
 
-            try:
-                years = df_display.columns.tolist()
-                if len(years) > 1:
-                    n_periods = len(years) - 1
-                    first_year, last_year = years[0], years[-1]
-                    cagr_list = []
-                    for index, row in df_display.iterrows():
-                        start_val, end_val = row[first_year], row[last_year]
-                        if pd.notna(start_val) and pd.notna(end_val) and start_val > 0:
-                            cagr = ((end_val / start_val) ** (1 / n_periods)) - 1
-                            cagr_list.append(f"{cagr * 100:.2f}%")
-                        else:
-                            cagr_list.append("-")
-                    df_display['CAGR'] = cagr_list
-            except Exception:
-                pass
-
-            def format_big_numbers(val):
                 try:
-                    if isinstance(val, str) or val is None:
-                        return val
-                    import math
-                    if math.isnan(float(val)):
-                        return val
-                    return f"{float(val):,.0f}"
-                except (TypeError, ValueError):
-                    return val
+                    years = df_display.columns.tolist()
+                    if len(years) > 1:
+                        n_periods = len(years) - 1
+                        first_year, last_year = years[0], years[-1]
+                        cagr_list = []
+                        for index, row in df_display.iterrows():
+                            start_val, end_val = row[first_year], row[last_year]
+                            if pd.notna(start_val) and pd.notna(end_val) and start_val > 0:
+                                cagr = ((end_val / start_val) ** (1 / n_periods)) - 1
+                                cagr_list.append(f"{cagr * 100:.2f}%")
+                            else:
+                                cagr_list.append("-")
+                        df_display['CAGR'] = cagr_list
+                except Exception:
+                    pass
 
-            def color_cagr(val):
-                if isinstance(val, str) and '%' in val:
+                def format_big_numbers(val):
                     try:
-                        num = float(val.replace('%', ''))
-                        if num > 0:
-                            return 'color: #00e676; font-weight: bold;'
-                        elif num < 0:
-                            return 'color: #ff5252; font-weight: bold;'
-                    except Exception:
-                        pass
-                return ''
+                        if isinstance(val, str) or val is None:
+                            return val
+                        import math
+                        if math.isnan(float(val)):
+                            return val
+                        return f"{float(val):,.0f}"
+                    except (TypeError, ValueError):
+                        return val
 
-            styled_df = df_display.style.format(format_big_numbers)
-            if 'CAGR' in df_display.columns:
-                try:
-                    styled_df = styled_df.map(color_cagr, subset=['CAGR'])
-                except AttributeError:
-                    styled_df = styled_df.applymap(color_cagr, subset=['CAGR'])
+                def color_cagr(val):
+                    if isinstance(val, str) and '%' in val:
+                        try:
+                            num = float(val.replace('%', ''))
+                            if num > 0:
+                                return 'color: #00e676; font-weight: bold;'
+                            elif num < 0:
+                                return 'color: #ff5252; font-weight: bold;'
+                        except Exception:
+                            pass
+                    return ''
 
-            if styled_df is not None:
+                styled_df = df_display.style.format(format_big_numbers)
+                if 'CAGR' in df_display.columns:
+                    try:
+                        styled_df = styled_df.map(color_cagr, subset=['CAGR'])
+                    except AttributeError:
+                        styled_df = styled_df.applymap(color_cagr, subset=['CAGR'])
                 st.dataframe(styled_df, use_container_width=True)
 
-        else:
-            st.warning("Không có đủ dữ liệu BCTC 5 năm cho mã này từ nguồn hiện tại.")
+            else:
+                st.warning("Không có đủ dữ liệu BCTC 5 năm cho mã này từ nguồn hiện tại.")
             
         # --- TAB: Định giá PE/PB + 9 phương pháp ---
         with tab_valuation:
