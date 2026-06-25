@@ -171,8 +171,8 @@ if ticker_input:
             st.warning("Không có đủ dữ liệu BCTC 5 năm cho mã này từ nguồn hiện tại.")
 
     with tab_valuation:   # <-- cùng cấp indent với 'if', không thụt vào trong
-        ...
-          if not df_5y_table.empty:
+        
+        if not df_5y_table.empty:
             st.markdown("### Bảng Tổng Hợp Tài Chính 5 Năm")
             df_display = df_5y_table.set_index('Năm').T
 
