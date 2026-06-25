@@ -9,6 +9,40 @@ from symbols_loader import load_all_symbols, build_display_options
 # Cấu hình trang (Phải luôn nằm ở đầu tiên)
 st.set_page_config(page_title="Equity Research AI", layout="wide")
 
+# =========================================================================
+# [MỚI BỔ SUNG] - CODE ẨN THANH ĐEN ĐẦU TRANG & ĐỒNG BỘ MÀU NỀN FLAT 100%
+# =========================================================================
+hide_streamlit_style = """
+    <style>
+    /* 1. Xóa bỏ hoàn toàn thanh Header và dải màu mặc định của Streamlit ở trên cùng */
+    [data-testid="stHeader"] {
+        display: none !important;
+        height: 0px !important;
+    }
+    header {
+        visibility: hidden !important;
+    }
+    
+    /* 2. Triệt tiêu khoảng trống thừa ở đỉnh VÀ ĐÁY trang để nội dung khít màn hình */
+    .main .block-container {
+        padding-top: 1.5rem !important;
+        padding-bottom: 1.5rem !important;
+    }
+    
+    /* 3. Khít luôn khoảng trống của Sidebar bên trái */
+    [data-testid="stSidebarUserContent"] {
+        padding-top: 1.5rem !important;
+    }
+    
+    /* 4. Đảm bảo nền tổng thể ăn khớp với giao diện Fintech, không bị lỗi lởm chởm ở đáy */
+    .stApp {
+        background-color: transparent !important;
+    }
+    </style>
+"""
+st.markdown(hide_streamlit_style, unsafe_allow_html=True)
+# =========================================================================
+
 # Gọi hàm khoác áo Fintech từ file styles.py
 apply_premium_fintech_theme()
 
@@ -128,11 +162,39 @@ if ticker_input:
                 fig_margin.update_layout(template='plotly_dark', paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
                 st.plotly_chart(fig_margin, use_container_width=True)
 
-                st.markdown("### Bảng Tổng Hợp Tài Chính 5 Năm")
-                df_display = df_5y_table.set_index('Năm').T
-                st.dataframe(df_display, use_container_width=True)
-            else:
-                st.warning("Không có đủ dữ liệu BCTC 5 năm cho mã này từ nguồn hiện tại.")
+                # ... (các đoạn code check dữ liệu if phía trên)
+            st.markdown("### Bảng Tổng Hợp Tài Chính 5 Năm")
+            df_display = df_5y_table.set_index('Năm').T
+            
+            # [MỚI] TÍNH CAGR (Tốc độ tăng trưởng kép hàng năm)
+            try:
+                years = df_display.columns.tolist() # Lấy danh sách các năm làm cột
+                if len(years) > 1:
+                    first_year = years[0]
+                    last_year = years[-1]
+                    n_periods = len(years) - 1 # Khoảng cách số năm (Ví dụ: 5 năm là 4 thời kỳ)
+                    
+                    cagr_list = []
+                    for index, row in df_display.iterrows():
+                        start_val = row[first_year]
+                        end_val = row[last_year]
+                        
+                        # Chỉ tính được CAGR nếu giá trị năm đầu là số dương (để tránh lỗi toán học)
+                        if pd.notna(start_val) and pd.notna(end_val) and start_val > 0:
+                            cagr = ((end_val / start_val) ** (1 / n_periods)) - 1
+                            cagr_list.append(f"{cagr * 100:.2f}%") # Format ra phần trăm
+                        else:
+                            cagr_list.append("-") # Nếu bị âm hoặc thiếu dữ liệu thì gạch ngang
+                            
+                    # Thêm cột CAGR vào cuối bảng hiển thị
+                    df_display['CAGR'] = cagr_list
+            except Exception as e:
+                pass # Bỏ qua bước tính nếu cấu trúc bảng bị lỗi
+            
+            # [ĐÃ SỬA] Cập nhật cú pháp mới của Streamlit để tránh lỗi vàng trong Log
+            st.dataframe(df_display, width='stretch')
+        else:
+            st.warning("Không có đủ dữ liệu BCTC 5 năm cho mã này từ nguồn hiện tại.")
 
         # --- TAB: Định giá PE/PB + 9 phương pháp ---
         with tab_valuation:
