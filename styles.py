@@ -1,5 +1,4 @@
 import streamlit as st
-
 def apply_premium_fintech_theme():
     """
     File này đóng vai trò như một thư viện CSS dùng để "độ" giao diện Streamlit
