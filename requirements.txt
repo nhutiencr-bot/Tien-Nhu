@@ -3,5 +3,5 @@ plotly
 pandas
 numpy
 yfinance
-vnstock
+vnstock>=4.0.0
 requests
