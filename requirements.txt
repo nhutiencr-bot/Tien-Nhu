@@ -1,5 +1,7 @@
 streamlit
+plotly
 pandas
 numpy
-plotly
-vnstock
+yfinance
+vnstock>=4.0.4
+requests
