@@ -37,33 +37,19 @@ HEADERS = {
 REQUEST_TIMEOUT = 10
 
 
-def _find_company_slug(ticker: str) -> str | None:
+def _find_company_slug(ticker: str) -> str:
     """
-    Tìm đúng slug tên công ty (vd 'cong-ty-co-phan-tap-doan-hoa-phat') từ
-    trang tổng quan CafeF của mã, KHÔNG đoán mò để tránh URL sai 404.
-    Trả về None nếu không tìm được.
-    """
-    try:
-        overview_url = f"https://cafef.vn/du-lieu/hose/{ticker.lower()}-x.chn"
-        # Trang tổng quan đôi khi không cần đúng slug để redirect đúng mã,
-        # nhưng để chắc ăn, dùng link "Báo cáo tài chính" tổng (tai-bao-cao-tai-chinh)
-        # vì link này CHỈ cần mã, không cần slug đúng.
-        fallback_url = f"https://cafef.vn/du-lieu/tai-bao-cao-tai-chinh/{ticker.lower()}.chn"
-        resp = requests.get(fallback_url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
-        if resp.status_code != 200:
-            return None
+    ⚠️ PHÁT HIỆN QUAN TRỌNG (đã verify qua nhiều mã thật): route bsheet/
+    incsta của CafeF dùng MÃ + NĂM + QUÝ để tra dữ liệu -- phần "slug tên
+    công ty" ở cuối URL chỉ mang tính trang trí/SEO, KHÔNG ảnh hưởng tới
+    việc tra đúng dữ liệu. CafeF vẫn trả đúng response dù slug không khớp
+    chính xác tên công ty thật (vd do công ty đổi tên, hoặc viết tắt khác).
 
-        # Tìm 1 link bsheet hoặc incsta có sẵn trong trang để trích slug thật
-        match = re.search(
-            r'/bao-cao-tai-chinh/' + re.escape(ticker.lower()) +
-            r'/(?:bsheet|incsta)/\d{4}/\d/0/0/([a-z0-9\-]+)\.chn',
-            resp.text, re.IGNORECASE,
-        )
-        if match:
-            return match.group(1)
-        return None
-    except Exception:
-        return None
+    => Bỏ hẳn việc dò slug đúng qua HTTP request riêng (tốn thêm 1 request,
+    dễ lỗi nếu trang trung gian đổi cấu trúc). Dùng 1 placeholder cố định
+    hợp lệ về mặt cú pháp URL (chỉ chữ thường + gạch ngang).
+    """
+    return f"bao-cao-tai-chinh-{ticker.lower()}"
 
 
 def _parse_vn_number(raw: str):
@@ -115,9 +101,6 @@ def fetch_cafef_balance_sheet_5y(ticker: str, end_year: int):
     Series rỗng nếu thất bại hoàn toàn.
     """
     slug = _find_company_slug(ticker)
-    if not slug:
-        st.warning(f"⚠️ [CafeF fallback] Không tìm được slug công ty cho mã {ticker} -- bỏ qua nguồn dự phòng này.")
-        return {"equity": pd.Series(dtype=float), "total_assets": pd.Series(dtype=float)}
 
     equity_by_year = {}
     total_assets_by_year = {}
