@@ -15,6 +15,7 @@ from valuation import (
     dupont_decomposition, dcf_fcff_scenarios, reverse_dcf_implied_growth,
     graham_number, ddm_gordon, nine_methods_valuation, summarize_valuation,
 )
+from cafef_fallback import fetch_cafef_balance_sheet_5y
 
 # Thứ tự nguồn ưu tiên thử lần lượt. VCI đầy đủ nhất nhưng có lỗi
 # đã xác nhận với một số mã UPCOM (vd: BSR) -> fallback sang KBS/DNSE.
@@ -201,16 +202,33 @@ def execute_equity_research_pipeline(ticker):
                 if len(common_years) > 0:
                     equity_series = (total_assets_series.loc[common_years] - total_liab_series.loc[common_years])
 
+        # ⚠️ FALLBACK CUỐI CÙNG (lớp dự phòng ngoài vnstock): nếu vnstock
+        # (VCI/KBS/DNSE) và cả đẳng thức kế toán đều không ra được Vốn CSH
+        # hoặc Tổng tài sản, cào trực tiếp CafeF (công khai, không paywall).
+        # ⚠️ Lưu ý: CafeF không phải API chính thức, cấu trúc HTML có thể
+        # đổi bất kỳ lúc nào, và rủi ro bị chặn IP từ Streamlit Cloud chưa
+        # được xác minh chắc chắn -- đây là lớp "cứu" cuối, không đảm bảo 100%.
+        if equity_series.empty or total_assets_series.empty:
+            current_year = datetime.today().year
+            cafef_data = fetch_cafef_balance_sheet_5y(ticker, end_year=current_year)
+            if equity_series.empty and not cafef_data['equity'].empty:
+                equity_series = cafef_data['equity']
+                st.info(f"ℹ️ Đã lấy 'Vốn chủ sở hữu' cho {ticker} từ nguồn dự phòng CafeF (vnstock không có dữ liệu này).")
+            if total_assets_series.empty and not cafef_data['total_assets'].empty:
+                total_assets_series = cafef_data['total_assets']
+                st.info(f"ℹ️ Đã lấy 'Tổng tài sản' cho {ticker} từ nguồn dự phòng CafeF (vnstock không có dữ liệu này).")
+
         # Fallback tự tính BVPS nếu vẫn thiếu (equity / số CP)
         if bvps_latest == 0.0 and issue_share > 0 and not equity_series.empty:
             bvps_latest = get_latest(equity_series, default=0.0) / issue_share
 
-        # Cảnh báo rõ ràng nếu vẫn không có Vốn CSH / Tổng tài sản, để dễ
-        # nhận biết khi gặp lại vấn đề cấu trúc dữ liệu khác với mã này.
+        # Cảnh báo rõ ràng nếu vẫn không có Vốn CSH / Tổng tài sản (kể cả
+        # sau CafeF), để dễ nhận biết khi gặp lại vấn đề với mã khác.
         if equity_series.empty:
-            st.warning(f"⚠️ Không dò được 'Vốn chủ sở hữu' cho {ticker} từ nguồn {source_used} (kể cả fallback). Các chỉ số BVPS/DuPont/9PP liên quan sẽ thiếu hoặc không chính xác.")
+            st.warning(f"⚠️ Không dò được 'Vốn chủ sở hữu' cho {ticker} từ vnstock ({source_used}) và cả CafeF. Các chỉ số BVPS/DuPont/9PP liên quan sẽ thiếu hoặc không chính xác.")
         if total_assets_series.empty:
-            st.warning(f"⚠️ Không dò được 'Tổng tài sản' cho {ticker} từ nguồn {source_used}. DuPont sẽ không tính được.")
+            st.warning(f"⚠️ Không dò được 'Tổng tài sản' cho {ticker} từ vnstock ({source_used}) và cả CafeF. DuPont sẽ không tính được.")
+
 
         def _normalize_pct(series):
             """
