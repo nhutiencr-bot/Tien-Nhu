@@ -5,6 +5,19 @@ financial_normalizer.py
 import pandas as pd
 import re
 
+# Danh sách mã ngân hàng VN (mở rộng đầy đủ)
+BANK_TICKERS = {
+    'VCB', 'BID', 'CTG', 'TCB', 'MBB', 'ACB', 'STB', 'VPB', 'HDB', 'TPB',
+    'MSB', 'OCB', 'VIB', 'SHB', 'EIB', 'LPB', 'SSB', 'NAB', 'ABB', 'BAB',
+    'BVB', 'KLB', 'PGB', 'VAB', 'VBB', 'SGN', 'NVB', 'SGB', 'CBB', 'SEAB',
+}
+
+# Danh sách mã bảo hiểm/chứng khoán (cũng dùng thu nhập thay doanh thu)
+FINANCIAL_TICKERS = {
+    'BVH', 'PVI', 'PTI', 'MIG', 'BMI', 'VNR', 'BIC', 'PRE', 'PGI',
+    'SSI', 'VND', 'HCM', 'MBS', 'VCI', 'FTS', 'AGR', 'SBS', 'BSI',
+}
+
 
 def _get_year_columns(df: pd.DataFrame):
     meta_cols = {'item', 'item_en', 'item_id'}
@@ -84,25 +97,68 @@ def find_row_series(df: pd.DataFrame, keywords, exclude_keywords=None,
     return pd.Series(result).sort_index()
 
 
-def build_5y_financial_table(df_income, df_balance, df_ratio=None):
+def _find_revenue_for_bank(df_income):
+    """
+    Ngân hàng/bảo hiểm/chứng khoán không có 'doanh thu thuần'.
+    Thử lần lượt các chỉ tiêu thu nhập đặc thù theo thứ tự ưu tiên.
+    """
+    # Thứ tự ưu tiên cho ngân hàng
+    bank_revenue_keywords = [
+        # Tổng thu nhập hoạt động (phổ biến nhất)
+        (['tổng thu nhập hoạt động', 'total operating income', 'net operating income'], ['chi phí', 'expense']),
+        # Thu nhập lãi thuần
+        (['thu nhập lãi thuần', 'net interest income', 'lãi thuần'], ['chi phí lãi']),
+        # Thu nhập thuần
+        (['thu nhập thuần', 'net income from', 'total net income'], ['lợi nhuận', 'profit']),
+        # Tổng doanh thu
+        (['tổng doanh thu', 'total revenue', 'gross revenue'], []),
+        # Doanh thu hoạt động
+        (['doanh thu hoạt động', 'operating revenue'], []),
+        # Thu nhập từ lãi
+        (['thu nhập từ lãi', 'interest income', 'interest and similar income'], ['chi phí']),
+    ]
+
+    for keywords, excludes in bank_revenue_keywords:
+        s = find_row_series(df_income, keywords,
+                           exclude_keywords=excludes if excludes else None)
+        if not s.empty:
+            return s
+
+    return pd.Series(dtype=float)
+
+
+def build_5y_financial_table(df_income, df_balance, df_ratio=None, ticker=None):
+    """
+    Tổng hợp các chỉ tiêu BCTC 5 năm.
+    ticker: dùng để detect ngân hàng/tài chính và chọn logic revenue phù hợp.
+    """
     data = {}
+    is_bank = ticker in BANK_TICKERS if ticker else False
+    is_financial = ticker in FINANCIAL_TICKERS if ticker else False
 
-    # --- Từ income_statement ---
-    data['revenue'] = find_row_series(
-        df_income,
-        [
-            'doanh thu thuần', 'net revenue', 'net sales', 'revenue',
-            'thu nhập lãi thuần', 'net interest income',
-            'tổng thu nhập hoạt động', 'total operating income',
-            'thu nhập từ hoạt động', 'operating revenue',
-            'tổng doanh thu', 'total revenue',
-        ],
-        exclude_keywords=['giá vốn', 'cost of', 'chi phí lãi'],
-        item_ids=['revenue', 'net_revenue', 'operating_income', 'net_sales'])
+    # --- Revenue: xử lý riêng cho ngân hàng/tài chính ---
+    if is_bank or is_financial:
+        data['revenue'] = _find_revenue_for_bank(df_income)
+    else:
+        # Doanh nghiệp thông thường
+        data['revenue'] = find_row_series(
+            df_income,
+            [
+                'doanh thu thuần', 'net revenue', 'net sales', 'revenue',
+                'doanh thu bán hàng', 'tổng doanh thu', 'total revenue',
+            ],
+            exclude_keywords=['giá vốn', 'cost of', 'chi phí lãi'],
+            item_ids=['revenue', 'net_revenue', 'net_sales'])
 
+        # Nếu vẫn không có (mã không xác định được ngành) -> thử bank keywords
+        if data['revenue'].empty:
+            data['revenue'] = _find_revenue_for_bank(df_income)
+
+    # --- Net profit ---
     data['net_profit'] = find_row_series(
         df_income,
-        ['lợi nhuận sau thuế', 'net profit', 'profit after tax', 'net income'],
+        ['lợi nhuận sau thuế', 'net profit', 'profit after tax', 'net income',
+         'lợi nhuận thuần', 'lãi sau thuế'],
         exclude_keywords=['trước thuế', 'before tax', 'thiểu số', 'minority'],
         item_ids=['net_profit', 'net_profit_after_tax', 'profit_after_tax'])
 
@@ -111,17 +167,18 @@ def build_5y_financial_table(df_income, df_balance, df_ratio=None):
         ['lãi cơ bản trên cổ phiếu', 'earnings per share', 'eps'],
         item_ids=['eps'])
 
-    # --- Từ balance_sheet ---
+    # --- Balance sheet ---
     data['equity'] = find_row_series(
         df_balance,
-        ['vốn chủ sở hữu', "owner's equity", 'owners equity', 'total equity'],
+        ['vốn chủ sở hữu', "owner's equity", 'owners equity', 'total equity',
+         'equity', 'vcsh'],
         exclude_keywords=['vốn điều lệ', 'charter', 'cổ phần ưu đãi'])
 
     data['total_assets'] = find_row_series(
         df_balance,
         ['tổng cộng tài sản', 'total assets', 'tổng tài sản'])
 
-    # --- Từ ratio() ---
+    # --- Ratio ---
     if df_ratio is not None and not df_ratio.empty:
         data['eps']    = find_row_series(df_ratio, ['eps', 'earning per share', 'earnings per share'])
         data['bvps']   = find_row_series(df_ratio, ['book value per share', 'bvps'])
