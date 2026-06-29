@@ -1,3 +1,4 @@
+import re
 import pandas as pd
 import numpy as np
 import streamlit as st
@@ -18,6 +19,64 @@ from valuation import (
 from cafef_fallback import fetch_cafef_balance_sheet_5y
 
 SOURCE_FALLBACK_ORDER = ['VCI', 'KBS', 'DNSE']
+
+
+def _count_periods(df, period='quarter'):
+    if df is None or df.empty:
+        return 0
+    pattern = r'\d{4}-Q[1-4]' if period == 'quarter' else r'\d{4}'
+    return sum(1 for c in df.columns if re.fullmatch(pattern, str(c).strip()))
+
+
+def _fetch_financial_report_extended(f_engine, source_used, report_type, period='quarter', limit=20):
+    """
+    vnstock (bản đang dùng) mặc định CHỈ trả về 4 kỳ gần nhất cho mọi báo cáo
+    (income_statement/balance_sheet/ratio), và hàm public không có tham số 'limit'
+    để tăng số kỳ. Hàm này cố gắng lấy đủ lịch sử dài hơn bằng cách gọi xuống API
+    nội bộ của thư viện (vẫn fallback an toàn về kết quả mặc định nếu không được).
+    report_type: 'income_statement' | 'balance_sheet' | 'ratio' | 'cash_flow'
+    """
+    method = getattr(f_engine, report_type, None)
+    df_default = pd.DataFrame()
+    if method is not None:
+        try:
+            df_default = method(period=period)
+        except Exception:
+            df_default = pd.DataFrame()
+
+    if _count_periods(df_default, period) >= limit:
+        return df_default
+
+    provider = getattr(f_engine, '_provider', None)
+    if provider is None:
+        return df_default
+
+    df_ext = pd.DataFrame()
+    try:
+        if source_used == 'VCI' and hasattr(provider, '_get_financial_report'):
+            df_ext = provider._get_financial_report(
+                report_type=report_type, period=period, limit=limit,
+                lang='en', dropna=True,
+            )
+        elif source_used == 'KBS':
+            old_limit = getattr(provider, 'limit', None)
+            provider.limit = limit
+            try:
+                df_ext = method(period=period) if method is not None else pd.DataFrame()
+            finally:
+                if old_limit is None:
+                    try:
+                        delattr(provider, 'limit')
+                    except Exception:
+                        pass
+                else:
+                    provider.limit = old_limit
+    except Exception:
+        df_ext = pd.DataFrame()
+
+    if _count_periods(df_ext, period) > _count_periods(df_default, period):
+        return df_ext
+    return df_default
 
 
 def normalize_to_billion_vnd(series):
@@ -121,9 +180,9 @@ def execute_equity_research_pipeline(ticker):
         df_cashflow = _safe_call(lambda: f_engine.cash_flow(period='year'), 'cash_flow', source_used)
         df_ratio    = _safe_call(lambda: f_engine.ratio(period='year'), 'ratio', source_used)
 
-        # Dữ liệu theo quý (dùng cho bảng "Theo Quý" trong UI)
-        df_income_q = _safe_call(lambda: f_engine.income_statement(period='quarter'), 'income_statement(quarter)', source_used)
-        df_ratio_q  = _safe_call(lambda: f_engine.ratio(period='quarter'), 'ratio(quarter)', source_used)
+        # Dữ liệu theo quý (dùng cho bảng "Theo Quý" trong UI) — lấy đủ 17 quý (Q1/2022->Q1/2026)
+        df_income_q = _fetch_financial_report_extended(f_engine, source_used, 'income_statement', period='quarter', limit=20)
+        df_ratio_q  = _fetch_financial_report_extended(f_engine, source_used, 'ratio', period='quarter', limit=20)
 
         # Balance sheet: thử tất cả nguồn
         df_balance = pd.DataFrame()
@@ -137,12 +196,12 @@ def execute_equity_research_pipeline(ticker):
             except Exception:
                 continue
 
-        # Balance sheet theo quý
+        # Balance sheet theo quý — lấy đủ 17 quý (Q1/2022->Q1/2026)
         df_balance_q = pd.DataFrame()
         for bs_source in ['VCI', 'KBS', 'DNSE']:
             try:
                 f_bs_q = Finance(symbol=ticker, source=bs_source, period='quarter')
-                df_bs_q = f_bs_q.balance_sheet(period='quarter')
+                df_bs_q = _fetch_financial_report_extended(f_bs_q, bs_source, 'balance_sheet', period='quarter', limit=20)
                 if df_bs_q is not None and not df_bs_q.empty:
                     df_balance_q = df_bs_q
                     break
