@@ -20,20 +20,31 @@ from cafef_fallback import fetch_cafef_balance_sheet_5y
 SOURCE_FALLBACK_ORDER = ['VCI', 'KBS', 'DNSE']
 
 
-def normalize_to_billion_vnd(series):
-    """Chuẩn hoá Series về đơn vị tỷ VNĐ."""
+ddef normalize_to_billion_vnd(series):
     if series is None or series.empty:
         return series
+    # Dùng median để detect đơn vị
+    sample = series.dropna()
+    if sample.empty:
+        return series
+    median_val = abs(float(sample.median()))
+
     def _to_ty(val):
         try:
             if pd.isna(val):
                 return None
             val = float(val)
-            if abs(val) > 1e11:
+            # > 1e11 → đơn vị đồng → chia 1e9
+            if median_val > 1e11:
                 return round(val / 1e9, 2)
+            # > 1e8 → đơn vị triệu → chia 1e3
+            elif median_val > 1e8:
+                return round(val / 1e3, 2)
+            # Đã ở tỷ
             return round(val, 2)
         except Exception:
             return None
+
     return series.map(_to_ty).dropna()
 
 
