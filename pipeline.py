@@ -137,7 +137,7 @@ def execute_equity_research_pipeline(ticker):
         current_price = float(df_price['close_vnd'].iloc[-1])
 
         # --- [BƯỚC 3]: Chuẩn hoá BCTC ---
-        fin5 = build_5y_financial_table(df_income, df_balance, df_ratio)
+        fin5 = build_5y_financial_table(df_income, df_balance, df_ratio, ticker=ticker)
 
         revenue_series      = normalize_to_billion_vnd(fin5['revenue'])
         equity_series       = normalize_to_billion_vnd(fin5['equity'])
