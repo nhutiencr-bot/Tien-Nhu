@@ -5,3 +5,4 @@ numpy
 yfinance
 vnstock>=4.0.0
 requests
+lxml
