@@ -143,15 +143,21 @@ if ticker_input:
 
                 st.markdown("### Bảng Tổng Hợp Tài Chính 5 Năm")
 
-                try:
-                    if 'Doanh thu thuần' in df_5y_table.columns:
-                        df_5y_table['Doanh thu thuần'] = df_5y_table['Doanh thu thuần'].apply(lambda x: "{:,.0f}".format(float(x)) if pd.notnull(x) and str(x).strip() != "" else x)
-                    if 'LNST' in df_5y_table.columns:
-                        df_5y_table['LNST'] = df_5y_table['LNST'].apply(lambda x: "{:,.0f}".format(float(x)) if pd.notnull(x) and str(x).strip() != "" else x)
-                except Exception:
-                    pass
+                # --- Định dạng TOÀN BỘ cột số kiểu Việt Nam: dấu phẩy ngăn nghìn,
+                # 2 số lẻ sau dấu chấm (ví dụ 167,126.45) ---
+                df_display_fmt = df_5y_table.copy()
+                numeric_cols = [c for c in df_display_fmt.columns if c != 'Năm']
 
-                df_display = df_5y_table.set_index('Năm').T
+                for col in numeric_cols:
+                    try:
+                        df_display_fmt[col] = df_display_fmt[col].apply(
+                            lambda x: "{:,.2f}".format(float(x))
+                            if pd.notnull(x) and str(x).strip() != "" else "—"
+                        )
+                    except Exception:
+                        pass  # Giữ nguyên giá trị gốc nếu không format được, tránh sập web
+
+                df_display = df_display_fmt.set_index('Năm').T
                 st.dataframe(df_display, use_container_width=True)
             else:
                 st.warning("Không có đủ dữ liệu BCTC 5 năm cho mã này từ nguồn hiện tại.")
