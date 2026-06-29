@@ -1,4 +1,5 @@
 import pandas as pd
+import numpy as np
 import streamlit as st
 from datetime import datetime, timedelta
 
@@ -140,9 +141,10 @@ def execute_equity_research_pipeline(ticker):
         fin5 = build_5y_financial_table(df_income, df_balance, df_ratio)
 
         revenue_series       = normalize_to_billion_vnd(fin5['revenue'])
-        net_profit_series    = normalize_to_billion_vnd(fin5['net_profit'])
         equity_series        = normalize_to_billion_vnd(fin5['equity'])
         total_assets_series  = normalize_to_billion_vnd(fin5['total_assets'])
+        net_profit_series    = normalize_net_profit_with_anchor(fin5['net_profit'], equity_series, fin5['roe'])
+   
         eps_series           = fin5['eps']
         bvps_series          = fin5['bvps']
         roe_series           = fin5['roe']
