@@ -19,48 +19,139 @@ from cafef_fallback import fetch_cafef_balance_sheet_5y
 
 SOURCE_FALLBACK_ORDER = ['VCI', 'KBS', 'DNSE']
 
-def normalize_to_billion_vnd(series, max_reasonable_billion=200_000):
+def normalize_to_billion_vnd(series):
+
     """
-    Chuẩn hoá Series về đơn vị tỷ VNĐ.
 
-    Thay vì đoán đơn vị bằng 1 ngưỡng cố định (dễ sai vì mỗi chỉ tiêu tài
-    chính có độ lớn hợp lý khác nhau -- Doanh thu BSR ~167,000 tỷ là bình
-    thường, nhưng LNST ~167,000 tỷ thì chắc chắn sai đơn vị), hàm này THỬ
-    LẦN LƯỢT các hệ số chia [1, 1e3, 1e6, 1e9] cho TỪNG giá trị riêng, và
-    chọn hệ số NHỎ NHẤT đưa giá trị về nằm trong ngưỡng hợp lý của 1 chỉ
-    tiêu tài chính doanh nghiệp niêm yết (mặc định <= 200,000 tỷ đồng).
+    Chuẩn hoá Series về đơn vị tỷ VNĐ -- dùng cho các field mà bản thân
 
-    Cách này tự thích ứng theo từng giá trị thực tế, không cần biết trước
-    "field này thường lớn cỡ nào" -- tránh được lỗi 1 ngưỡng chung làm
-    đúng field A nhưng sai field B (đã từng xảy ra: ngưỡng làm đúng Doanh
-    thu nhưng làm sai LNST, hoặc ngược lại).
+    GIÁ TRỊ ĐÃ Ở ĐÚNG ĐƠN VỊ TỶ phần lớn thời gian, chỉ lệch do vnstock trả
 
-    max_reasonable_billion: ngưỡng trần hợp lý (tỷ đồng) cho 1 chỉ tiêu của
-    1 doanh nghiệp tại 1 năm. Mặc định 200,000 -- đủ rộng cho các doanh
-    nghiệp lớn nhất sàn HOSE hiện tại. Tăng giá trị này nếu áp dụng cho
-    nhóm ngân hàng/bảo hiểm có Tổng tài sản rất lớn (có thể > 1,000,000 tỷ).
+    "đồng tuyệt đối" cho 1 vài năm/nguồn. KHÔNG dùng ngưỡng tuyệt đối kiểu
+
+    "> 200,000 thì coi là sai" vì ngành ngân hàng có Tổng tài sản hợp lệ
+
+    vượt xa mức đó (>1,000,000 tỷ) -- ngưỡng tuyệt đối luôn có nguy cơ làm
+
+    đúng field A nhưng phá field B.
+
+    Heuristic AN TOÀN duy nhất giữ lại: nếu giá trị > 1e11 (tức ~100 tỷ khi
+
+    tính theo đơn vị "đồng"), đây CHẮC CHẮN là đơn vị "đồng tuyệt đối" vì
+
+    không công ty nào có 1 chỉ tiêu tới mức "trăm tỷ tỷ" -- chia 1e9.
+
+    Mọi trường hợp khác GIỮ NGUYÊN, để hàm normalize_net_profit_with_anchor
+
+    (dùng ROE+Equity làm điểm neo) xử lý riêng cho net_profit -- field duy
+
+    nhất quan sát thấy bị lệch theo hệ số KHÔNG cố định (x1, x1000, …).
+
     """
+
     if series is None or series.empty:
+
         return series
 
     def _to_ty(val):
+
         try:
+
             if pd.isna(val):
+
                 return None
+
             val = float(val)
-            if val == 0:
-                return 0.0
-            abs_val = abs(val)
-            for divisor in (1, 1e3, 1e6, 1e9):
-                if abs_val / divisor <= max_reasonable_billion:
-                    return round(val / divisor, 2)
-            # Không hệ số nào đưa về ngưỡng hợp lý -> dùng hệ số lớn nhất
-            return round(val / 1e9, 2)
+
+            if abs(val) > 1e11:
+
+                return round(val / 1e9, 2)
+
+            return round(val, 2)
+
         except Exception:
+
             return None
 
     return series.map(_to_ty).dropna()
 
+def normalize_net_profit_with_anchor(net_profit_raw, equity_series, roe_series):
+
+    """
+
+    Chuẩn hoá riêng cho net_profit_series -- field quan sát thấy có thể bị
+
+    lệch đơn vị theo hệ số KHÔNG cố định giữa các năm (đã gặp: lệch x1000 ở
+
+    1 vài năm, đúng sẵn ở năm khác), nên không thể dùng 1 ngưỡng/1 hệ số
+
+    chia chung.
+
+    Cách làm: với mỗi năm có đủ Equity (đã chuẩn hoá đúng đơn vị tỷ) và ROE
+
+    (%, đáng tin vì lấy từ ratio() có sẵn), tính:
+
+        net_profit_kỳ_vọng = equity * roe% / 100
+
+    Đây CHỈ là một ước lượng (ROE thường dùng equity bình quân, không phải
+
+    equity cuối kỳ, nên lệch ~5-15% là bình thường) -- KHÔNG dùng trực tiếp
+
+    làm giá trị hiển thị, mà chỉ dùng để xác định HỆ SỐ CHIA đúng (chọn luỹ
+
+    thừa của 10 gần nhất với tỷ lệ raw/kỳ_vọng), rồi áp hệ số đó lên giá trị
+
+    raw gốc -- giữ được độ chính xác tuyệt đối của số liệu BCTC thật, chỉ
+
+    mượn ROE để "đoán đúng dấu thập phân nằm ở đâu".
+
+    Năm nào thiếu Equity hoặc ROE để neo: giữ nguyên giá trị sau khi đã
+
+    qua normalize_to_billion_vnd (xử lý case "đồng tuyệt đối" cơ bản).
+
+    """
+
+    base = normalize_to_billion_vnd(net_profit_raw)
+
+    if base is None or base.empty:
+
+        return base
+
+    fixed = {}
+
+    for year, raw_val in base.items():
+
+        if (year not in equity_series.index or year not in roe_series.index
+
+                or pd.isna(equity_series.get(year)) or pd.isna(roe_series.get(year))):
+
+            fixed[year] = raw_val
+
+            continue
+
+        expected = equity_series[year] * roe_series[year] / 100
+
+        if expected == 0 or raw_val == 0:
+
+            fixed[year] = raw_val
+
+            continue
+
+        ratio = raw_val / expected
+
+        if ratio <= 0:
+
+            fixed[year] = raw_val
+
+            continue
+
+        power = round(np.log10(ratio))
+
+        divisor = 10 ** power
+
+        fixed[year] = round(raw_val / divisor, 2)
+
+    return pd.Series(fixed)
 def _build_engines_with_fallback(ticker):
     last_error = None
     test_end = datetime.today().strftime('%Y-%m-%d')
