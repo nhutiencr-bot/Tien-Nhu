@@ -156,8 +156,8 @@ if ticker_input:
 
             df_display = df_5y_table.set_index('Năm').T
             st.dataframe(df_display, use_container_width=True)
-        else:
-            st.warning("Không có đủ dữ liệu BCTC 5 năm cho mã này từ nguồn hiện tại.")
+                 else:
+                    st.warning("Không có đủ dữ liệu BCTC 5 năm cho mã này từ nguồn hiện tại.")
 
         # --- TAB: Định giá PE/PB + 9 phương pháp ---
         with tab_valuation:
