@@ -23,18 +23,31 @@ def normalize_to_billion_vnd(series):
     """Chuẩn hoá Series về đơn vị tỷ VNĐ."""
     if series is None or series.empty:
         return series
+    
+    # Detect đơn vị dựa vào median của series (tránh bị lệch bởi outlier)
+    import numpy as np
+    sample = series.dropna()
+    if sample.empty:
+        return series
+    median_val = float(sample.median())
+    
     def _to_ty(val):
         try:
             if pd.isna(val):
                 return None
             val = float(val)
-            if abs(val) > 1e8:
+            # median > 1e11 → đơn vị đồng → chia 1e9
+            if abs(median_val) > 1e11:
                 return round(val / 1e9, 2)
-            if abs(val) > 1e5:
+            # median > 1e8 → đơn vị triệu → chia 1e3
+            elif abs(median_val) > 1e8:
                 return round(val / 1e3, 2)
-            return round(val, 2)
+            # median < 1e6 → đã ở tỷ → giữ nguyên
+            else:
+                return round(val, 2)
         except Exception:
             return None
+    
     return series.map(_to_ty).dropna()
 
 
