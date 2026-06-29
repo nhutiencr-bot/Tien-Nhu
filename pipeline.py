@@ -18,7 +18,7 @@ from cafef_fallback import fetch_cafef_balance_sheet_5y
 
 SOURCE_FALLBACK_ORDER = ['VCI', 'KBS', 'DNSE']
 
-    def normalize_to_billion_vnd(series, max_reasonable_billion=200_000):
+def normalize_to_billion_vnd(series, max_reasonable_billion=200_000):
     """
     Chuẩn hoá Series về đơn vị tỷ VNĐ.
 
