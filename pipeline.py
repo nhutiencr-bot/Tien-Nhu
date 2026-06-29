@@ -18,7 +18,6 @@ from cafef_fallback import fetch_cafef_balance_sheet_5y
 
 SOURCE_FALLBACK_ORDER = ['VCI', 'KBS', 'DNSE']
 
-
 def normalize_to_billion_vnd(series):
     """
     def normalize_to_billion_vnd(series, max_reasonable_billion=200_000):
@@ -62,7 +61,6 @@ def normalize_to_billion_vnd(series):
             return None
 
     return series.map(_to_ty).dropna()
-
 
 def _build_engines_with_fallback(ticker):
     last_error = None
