@@ -21,14 +21,26 @@ SOURCE_FALLBACK_ORDER = ['VCI', 'KBS', 'DNSE']
 
 def normalize_to_billion_vnd(series):
     """
+    def normalize_to_billion_vnd(series, max_reasonable_billion=200_000):
+    """
     Chuẩn hoá Series về đơn vị tỷ VNĐ.
 
-    QUAN TRỌNG: phát hiện đơn vị theo TỪNG GIÁ TRỊ riêng lẻ (không dùng 1
-    ngưỡng median chung cho cả series), vì dữ liệu vnstock từ các năm/nguồn
-    khác nhau có thể trả về đơn vị KHÁC NHAU cho từng năm (ví dụ năm cũ trả
-    đơn vị "đồng", năm mới trả đơn vị "tỷ" sẵn) — nếu dùng 1 ngưỡng chung,
-    các năm có giá trị lệch xa so với phần còn lại (tăng/giảm trưởng quá mạnh)
-    sẽ bị áp sai hệ số quy đổi.
+    Thay vì đoán đơn vị bằng 1 ngưỡng cố định (dễ sai vì mỗi chỉ tiêu tài
+    chính có độ lớn hợp lý khác nhau -- Doanh thu BSR ~167,000 tỷ là bình
+    thường, nhưng LNST ~167,000 tỷ thì chắc chắn sai đơn vị), hàm này THỬ
+    LẦN LƯỢT các hệ số chia [1, 1e3, 1e6, 1e9] cho TỪNG giá trị riêng, và
+    chọn hệ số NHỎ NHẤT đưa giá trị về nằm trong ngưỡng hợp lý của 1 chỉ
+    tiêu tài chính doanh nghiệp niêm yết (mặc định <= 200,000 tỷ đồng).
+
+    Cách này tự thích ứng theo từng giá trị thực tế, không cần biết trước
+    "field này thường lớn cỡ nào" -- tránh được lỗi 1 ngưỡng chung làm
+    đúng field A nhưng sai field B (đã từng xảy ra: ngưỡng làm đúng Doanh
+    thu nhưng làm sai LNST, hoặc ngược lại).
+
+    max_reasonable_billion: ngưỡng trần hợp lý (tỷ đồng) cho 1 chỉ tiêu của
+    1 doanh nghiệp tại 1 năm. Mặc định 200,000 -- đủ rộng cho các doanh
+    nghiệp lớn nhất sàn HOSE hiện tại. Tăng giá trị này nếu áp dụng cho
+    nhóm ngân hàng/bảo hiểm có Tổng tài sản rất lớn (có thể > 1,000,000 tỷ).
     """
     if series is None or series.empty:
         return series
@@ -38,17 +50,14 @@ def normalize_to_billion_vnd(series):
             if pd.isna(val):
                 return None
             val = float(val)
+            if val == 0:
+                return 0.0
             abs_val = abs(val)
-            # Ngưỡng áp dụng riêng cho TỪNG giá trị, không phải theo median cả series.
-            # > 1e11 (trên 100 tỷ đồng tính theo đơn vị "đồng") → đơn vị gốc là "đồng" → chia 1e9
-            if abs_val > 1e11:
-                return round(val / 1e9, 2)
-            # > 1e8 (trên 100 triệu, nhưng dưới ngưỡng "đồng") → đơn vị gốc là "nghìn đồng" → chia 1e3
-            elif abs_val > 1e8:
-                return round(val / 1e3, 2)
-            # còn lại → coi như đã ở đơn vị "tỷ" sẵn → giữ nguyên
-            else:
-                return round(val, 2)
+            for divisor in (1, 1e3, 1e6, 1e9):
+                if abs_val / divisor <= max_reasonable_billion:
+                    return round(val / divisor, 2)
+            # Không hệ số nào đưa về ngưỡng hợp lý -> dùng hệ số lớn nhất
+            return round(val / 1e9, 2)
         except Exception:
             return None
 
