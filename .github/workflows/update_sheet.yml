@@ -22,4 +22,4 @@ jobs:
       - name: Run Script
         env:
           GCP_CREDENTIALS: ${{ secrets.GCP_CREDENTIALS }} 
-        run: python main.py
+        run: echo "No main.py needed for Streamlit app"
