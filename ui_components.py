@@ -53,23 +53,24 @@ def render_kpi_cards(metrics, fundamentals):
     kpi6.metric("CAGR LNST 5N", fmt(fundamentals['net_profit_cagr_pct'], suffix="%"))
 
 
-def render_tab_kqkd(df_5y_table, fundamentals):
-    st.markdown("### Kết Quả Kinh Doanh 5 Năm")
+def render_tab_kqkd(df_5y_table, fundamentals, period_col='Năm'):
+    label = "5 Năm" if period_col == 'Năm' else "Theo Quý"
+    st.markdown(f"### Kết Quả Kinh Doanh {label}")
 
     if df_5y_table.empty:
-        st.warning("Không có đủ dữ liệu BCTC 5 năm cho mã này.")
+        st.warning(f"Không có đủ dữ liệu BCTC {label.lower()} cho mã này.")
         return
 
     # Chart doanh thu + LNST
     fig_kqkd = go.Figure()
     if df_5y_table['Doanh thu thuần (tỷ)'].notna().any():
         fig_kqkd.add_trace(go.Bar(
-            x=df_5y_table['Năm'], y=df_5y_table['Doanh thu thuần (tỷ)'],
+            x=df_5y_table[period_col], y=df_5y_table['Doanh thu thuần (tỷ)'],
             name='Doanh thu thuần (tỷ)', marker_color='#a855f7', yaxis='y1'
         ))
     if df_5y_table['LNST (tỷ)'].notna().any():
         fig_kqkd.add_trace(go.Scatter(
-            x=df_5y_table['Năm'], y=df_5y_table['LNST (tỷ)'],
+            x=df_5y_table[period_col], y=df_5y_table['LNST (tỷ)'],
             name='LNST (tỷ)', line=dict(color='#ec4899', width=3), yaxis='y2'
         ))
     fig_kqkd.update_layout(
@@ -91,7 +92,7 @@ def render_tab_kqkd(df_5y_table, fundamentals):
     fig_margin = go.Figure()
     if 'ROE (%)' in df_5y_table.columns and df_5y_table['ROE (%)'].notna().any():
         fig_margin.add_trace(go.Scatter(
-            x=df_5y_table['Năm'], y=df_5y_table['ROE (%)'],
+            x=df_5y_table[period_col], y=df_5y_table['ROE (%)'],
             name='ROE (%)', line=dict(color='#06b6d4', width=2, dash='dash')
         ))
     dtt = df_5y_table['Doanh thu thuần (tỷ)']
@@ -99,7 +100,7 @@ def render_tab_kqkd(df_5y_table, fundamentals):
     if dtt.notna().any() and lnst.notna().any() and (dtt != 0).any():
         ros = (lnst / dtt.replace(0, float('nan')) * 100)
         fig_margin.add_trace(go.Scatter(
-            x=df_5y_table['Năm'], y=ros,
+            x=df_5y_table[period_col], y=ros,
             name='ROS - Biên LNST (%)', line=dict(color='#ec4899', width=2)
         ))
     fig_margin.update_layout(
@@ -110,9 +111,9 @@ def render_tab_kqkd(df_5y_table, fundamentals):
     st.plotly_chart(fig_margin, use_container_width=True)
 
     # Bảng tổng hợp
-    st.markdown("### Bảng Tổng Hợp Tài Chính 5 Năm")
+    st.markdown(f"### Bảng Tổng Hợp Tài Chính {label}")
     df_fmt = df_5y_table.copy()
-    for col in [c for c in df_fmt.columns if c != 'Năm']:
+    for col in [c for c in df_fmt.columns if c != period_col]:
         try:
             df_fmt[col] = df_fmt[col].apply(
                 lambda x: "{:,.2f}".format(float(x))
@@ -120,7 +121,7 @@ def render_tab_kqkd(df_5y_table, fundamentals):
             )
         except Exception:
             pass
-    st.dataframe(df_fmt.set_index('Năm').T, use_container_width=True)
+    st.dataframe(df_fmt.set_index(period_col).T, use_container_width=True)
 
 
 def render_tab_valuation(valuation_pkg, metrics):
