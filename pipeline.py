@@ -115,23 +115,48 @@ def execute_equity_research_pipeline(ticker):
         is_bank = ticker in ['VCB', 'BID', 'CTG', 'TCB', 'MBB', 'ACB', 'STB']
 
         current_price = float(df_price['close_vnd'].iloc[-1])
-
+def normalize_to_billion_vnd(series):
+            """Chuẩn hoá Series về đơn vị tỷ VNĐ."""
+            if series is None or series.empty:
+                return series
+            def _to_ty(val):
+                try:
+                    if pd.isna(val):
+                        return None
+                    val = float(val)
+                    if abs(val) > 1e8:      # đang ở đồng → chia về tỷ
+                        return round(val / 1e9, 2)
+                    if abs(val) > 1e5:      # đang ở triệu → chia về tỷ
+                        return round(val / 1e3, 2)
+                    return round(val, 2)    # đã ở tỷ
+                except Exception:
+                    return None
+            return series.map(_to_ty).dropna()
         # --- [BƯỚC 3]: Chuẩn hoá BCTC 5 năm thành các Series theo năm ---
+        from data_fetcher import fetch_financial_data
+
+        # Thử multi-source fetcher trước
+        fin5_multi = fetch_financial_data(ticker)
+
+        # Merge với fin5 từ vnstock để lấy eps/bvps/roe/roa/pe/pb
         fin5 = build_5y_financial_table(df_income, df_balance, df_ratio)
 
-        revenue_series = normalize_to_billion_vnd(fin5['revenue'])
-        net_profit_series = normalize_to_billion_vnd(fin5['net_profit'])
-        equity_series = normalize_to_billion_vnd(fin5['equity'])
-        total_assets_series = normalize_to_billion_vnd(fin5['total_assets'])
-        eps_series = fin5['eps']
-        bvps_series = fin5['bvps']
-        roe_series = fin5['roe']
-        roa_series = fin5['roa']
-        pe_series = fin5['pe']
-        pb_series = fin5['pb']
+        # Ưu tiên multi-source cho các field hay bị thiếu
+        revenue_series      = fin5_multi['revenue'] if not fin5_multi['revenue'].empty else normalize_to_billion_vnd(fin5['revenue'])
+        net_profit_series   = fin5_multi['net_profit'] if not fin5_multi['net_profit'].empty else normalize_to_billion_vnd(fin5['net_profit'])
+        equity_series       = fin5_multi['equity'] if not fin5_multi['equity'].empty else normalize_to_billion_vnd(fin5['equity'])
+        total_assets_series = fin5_multi['total_assets'] if not fin5_multi['total_assets'].empty else normalize_to_billion_vnd(fin5['total_assets'])
+
+        # eps/bvps/roe/roa/pe/pb vẫn lấy từ vnstock ratio() vì chính xác hơn
+        eps_series               = fin5['eps']
+        bvps_series              = fin5['bvps']
+        roe_series               = fin5['roe']
+        roa_series               = fin5['roa']
+        pe_series                = fin5['pe']
+        pb_series                = fin5['pb']
         outstanding_shares_series = fin5['outstanding_shares']
-        net_margin_series = fin5['net_margin']
-        asset_turnover_series = fin5['asset_turnover']
+        net_margin_series        = fin5['net_margin']
+        asset_turnover_series    = fin5['asset_turnover']
 
         # ⚠️ BẪY 6 — VỐN HÓA SAI DO SỐ CP CŨ:
         # outstanding_shares/market_cap theo NĂM TÀI CHÍNH (vd '2025') chỉ
