@@ -147,7 +147,7 @@ if ticker_input:
             try:
                 if 'Doanh thu thuần' in df_5y_table.columns:
                     df_5y_table['Doanh thu thuần'] = df_5y_table['Doanh thu thuần'].apply(lambda x: "{:,.0f}".format(float(x)) if pd.notnull(x) and str(x).strip() != "" else x)
-                
+            
                 if 'LNST' in df_5y_table.columns:
                     df_5y_table['LNST'] = df_5y_table['LNST'].apply(lambda x: "{:,.0f}".format(float(x)) if pd.notnull(x) and str(x).strip() != "" else x)
             except Exception:
