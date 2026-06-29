@@ -48,7 +48,7 @@ if pipeline_output is None:
     st.error(f"Không thể tải dữ liệu cho mã {ticker_input}. Vui lòng thử mã khác.")
     st.stop()
 
-(df_price_clean, df_5y_table, df_balance_table, metrics, tech,
+(df_price_clean, df_5y_table, df_quarter_table, df_balance_table, metrics, tech,
  news_cards, fundamentals, df_dupont, valuation_pkg) = pipeline_output
 
 # --- Header ---
@@ -75,7 +75,16 @@ render_kpi_cards(metrics, fundamentals)
 ])
 
 with tab_kqkd:
-    render_tab_kqkd(df_5y_table, fundamentals)
+    che_do_xem = st.selectbox(
+        "Xem dữ liệu theo:",
+        options=["Theo Năm", "Theo Quý"],
+        index=0,
+        key="che_do_xem_kqkd",
+    )
+    if che_do_xem == "Theo Năm":
+        render_tab_kqkd(df_5y_table, fundamentals, period_col="Năm")
+    else:
+        render_tab_kqkd(df_quarter_table, fundamentals, period_col="Quý")
 
 with tab_valuation:
     render_tab_valuation(valuation_pkg, metrics)
