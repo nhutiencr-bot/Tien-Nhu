@@ -8,8 +8,8 @@ from vnstock.api.financial import Finance
 from vnstock.api.company import Company
 
 from financial_normalizer import (
-    find_row_series, build_5y_financial_table, get_latest,
-    get_latest_n_years, cagr,
+    find_row_series, build_5y_financial_table, build_financial_table,
+    get_latest, get_latest_n_years, cagr,
 )
 from valuation import (
     dupont_decomposition, dcf_fcff_scenarios, reverse_dcf_implied_growth,
@@ -121,6 +121,10 @@ def execute_equity_research_pipeline(ticker):
         df_cashflow = _safe_call(lambda: f_engine.cash_flow(period='year'), 'cash_flow', source_used)
         df_ratio    = _safe_call(lambda: f_engine.ratio(period='year'), 'ratio', source_used)
 
+        # Dữ liệu theo quý (dùng cho bảng "Theo Quý" trong UI)
+        df_income_q = _safe_call(lambda: f_engine.income_statement(period='quarter'), 'income_statement(quarter)', source_used)
+        df_ratio_q  = _safe_call(lambda: f_engine.ratio(period='quarter'), 'ratio(quarter)', source_used)
+
         # Balance sheet: thử tất cả nguồn
         df_balance = pd.DataFrame()
         for bs_source in ['VCI', 'KBS', 'DNSE']:
@@ -129,6 +133,18 @@ def execute_equity_research_pipeline(ticker):
                 df_bs = f_bs.balance_sheet(period='year')
                 if df_bs is not None and not df_bs.empty:
                     df_balance = df_bs
+                    break
+            except Exception:
+                continue
+
+        # Balance sheet theo quý
+        df_balance_q = pd.DataFrame()
+        for bs_source in ['VCI', 'KBS', 'DNSE']:
+            try:
+                f_bs_q = Finance(symbol=ticker, source=bs_source, period='quarter')
+                df_bs_q = f_bs_q.balance_sheet(period='quarter')
+                if df_bs_q is not None and not df_bs_q.empty:
+                    df_balance_q = df_bs_q
                     break
             except Exception:
                 continue
@@ -272,6 +288,58 @@ def execute_equity_research_pipeline(ticker):
             "roa_latest":  get_latest(roa_series, default=None),
         }
 
+        # --- [BƯỚC 4b]: Bảng KQKD theo Quý (Q1/2022 -> hiện tại) ---
+        df_quarter_table = pd.DataFrame()
+        try:
+            fin_q = build_financial_table(df_income_q, df_balance_q, df_ratio_q, ticker=ticker, period='quarter')
+
+            revenue_series_q      = normalize_to_billion_vnd(fin_q['revenue'])
+            equity_series_q       = normalize_to_billion_vnd(fin_q['equity'])
+            total_assets_series_q = normalize_to_billion_vnd(fin_q['total_assets'])
+            net_profit_series_q   = normalize_net_profit_with_anchor(
+                fin_q['net_profit'], equity_series_q, fin_q['roe'])
+
+            eps_series_q  = fin_q['eps']
+            bvps_series_q = fin_q['bvps']
+
+            def _normalize_pct_q(series):
+                if series is None or series.empty:
+                    return series
+                latest_val = series.iloc[-1]
+                if abs(latest_val) < 1:
+                    return series * 100
+                return series
+
+            roe_series_q = _normalize_pct_q(fin_q['roe'])
+            roa_series_q = _normalize_pct_q(fin_q['roa'])
+
+            quarters_available = sorted(
+                set(revenue_series_q.index) | set(net_profit_series_q.index) |
+                set(equity_series_q.index)  | set(total_assets_series_q.index),
+                key=lambda c: (int(str(c).split('-Q')[0]), int(str(c).split('-Q')[1]))
+            )
+            # Giới hạn khung Q1/2022 -> Q1/2026 theo yêu cầu hiển thị
+            quarters_available = [
+                q for q in quarters_available
+                if (2022, 1) <= (int(str(q).split('-Q')[0]), int(str(q).split('-Q')[1])) <= (2026, 1)
+            ]
+
+            df_quarter_table = pd.DataFrame({'_period': quarters_available})
+            df_quarter_table['Quý'] = df_quarter_table['_period'].apply(
+                lambda c: f"Q{str(c).split('-Q')[1]}/{str(c).split('-Q')[0]}")
+            df_quarter_table['Doanh thu thuần (tỷ)'] = df_quarter_table['_period'].map(revenue_series_q)
+            df_quarter_table['LNST (tỷ)']            = df_quarter_table['_period'].map(net_profit_series_q)
+            df_quarter_table['Vốn CSH (tỷ)']         = df_quarter_table['_period'].map(equity_series_q)
+            df_quarter_table['Tổng tài sản (tỷ)']    = df_quarter_table['_period'].map(total_assets_series_q)
+            df_quarter_table['EPS (đ)']              = df_quarter_table['_period'].map(eps_series_q)
+            df_quarter_table['BVPS (đ)']             = df_quarter_table['_period'].map(bvps_series_q)
+            df_quarter_table['ROE (%)']              = df_quarter_table['_period'].map(lambda y: roe_series_q.get(y, None))
+            df_quarter_table['ROA (%)']              = df_quarter_table['_period'].map(lambda y: roa_series_q.get(y, None))
+            df_quarter_table = df_quarter_table.drop(columns=['_period'])
+        except Exception as e:
+            st.warning(f"Không dựng được bảng theo Quý: {e}")
+            df_quarter_table = pd.DataFrame()
+
         # --- [BƯỚC 5]: DuPont ---
         df_dupont = dupont_decomposition(revenue_series, net_profit_series, total_assets_series, equity_series)
 
@@ -353,7 +421,7 @@ def execute_equity_research_pipeline(ticker):
             news_list.append({"title": "Không có sự kiện bất thường trong 30 ngày.", "source": "Hệ thống tự động"})
 
         return (
-            df_price, df_5y_table, df_balance, clean_metrics, technical_summary,
+            df_price, df_5y_table, df_quarter_table, df_balance, clean_metrics, technical_summary,
             news_list, fundamentals_summary, df_dupont, valuation_package,
         )
 
