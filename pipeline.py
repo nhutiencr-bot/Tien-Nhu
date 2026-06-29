@@ -20,34 +20,38 @@ SOURCE_FALLBACK_ORDER = ['VCI', 'KBS', 'DNSE']
 
 
 def normalize_to_billion_vnd(series):
-    """Chuẩn hoá Series về đơn vị tỷ VNĐ."""
+    """
+    Chuẩn hoá Series về đơn vị tỷ VNĐ.
+
+    QUAN TRỌNG: phát hiện đơn vị theo TỪNG GIÁ TRỊ riêng lẻ (không dùng 1
+    ngưỡng median chung cho cả series), vì dữ liệu vnstock từ các năm/nguồn
+    khác nhau có thể trả về đơn vị KHÁC NHAU cho từng năm (ví dụ năm cũ trả
+    đơn vị "đồng", năm mới trả đơn vị "tỷ" sẵn) — nếu dùng 1 ngưỡng chung,
+    các năm có giá trị lệch xa so với phần còn lại (tăng/giảm trưởng quá mạnh)
+    sẽ bị áp sai hệ số quy đổi.
+    """
     if series is None or series.empty:
         return series
-    
-    # Detect đơn vị dựa vào median của series (tránh bị lệch bởi outlier)
-    import numpy as np
-    sample = series.dropna()
-    if sample.empty:
-        return series
-    median_val = float(sample.median())
-    
+
     def _to_ty(val):
         try:
             if pd.isna(val):
                 return None
             val = float(val)
-            # median > 1e11 → đơn vị đồng → chia 1e9
-            if abs(median_val) > 1e11:
+            abs_val = abs(val)
+            # Ngưỡng áp dụng riêng cho TỪNG giá trị, không phải theo median cả series.
+            # > 1e11 (trên 100 tỷ đồng tính theo đơn vị "đồng") → đơn vị gốc là "đồng" → chia 1e9
+            if abs_val > 1e11:
                 return round(val / 1e9, 2)
-            # median > 1e8 → đơn vị triệu → chia 1e3
-            elif abs(median_val) > 1e8:
+            # > 1e8 (trên 100 triệu, nhưng dưới ngưỡng "đồng") → đơn vị gốc là "nghìn đồng" → chia 1e3
+            elif abs_val > 1e8:
                 return round(val / 1e3, 2)
-            # median < 1e6 → đã ở tỷ → giữ nguyên
+            # còn lại → coi như đã ở đơn vị "tỷ" sẵn → giữ nguyên
             else:
                 return round(val, 2)
         except Exception:
             return None
-    
+
     return series.map(_to_ty).dropna()
 
 
