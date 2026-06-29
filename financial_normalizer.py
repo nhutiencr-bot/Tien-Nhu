@@ -138,8 +138,16 @@ def build_5y_financial_table(df_income, df_balance, df_ratio=None):
     # item_ids: ưu tiên khớp chính xác theo chuẩn hoá item_id của KBS
     # (_INCOME_STATEMENT_MAP) và tên tương đương dò được trên VCI.
     data['revenue'] = find_row_series(
-        df_income, ['doanh thu thuần', 'net revenue', 'net sales', 'revenue'],
-        exclude_keywords=['giá vốn', 'cost of'],
+        df_income,
+        [
+            'doanh thu thuần', 'net revenue', 'net sales', 'revenue',
+            # Ngân hàng/bảo hiểm không có "doanh thu thuần" -> dùng thu nhập hoạt động
+            'thu nhập lãi thuần', 'net interest income',
+            'tổng thu nhập hoạt động', 'total operating income',
+            'thu nhập từ hoạt động', 'operating revenue',
+            'tổng doanh thu', 'total revenue',
+        ],
+        exclude_keywords=['giá vốn', 'cost of', 'chi phí lãi'])
         item_ids=['revenue', 'net_revenue', 'operating_income', 'net_sales'])
     data['net_profit'] = find_row_series(
         df_income,
