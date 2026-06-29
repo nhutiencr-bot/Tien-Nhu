@@ -142,10 +142,22 @@ if ticker_input:
                 st.plotly_chart(fig_margin, use_container_width=True)
 
                 st.markdown("### Bảng Tổng Hợp Tài Chính 5 Năm")
-                df_display = df_5y_table.set_index('Năm').T
-                st.dataframe(df_display, use_container_width=True)
-            else:
-                st.warning("Không có đủ dữ liệu BCTC 5 năm cho mã này từ nguồn hiện tại.")
+            
+            # --- CODE THÊM VÀO ĐỂ ĐỊNH DẠNG DẤU PHẨY (Sửa đúng 2 lỗi) ---
+            try:
+                if 'Doanh thu thuần' in df_5y_table.columns:
+                    df_5y_table['Doanh thu thuần'] = df_5y_table['Doanh thu thuần'].apply(lambda x: "{:,.0f}".format(float(x)) if pd.notnull(x) and str(x).strip() != "" else x)
+                
+                if 'LNST' in df_5y_table.columns:
+                    df_5y_table['LNST'] = df_5y_table['LNST'].apply(lambda x: "{:,.0f}".format(float(x)) if pd.notnull(x) and str(x).strip() != "" else x)
+            except Exception:
+                pass # Bỏ qua nếu dữ liệu thô có vấn đề, giữ cho web không bị sập
+            # -------------------------------------------------------------
+
+            df_display = df_5y_table.set_index('Năm').T
+            st.dataframe(df_display, use_container_width=True)
+        else:
+            st.warning("Không có đủ dữ liệu BCTC 5 năm cho mã này từ nguồn hiện tại.")
 
         # --- TAB: Định giá PE/PB + 9 phương pháp ---
         with tab_valuation:
