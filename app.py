@@ -141,18 +141,15 @@ if ticker_input:
                 fig_margin.update_layout(template='plotly_dark', paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
                 st.plotly_chart(fig_margin, use_container_width=True)
 
-            st.markdown("### Bảng Tổng Hợp Tài Chính 5 Năm")
+                st.markdown("### Bảng Tổng Hợp Tài Chính 5 Năm")
 
-                # --- CODE THÊM VÀO ĐỂ ĐỊNH DẠNG DẤU PHẨY (Sửa đúng 2 lỗi) ---
                 try:
                     if 'Doanh thu thuần' in df_5y_table.columns:
                         df_5y_table['Doanh thu thuần'] = df_5y_table['Doanh thu thuần'].apply(lambda x: "{:,.0f}".format(float(x)) if pd.notnull(x) and str(x).strip() != "" else x)
-
                     if 'LNST' in df_5y_table.columns:
                         df_5y_table['LNST'] = df_5y_table['LNST'].apply(lambda x: "{:,.0f}".format(float(x)) if pd.notnull(x) and str(x).strip() != "" else x)
                 except Exception:
-                    pass  # Bỏ qua nếu dữ liệu thô có vấn đề, giữ cho web không bị sập
-                # -------------------------------------------------------------
+                    pass
 
                 df_display = df_5y_table.set_index('Năm').T
                 st.dataframe(df_display, use_container_width=True)
