@@ -147,15 +147,15 @@ with tab_news:
                 st.info(title)
                 continue
                 
-            # 1. Tiêu đề chữ trắng, link click được
+            # 1. Tiêu đề chữ trắng, link click được (đã bỏ icon 📰 và 🔗)
             st.markdown(
-                f'<h5>📰 <a href="{link}" target="_blank" style="color: white; text-decoration: none;">{title} 🔗</a></h5>', 
+                f'<h5><a href="{link}" target="_blank" style="color: white; text-decoration: none;">{title}</a></h5>', 
                 unsafe_allow_html=True
             )
             
-            # 2. Đổi màu TÊN NGUỒN sang màu Tím chủ đạo Fintech (#8B5CF6)
+            # 2. Chỉ hiện tên nguồn (màu tím) + ngày, bỏ chữ "Nguồn:"
             st.markdown(
-                f'<p style="color: #a0a0a0; font-size: 14px;">Nguồn: <span style="color: #8B5CF6; font-weight: bold;">{source}</span> | Ngày cập nhật: {pub_date}</p>', 
+                f'<p style="color: #a0a0a0; font-size: 14px;"><span style="color: #8B5CF6; font-weight: bold;">{source}</span> | Ngày cập nhật: {pub_date}</p>', 
                 unsafe_allow_html=True
             )
             
