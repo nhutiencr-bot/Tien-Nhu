@@ -41,10 +41,8 @@ if not ticker_input:
     st.stop()
 
 # --- Pipeline với spinner ---
-debug_cafef = st.checkbox("🔍 Bật chế độ debug CafeF (xem chi tiết quá trình cào dữ liệu năm/quý cũ)", value=False)
-
 with st.spinner(f"⏳ Đang tải dữ liệu {ticker_input}..."):
-    pipeline_output = execute_equity_research_pipeline(ticker_input, debug_cafef=debug_cafef)
+    pipeline_output = execute_equity_research_pipeline(ticker_input)
 
 if pipeline_output is None:
     st.error(f"Không thể tải dữ liệu cho mã {ticker_input}. Vui lòng thử mã khác.")
