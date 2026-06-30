@@ -3,8 +3,8 @@ from styles import apply_premium_fintech_theme
 from pipeline import execute_equity_research_pipeline
 from symbols_loader import load_all_symbols, build_display_options
 from ui_components import (
-    render_kpi_cards, render_tab_kqkd, render_tab_valuation,
-    render_tab_dcf, render_tab_dupont, render_tab_volume, fmt,
+render_kpi_cards, render_tab_kqkd, render_tab_valuation,
+render_tab_dcf, render_tab_dupont, render_tab_volume, fmt,
 )
 import re
 import requests
