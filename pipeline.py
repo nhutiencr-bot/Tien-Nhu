@@ -502,3 +502,13 @@ def execute_equity_research_pipeline(ticker, debug_cafef=False):
         except Exception as e:
             st.warning(f"⚠️ Lỗi khi cào tin tức 6 tháng qua: {e}")
             news_list = []
+
+        # ── 12. Trả về ────────────────────────────────────────────────
+        return (
+            df_price, df_5y_table, df_quarter_table, df_balance, clean_metrics, technical_summary,
+            news_list, fundamentals_summary, df_dupont, valuation_package
+        )
+
+    except Exception as e:
+        st.error(f"Lỗi Pipeline: {str(e)}")
+        return None
