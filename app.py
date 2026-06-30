@@ -164,30 +164,28 @@ with tab_news:
     else:
         st.info("Không có tin tức nào trong thời gian qua.")
 
-# Giả sử bạn đang ở Tab Báo Cáo Phân Tích (tab_report)
 with tab_report:
     st.markdown("### 📑 Báo Cáo Phân Tích & Khuyến Nghị")
     
-    # Mã cổ phiếu hiện tại người dùng đang chọn (ví dụ 'BID' hoặc 'DPM')
-    current_ticker = "DPM" # Lấy từ biến của bạn
+    # Mã cổ phiếu hiện tại người dùng đang chọn
+    # Đảm bảo current_ticker đã được định nghĩa ở trên (ví dụ từ st.session_state hoặc input)
+    if 'current_ticker' not in locals(): current_ticker = "DPM" 
     
     with st.spinner("Đang tải dữ liệu báo cáo..."):
         reports_data = get_analytical_reports(current_ticker)
     
     if not reports_data:
-        st.warning(f"Hiện chưa tìm thấy báo cáo phân tích mới nhất cho mã {current_ticker}. Nguồn: CafeF/Vietstock.")
+        st.warning(f"Hiện chưa tìm thấy báo cáo phân tích mới nhất cho mã {current_ticker}.")
     else:
         st.success(f"Tìm thấy {len(reports_data)} báo cáo mới nhất!")
         
-        # In ra danh sách báo cáo với nút bấm Xem trực tiếp (không cần tải)
-        for idx, report in enumerate(reports_data):
+        for report in reports_data:
             with st.container():
                 cols = st.columns([4, 1])
                 with cols[0]:
                     st.markdown(f"**{report['title']}**")
-                    st.caption(f"Nguồn: {report['source']}")
+                    st.caption(f"Nguồn: {report.get('source', 'CafeF/Vietstock')}")
                 with cols[1]:
-                    # Nút bấm mở thẳng tab mới xem PDF (Giống yêu cầu của bạn)
                     st.markdown(
                         f"""
                         <a href="{report['url']}" target="_blank" style="
@@ -205,9 +203,10 @@ with tab_report:
                         unsafe_allow_html=True
                     )
                 st.divider()
-                st.caption(
 
-    f"⚠️ **Disclaimer:** Báo cáo giáo dục/tham khảo. Nguồn: vnstock API ({metrics.get('source_used', 'N/A')}). "
-    "Đối chiếu BCTC kiểm toán chính thức trước khi ra quyết định. "
-    "**Không phải lời khuyên đầu tư.** Đầu tư cổ phiếu có rủi ro mất vốn."
-)
+    # Disclaimer an toàn (Không dùng biến metrics nếu không tồn tại)
+    st.caption(
+        "⚠️ **Disclaimer:** Báo cáo giáo dục/tham khảo. "
+        "Đối chiếu BCTC kiểm toán chính thức trước khi ra quyết định. "
+        "**Không phải lời khuyên đầu tư.** Đầu tư cổ phiếu có rủi ro mất vốn."
+    )
