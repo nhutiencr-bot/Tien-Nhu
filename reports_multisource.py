@@ -143,18 +143,28 @@ def _fetch_simplize(ticker: str, max_results: int = 8):
 # ─────────────────────────────────────────────
 # PUBLIC API — giữ nguyên signature như cafef_reports.fetch_analysis_reports
 # ─────────────────────────────────────────────
-def fetch_analysis_reports(ticker: str, max_results: int = 8):
+def fetch_analysis_reports(ticker: str, max_results: int = 8, debug: bool = False):
     """
     Gộp báo cáo từ nhiều nguồn miễn phí, ưu tiên báo cáo RIÊNG cho mã.
-    Trả về dict {"reports": [...], "is_ticker_specific": bool, "sources_used": [...]}
+    Trả về dict {"reports": [...], "is_ticker_specific": bool, "sources_used": [...], "debug_log": [...]}
+
+    debug_log thu thập lỗi thật của từng nguồn (status code / exception)
+    thay vì nuốt im lặng, để xác định nguồn nào bị chặn/timeout khi chạy
+    trên Streamlit Cloud.
     """
     all_reports = []
     sources_used = []
+    debug_log = []
 
     # 1. CafeF (nguồn chính, ổn định nhất hiện nay)
-    cafef_pkg = _fetch_cafef_reports(ticker, max_results=max_results)
-    cafef_reports = cafef_pkg.get("reports", [])
-    cafef_specific = cafef_pkg.get("is_ticker_specific", False)
+    try:
+        cafef_pkg = _fetch_cafef_reports(ticker, max_results=max_results)
+        cafef_reports = cafef_pkg.get("reports", [])
+        cafef_specific = cafef_pkg.get("is_ticker_specific", False)
+        debug_log.append(f"CafeF: lấy được {len(cafef_reports)} báo cáo (specific={cafef_specific})")
+    except Exception as e:
+        cafef_reports, cafef_specific = [], False
+        debug_log.append(f"CafeF: LỖI -> {type(e).__name__}: {e}")
     if cafef_reports:
         sources_used.append("CafeF")
         if cafef_specific:
@@ -163,8 +173,10 @@ def fetch_analysis_reports(ticker: str, max_results: int = 8):
     # 2. Vietstock (chỉ lấy phần lọc theo mã - public list)
     try:
         vs_reports = _fetch_vietstock(ticker, max_results=max_results)
-    except Exception:
+        debug_log.append(f"Vietstock: lấy được {len(vs_reports)} báo cáo khớp mã")
+    except Exception as e:
         vs_reports = []
+        debug_log.append(f"Vietstock: LỖI -> {type(e).__name__}: {e}")
     if vs_reports:
         sources_used.append("Vietstock")
         all_reports.extend(vs_reports)
@@ -172,8 +184,10 @@ def fetch_analysis_reports(ticker: str, max_results: int = 8):
     # 3. Simplize (best-effort, có thể không hoạt động nếu endpoint sai)
     try:
         sp_reports = _fetch_simplize(ticker, max_results=max_results)
-    except Exception:
+        debug_log.append(f"Simplize: lấy được {len(sp_reports)} báo cáo")
+    except Exception as e:
         sp_reports = []
+        debug_log.append(f"Simplize: LỖI -> {type(e).__name__}: {e}")
     if sp_reports:
         sources_used.append("Simplize")
         all_reports.extend(sp_reports)
@@ -192,6 +206,7 @@ def fetch_analysis_reports(ticker: str, max_results: int = 8):
             "reports": deduped[:max_results * 2],
             "is_ticker_specific": True,
             "sources_used": sources_used,
+            "debug_log": debug_log,
         }
 
     # Không có báo cáo riêng cho mã từ bất kỳ nguồn nào -> fallback về
@@ -201,6 +216,7 @@ def fetch_analysis_reports(ticker: str, max_results: int = 8):
             "reports": cafef_reports[:max_results],
             "is_ticker_specific": False,
             "sources_used": ["CafeF"],
+            "debug_log": debug_log,
         }
 
-    return {"reports": [], "is_ticker_specific": False, "sources_used": []}
+    return {"reports": [], "is_ticker_specific": False, "sources_used": [], "debug_log": debug_log}
