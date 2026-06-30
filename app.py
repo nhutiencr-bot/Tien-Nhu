@@ -4,22 +4,14 @@ from pipeline import execute_equity_research_pipeline
 from symbols_loader import load_all_symbols, build_display_options
 from ui_components import (
     render_kpi_cards, render_tab_kqkd, render_tab_valuation,
-    render_tab_dcf, render_tab_dupont, render_tab_volume, fmt,
+    render_tab_dcf, render_tab_dupont, render_tab_volume, render_tab_news, fmt,
 )
-# Lưu ý: Tôi đã bỏ render_tab_news khỏi import vì chúng ta sẽ tự render đẹp hơn ở dưới
 
 st.set_page_config(page_title="Equity Research AI", layout="wide")
 apply_premium_fintech_theme()
 
 st.title("🎯 AI Equity Research Terminal")
 st.caption("Khởi chạy hệ thống tự động 7 bước kết hợp cơ chế kiểm toán vượt 7 bẫy BCTC đặc thù thị trường Việt Nam.")
-
-# --- BÍ QUYẾT LÀM MƯỢT (CACHE DỮ LIỆU) ---
-# Dữ liệu cào về sẽ được lưu trong bộ nhớ 1 tiếng (3600 giây). 
-# Bấm chuyển tab sẽ mượt ngay lập tức vì không phải cào lại!
-@st.cache_data(ttl=3600, show_spinner=False)
-def get_cached_pipeline(ticker):
-    return execute_equity_research_pipeline(ticker)
 
 # --- Chọn mã: KHÔNG mặc định mã nào ---
 df_symbols = load_all_symbols()
@@ -49,9 +41,10 @@ if not ticker_input:
     st.stop()
 
 # --- Pipeline với spinner ---
-with st.spinner(f"⏳ Đang tải dữ liệu {ticker_input}... Lần đầu có thể mất 10-15s, các lần sau sẽ mượt ngay lập tức!"):
-    # Gọi hàm đã bọc Cache thay vì gọi trực tiếp pipeline
-    pipeline_output = get_cached_pipeline(ticker_input)
+debug_cafef = st.checkbox("🔍 Bật chế độ debug CafeF (xem chi tiết quá trình cào dữ liệu năm/quý cũ)", value=False)
+
+with st.spinner(f"⏳ Đang tải dữ liệu {ticker_input}..."):
+    pipeline_output = execute_equity_research_pipeline(ticker_input, debug_cafef=debug_cafef)
 
 if pipeline_output is None:
     st.error(f"Không thể tải dữ liệu cho mã {ticker_input}. Vui lòng thử mã khác.")
@@ -63,7 +56,7 @@ if pipeline_output is None:
 # --- Header ---
 st.markdown(f"## Báo Cáo Định Giá Toàn Diện: {ticker_input}")
 st.caption(
-    f"Nguồn: vnstock API ({metrics.get('source_used', 'N/A')}) · "
+    f"Nguồn: vnstock API ({metrics['source_used']}) · "
     f"Tham khảo/giáo dục — không phải lời khuyên đầu tư · Đầu tư cổ phiếu có rủi ro mất vốn."
 )
 
@@ -101,10 +94,10 @@ with tab_valuation:
 with tab_multiples:
     st.markdown("### Multiples Mở Rộng")
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("P/E", f"{metrics.get('pe', 0):.2f}x")
-    m2.metric("P/B", f"{metrics.get('pb', 0):.2f}x")
-    m3.metric("EPS", fmt(fundamentals.get('eps_latest', 0), suffix=" đ", decimals=0))
-    m4.metric("BVPS", fmt(fundamentals.get('bvps_latest', 0), suffix=" đ", decimals=0))
+    m1.metric("P/E", f"{metrics['pe']:.2f}x")
+    m2.metric("P/B", f"{metrics['pb']:.2f}x")
+    m3.metric("EPS", fmt(fundamentals['eps_latest'], suffix=" đ", decimals=0))
+    m4.metric("BVPS", fmt(fundamentals['bvps_latest'], suffix=" đ", decimals=0))
     st.info("ℹ️ EV/EBITDA, P/CF, P/S phụ thuộc field bổ sung không phải nguồn nào cũng có.")
 
 with tab_dcf:
@@ -117,9 +110,9 @@ with tab_insights:
     box_bull, box_bear = st.columns(2)
     box_bull.success(
         f"**🟢 BULL CASE**\n"
-        f"- Xu hướng: {tech.get('trend_signal', 'N/A')}\n"
-        f"- CAGR LNST 5N: {fmt(fundamentals.get('net_profit_cagr_pct', 0), suffix='%')}\n"
-        f"- ROE: {fmt(fundamentals.get('roe_latest', 0), suffix='%')}"
+        f"- Xu hướng: {tech['trend_signal']}\n"
+        f"- CAGR LNST 5N: {fmt(fundamentals['net_profit_cagr_pct'], suffix='%')}\n"
+        f"- ROE: {fmt(fundamentals['roe_latest'], suffix='%')}"
     )
     box_bear.error(
         f"**🔴 BEAR CASE**\n"
@@ -127,47 +120,19 @@ with tab_insights:
         f"- Cần kiểm tra số CP lưu hành thay đổi\n"
         f"- DCF/Graham chỉ mang tính tham khảo"
     )
-    if tech.get('oil_correlation', 0.0) != 0.0:
+    if tech['oil_correlation'] != 0.0:
         st.warning(f"🛢️ Tương quan giá dầu: **{tech['oil_correlation']:.2f}** — mã nhạy cảm với biến động dầu thô WTI.")
 
 with tab_volume:
     render_tab_volume(df_price_clean, tech, metrics)
 
-# --- TAB TIN TỨC: TIÊU ĐỀ TRẮNG + TÊN NGUỒN MÀU TÍM ---
 with tab_news:
-    st.subheader("📰 Tin Tức & Sự Kiện Nổi Bật")
-    if news_cards and len(news_cards) > 0:
-        for news in news_cards:
-            title = news.get('title', 'Không có tiêu đề')
-            link = news.get('url', '#')
-            source = news.get('source', 'Hệ thống')
-            pub_date = news.get('pub_date', '—')
-            
-            if "Không có sự kiện bất thường" in title:
-                st.info(title)
-                continue
-                
-            # 1. Tiêu đề chữ trắng, link click được
-            st.markdown(
-                f'<h5>📰 <a href="{link}" target="_blank" style="color: white; text-decoration: none;">{title} 🔗</a></h5>', 
-                unsafe_allow_html=True
-            )
-            
-            # 2. Đổi màu TÊN NGUỒN (Màu tím nhạt sang trọng)
-            # Bạn có thể thay mã màu #bd93f9 bằng mã màu khác ở phần style="color: ..."
-            st.markdown(
-                f'<p style="color: #a0a0a0; font-size: 14px;">Nguồn: <span style="color: #bd93f9; font-weight: bold;">{source}</span> | Ngày cập nhật: {pub_date}</p>', 
-                unsafe_allow_html=True
-            )
-            
-            st.divider()
-    else:
-        st.info("Không có tin tức nào trong thời gian qua.")
+    render_tab_news(news_cards)
 
 # --- Disclaimer ---
 st.divider()
 st.caption(
-    f"⚠️ **Disclaimer:** Báo cáo giáo dục/tham khảo. Nguồn: vnstock API ({metrics.get('source_used', 'N/A')}). "
+    f"⚠️ **Disclaimer:** Báo cáo giáo dục/tham khảo. Nguồn: vnstock API ({metrics['source_used']}). "
     "Đối chiếu BCTC kiểm toán chính thức trước khi ra quyết định. "
     "**Không phải lời khuyên đầu tư.** Đầu tư cổ phiếu có rủi ro mất vốn."
 )
