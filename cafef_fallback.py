@@ -34,7 +34,23 @@ HEADERS = {
     "Referer": "https://cafef.vn/",
 }
 
-REQUEST_TIMEOUT = 10
+REQUEST_TIMEOUT = 5  # giảm từ 10s -> 5s để tránh treo lâu khi CafeF chặn/không phản hồi
+
+
+@st.cache_data(ttl=300)  # cache 5 phút: tránh test lại liên tục trong cùng phiên
+def _cafef_is_reachable() -> bool:
+    """
+    Circuit breaker: kiểm tra 1 LẦN DUY NHẤT xem CafeF có phản hồi không,
+    TRƯỚC KHI lặp qua hàng chục quý/năm. Nếu CafeF chặn IP (rất có khả
+    năng với Streamlit Cloud) hoặc mạng lỗi, dừng NGAY LẬP TỨC thay vì
+    chờ timeout cho từng request riêng lẻ -> đây là nguyên nhân chính
+    khiến trang load tới ~1 phút khi CafeF không phản hồi.
+    """
+    try:
+        resp = requests.get("https://cafef.vn", headers=HEADERS, timeout=4)
+        return resp.status_code == 200
+    except Exception:
+        return False
 
 
 def _find_company_slug(ticker: str) -> str:
@@ -193,13 +209,17 @@ def fetch_cafef_balance_sheet_5y(ticker: str, end_year: int):
     equity_by_year = {}
     total_assets_by_year = {}
 
+    if not _cafef_is_reachable():
+        st.warning("⚠️ CafeF không phản hồi (có thể chặn IP Streamlit Cloud) — bỏ qua lớp dự phòng này.")
+        return {"equity": pd.Series(dtype=float), "total_assets": pd.Series(dtype=float)}
+
     for year in range(end_year - 4, end_year + 1):
         data = _fetch_one_period(ticker, year, 4, slug)
         if 'equity' in data:
             equity_by_year[year] = data['equity']
         if 'total_assets' in data:
             total_assets_by_year[year] = data['total_assets']
-        time.sleep(0.4)
+        time.sleep(0.15)
 
     return {
         "equity": pd.Series(equity_by_year).sort_index(),
@@ -224,6 +244,12 @@ def fetch_cafef_yearly_full(ticker: str, years: list, debug: bool = False):
 
     revenue, net_profit, equity, total_assets = {}, {}, {}, {}
 
+    if not _cafef_is_reachable():
+        st.warning(f"⚠️ CafeF không phản hồi (có thể chặn IP Streamlit Cloud) — không bù được dữ liệu năm {years} cho {ticker}.")
+        empty = pd.Series(dtype=float)
+        return {"revenue": empty, "net_profit": empty, "equity": empty,
+                "total_assets": empty, "roe": empty, "roa": empty}
+
     for year in years:
         data = _fetch_one_period(ticker, year, 4, slug, debug=debug)
         if 'revenue' in data:
@@ -234,7 +260,7 @@ def fetch_cafef_yearly_full(ticker: str, years: list, debug: bool = False):
             equity[year] = data['equity']
         if 'total_assets' in data:
             total_assets[year] = data['total_assets']
-        time.sleep(0.4)
+        time.sleep(0.15)
 
     revenue_s, profit_s = pd.Series(revenue).sort_index(), pd.Series(net_profit).sort_index()
     equity_s, assets_s = pd.Series(equity).sort_index(), pd.Series(total_assets).sort_index()
@@ -270,6 +296,10 @@ def fetch_cafef_quarterly_full(ticker: str, quarters: list, debug: bool = False)
 
     revenue, net_profit, equity, total_assets = {}, {}, {}, {}
 
+    if not _cafef_is_reachable():
+        st.warning(f"⚠️ CafeF không phản hồi (có thể chặn IP Streamlit Cloud) — không bù được {len(quarters)} quý còn thiếu cho {ticker}.")
+        return {"revenue": {}, "net_profit": {}, "equity": {}, "total_assets": {}}
+
     for year, q in quarters:
         key = f"{year}-Q{q}"
         data = _fetch_one_period(ticker, year, q, slug, debug=debug)
@@ -281,7 +311,7 @@ def fetch_cafef_quarterly_full(ticker: str, quarters: list, debug: bool = False)
             equity[key] = data['equity']
         if 'total_assets' in data:
             total_assets[key] = data['total_assets']
-        time.sleep(0.4)
+        time.sleep(0.15)
 
     return {
         "revenue": revenue, "net_profit": net_profit,
