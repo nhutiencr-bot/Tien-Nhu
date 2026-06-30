@@ -59,6 +59,17 @@ def load_all_symbols():
 
             # Chỉ giữ cổ phiếu thường trên 3 sàn chính, loại trùng mã
             out = out[out["exchange"].isin(["HOSE", "HNX", "UPCOM"])]
+
+            # Loại trái phiếu / chứng quyền / phái sinh: mã cổ phiếu thường VN
+            # luôn là 3 KÝ TỰ CHỮ CÁI (vd FPT, HPG, VCB). Trái phiếu thường có
+            # mã dài 8-10 ký tự lẫn số (vd BAB123032), chứng quyền cũng dài hơn
+            # và có số trong mã -> lọc bỏ theo đúng định dạng mã cổ phiếu.
+            out = out[out["symbol"].str.fullmatch(r"[A-Z]{3}")]
+
+            # Loại các dòng không có tên công ty (thường là do dữ liệu rác/trái phiếu sót lại)
+            out["organ_name"] = out["organ_name"].astype(str).str.strip()
+            out = out[~out["organ_name"].isin(["", "nan", "None", "NaN"])]
+
             out = out.drop_duplicates(subset="symbol").sort_values(["exchange", "symbol"]).reset_index(drop=True)
 
             if out.empty:
