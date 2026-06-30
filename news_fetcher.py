@@ -8,6 +8,7 @@ Lấy tin tức liên quan đến mã cổ phiếu từ Google News RSS.
 - Fallback: nếu RSS lỗi, trả về list rỗng để pipeline xử lý.
 """
 
+import re
 import urllib.request
 import urllib.parse
 import xml.etree.ElementTree as ET
@@ -120,6 +121,18 @@ def fetch_news_google_rss(ticker: str, max_results: int = MAX_NEWS) -> list[dict
             url      = link_el.text    if link_el    is not None else ""
             source   = source_el.text  if source_el  is not None else "Google News"
             pub_date = pubdate_el.text if pubdate_el is not None else ""
+
+            # Google News RSS luôn gắn " - Tên nguồn" vào cuối tiêu đề
+            # (vd "...20 triệu đơn vị - nguoiquansat.vn") -> cắt bỏ phần này
+            # vì tên nguồn đã hiển thị riêng ở dòng dưới rồi.
+            title = title.strip()
+            src_clean = (source or "").strip()
+            if src_clean and title.endswith(f" - {src_clean}"):
+                title = title[: -(len(src_clean) + 3)].strip()
+            else:
+                # Fallback: cắt cụm " - xxx.vn"/" - Tên Báo" cuối cùng nếu có,
+                # phòng khi tên nguồn không khớp y hệt domain trong tiêu đề.
+                title = re.sub(r"\s-\s[^-]{2,40}$", "", title).strip()
 
             # Bỏ qua tin quá cũ (hơn LOOKBACK_MONTHS tháng)
             if pub_date and not _is_within_months(pub_date, LOOKBACK_MONTHS):
