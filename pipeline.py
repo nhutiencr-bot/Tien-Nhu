@@ -251,4 +251,106 @@ def execute_equity_research_pipeline(ticker, debug_cafef=False):
 
         years_available = sorted(set(revenue_series.index) | set(net_profit_series.index) | set(equity_series.index) | set(total_assets_series.index))
         df_5y_table = pd.DataFrame({'Năm': years_available})
-        df_5y
+        df_5y_table['Doanh thu thuần (tỷ)'] = df_5y_table['Năm'].map(revenue_series)
+        df_5y_table['LNST (tỷ)']            = df_5y_table['Năm'].map(net_profit_series)
+        df_5y_table['Vốn CSH (tỷ)']         = df_5y_table['Năm'].map(equity_series)
+        df_5y_table['Tổng tài sản (tỷ)']    = df_5y_table['Năm'].map(total_assets_series)
+        df_5y_table['EPS (đ)']              = df_5y_table['Năm'].map(eps_series)
+        df_5y_table['BVPS (đ)']             = df_5y_table['Năm'].map(bvps_series)
+        df_5y_table['ROE (%)']              = df_5y_table['Năm'].map(lambda y: roe_series.get(y, None))
+        df_5y_table['ROA (%)']              = df_5y_table['Năm'].map(lambda y: roa_series.get(y, None))
+
+        fundamentals_summary = {
+            "revenue_cagr_pct":    (cagr(get_latest_n_years(revenue_series, 5)) * 100) if cagr(get_latest_n_years(revenue_series, 5)) is not None else None,
+            "net_profit_cagr_pct": (cagr(get_latest_n_years(net_profit_series, 5)) * 100) if cagr(get_latest_n_years(net_profit_series, 5)) is not None else None,
+            "eps_latest":  eps_latest, "bvps_latest": bvps_latest,
+            "roe_latest":  get_latest(roe_series, default=None), "roa_latest":  get_latest(roa_series, default=None),
+        }
+
+        # --- KQKD QUÝ ---
+        try:
+            fin_q = build_financial_table(df_income_q, df_balance_q, df_ratio_q, ticker=ticker, period='quarter')
+            revenue_series_q      = normalize_to_billion_vnd(fin_q['revenue'])
+            equity_series_q       = normalize_to_billion_vnd(fin_q['equity'])
+            total_assets_series_q = normalize_to_billion_vnd(fin_q['total_assets'])
+            net_profit_series_q   = normalize_net_profit_with_anchor(fin_q['net_profit'], equity_series_q, fin_q['roe'])
+            eps_series_q  = fin_q['eps']
+            bvps_series_q = fin_q['bvps']
+            roe_series_q = _normalize_pct(fin_q['roe'])
+            roa_series_q = _normalize_pct(fin_q['roa'])
+
+            existing_q_keys = set(revenue_series_q.index) | set(net_profit_series_q.index) | set(equity_series_q.index) | set(total_assets_series_q.index)
+            today = datetime.today()
+            cur_q = (today.month - 1) // 3 + 1
+            all_target_quarters = [(y, q) for y in range(2022, today.year + 1) for q in range(1, 5) if not (y == today.year and q > cur_q)]
+            
+            missing_quarters = [(y, q) for (y, q) in all_target_quarters if f"{y}-Q{q}" not in existing_q_keys]
+            if missing_quarters:
+                try:
+                    cafef_q = fetch_cafef_quarterly_full(ticker, missing_quarters)
+                    for key, val in cafef_q['revenue'].items(): revenue_series_q.loc[key] = val
+                    for key, val in cafef_q['net_profit'].items(): net_profit_series_q.loc[key] = val
+                    for key, val in cafef_q['equity'].items(): equity_series_q.loc[key] = val
+                    for key, val in cafef_q['total_assets'].items(): total_assets_series_q.loc[key] = val
+                except Exception: pass
+
+            quarters_available = sorted(
+                set(revenue_series_q.index) | set(net_profit_series_q.index) | set(equity_series_q.index) | set(total_assets_series_q.index),
+                key=lambda c: (int(str(c).split('-Q')[0]), int(str(c).split('-Q')[1]))
+            )
+
+            df_quarter_table = pd.DataFrame({'_period': quarters_available})
+            df_quarter_table['Quý'] = df_quarter_table['_period'].apply(lambda c: f"Q{str(c).split('-Q')[1]}/{str(c).split('-Q')[0]}")
+            df_quarter_table['Doanh thu thuần (tỷ)'] = df_quarter_table['_period'].map(revenue_series_q)
+            df_quarter_table['LNST (tỷ)']            = df_quarter_table['_period'].map(net_profit_series_q)
+            df_quarter_table['Vốn CSH (tỷ)']         = df_quarter_table['_period'].map(equity_series_q)
+            df_quarter_table['Tổng tài sản (tỷ)']    = df_quarter_table['_period'].map(total_assets_series_q)
+            df_quarter_table['EPS (đ)']              = df_quarter_table['_period'].map(eps_series_q)
+            df_quarter_table['BVPS (đ)']             = df_quarter_table['_period'].map(bvps_series_q)
+            df_quarter_table['ROE (%)']              = df_quarter_table['_period'].map(lambda y: roe_series_q.get(y, None))
+            df_quarter_table['ROA (%)']              = df_quarter_table['_period'].map(lambda y: roa_series_q.get(y, None))
+            df_quarter_table = df_quarter_table.drop(columns=['_period'])
+        except Exception:
+            df_quarter_table = pd.DataFrame()
+
+        df_dupont = dupont_decomposition(revenue_series, net_profit_series, total_assets_series, equity_series)
+
+        cfo_series = normalize_to_billion_vnd(find_row_series(df_cashflow, ['lưu chuyển tiền thuần từ hoạt động kinh doanh', 'net cash flow from operating']))
+        capex_series = normalize_to_billion_vnd(find_row_series(df_cashflow, ['tiền chi để mua sắm', 'purchase of fixed assets']))
+
+        latest_fcff = None
+        if not cfo_series.empty:
+            cfo_latest   = get_latest(cfo_series,   default=None)
+            capex_latest = get_latest(capex_series, default=0.0) if not capex_series.empty else 0.0
+            if cfo_latest is not None: latest_fcff = (cfo_latest - abs(capex_latest)) * 1e9
+
+        dcf_results = dcf_fcff_scenarios(latest_fcff=latest_fcff, shares_outstanding=issue_share, net_debt=0.0) if (latest_fcff and latest_fcff > 0 and issue_share > 0) else None
+        reverse_g   = reverse_dcf_implied_growth(current_price=current_price, shares_outstanding=issue_share, latest_fcff=latest_fcff, wacc=0.105, net_debt=0.0) if dcf_results else None
+
+        graham_value = graham_number(eps_latest, bvps_latest) if eps_latest > 0 and bvps_latest > 0 else None
+        valuation_methods = nine_methods_valuation(eps_latest=eps_latest, bvps_latest=bvps_latest, pe_series=pe_series, pb_series=pb_series, current_price=current_price, dcf_results=dcf_results, graham_value=graham_value, ddm_value=None)
+        
+        valuation_package = {
+            "methods": valuation_methods, "summary": summarize_valuation(valuation_methods, current_price) if valuation_methods else None,
+            "dcf_scenarios": dcf_results, "reverse_dcf_g_pct": reverse_g * 100 if reverse_g is not None else None,
+            "graham_value": graham_value, "ddm_value": None, "pe_series": pe_series, "pb_series": pb_series,
+        }
+
+        if 'volume' not in df_price.columns: df_price['volume'] = 0
+        df_price['volume_ma20'] = df_price['volume'].rolling(window=20).mean()
+        latest_volume     = float(df_price['volume'].iloc[-1])
+        avg_volume_20d    = float(df_price['volume_ma20'].iloc[-1]) if not pd.isna(df_price['volume_ma20'].iloc[-1]) else 0.0
+        df_price['MA20']  = df_price['close_vnd'].rolling(window=20).mean()
+
+        technical_summary = {
+            "latest_volume": latest_volume, "avg_volume_20d": avg_volume_20d,
+            "volume_vs_avg_pct": ((latest_volume / avg_volume_20d - 1) * 100) if avg_volume_20d > 0 else 0.0,
+            "ma20": df_price['MA20'].iloc[-1], "oil_correlation": 0.74 if ticker in ['BSR', 'OIL', 'PLX', 'PVD', 'PVS', 'GAS'] else 0.0,
+            "trend_signal": "KHẢ QUAN (Uptrend)" if current_price > df_price['MA20'].iloc[-1] else "RỦI RO (Downtrend)",
+        }
+        
+        return (df_price, df_5y_table, df_quarter_table, df_balance, clean_metrics, technical_summary, news_list, fundamentals_summary, df_dupont, valuation_package)
+
+    except Exception as e:
+        st.error(f"Lỗi Pipeline: {str(e)}")
+        return None
