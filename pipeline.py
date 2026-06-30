@@ -403,8 +403,6 @@ def execute_equity_research_pipeline(ticker):
         }
 
         # ── 11. Tin tức ────────────────────────────────────────────────────
-
-        # Lấy tin từ vnstock làm fallback (dùng df_news_raw đã fetch ở bước 2)
         vnstock_news = []
         if df_news_raw is not None and not df_news_raw.empty:
             for _, row in df_news_raw.head(10).iterrows():
@@ -415,27 +413,12 @@ def execute_equity_research_pipeline(ticker):
                     "pub_date": "—",
                 })
 
-        # Google News RSS là nguồn chính, vnstock làm fallback
         news_list = fetch_news_with_fallback(ticker, vnstock_news)
         if not news_list:
             news_list = [{
                 "title": "Không có sự kiện bất thường trong 30 ngày.",
                 "source": "Hệ thống tự động", "url": "#", "pub_date": "—"
             }]
-
-news_list = fetch_news_with_fallback(ticker, vnstock_news)
-
-if not news_list:
-    news_list = [{
-        "title": "Không có sự kiện bất thường trong 30 ngày.",
-        "source": "Hệ thống tự động", "url": "#", "pub_date": "—"
-    }]
-# Google News RSS là nguồn chính, vnstock làm fallback
-news_list = fetch_news_with_fallback(ticker, vnstock_news)
-        else:
-            news_list.append({
-                "title": "Không có sự kiện bất thường trong 30 ngày.",
-                "source": "Hệ thống tự động", "url": "#", "pub_date": "—"})
 
         return (
             df_price, df_5y_table, df_quarter_table, df_balance,
