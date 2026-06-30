@@ -262,25 +262,14 @@ with tab_report:
         st.info(f"Hiện chưa cào được báo cáo nào cho mã {ticker_input.upper()}. Dùng nút phía trên để xem trực tiếp.")
     else:
         st.success(f"Tìm thấy {len(reports_list)} báo cáo gần nhất!")
+
         for r in reports_list:
             rec = r["recommendation"]
             color = REC_COLOR.get(rec, "#8B5CF6")
-            with st.container(border=True):
-                top = st.columns([2, 2, 2, 2, 2])
-                top[0].markdown(f"**Mã:** {r['ticker']}")
-                top[1].markdown(
-                    f"<span style='background-color:{color};color:white;padding:2px 10px;border-radius:6px;font-weight:bold;'>{rec}</span>",
-                    unsafe_allow_html=True,
-                )
-                top[2].markdown(f"**Mục tiêu:** {fmt_price(r['target_price'])}")
-                top[3].markdown(f"**Giá khuyến nghị:** {fmt_price(r['ref_price'])}")
-                top[4].markdown(f"**Nguồn:** {r['source']}")
-                st.markdown(f"**{r['title']}**")
-                st.link_button("📄 Xem báo cáo gốc (PDF/Web)", r["url"])
 
-    st.divider()
-    st.caption(
-        "⚠️ **Disclaimer:** Báo cáo giáo dục/tham khảo. "
-        "Đối chiếu BCTC kiểm toán chính thức trước khi ra quyết định. "
+            card_html = f"""
+            <div style="
+                border: 1px solid rgba(255,255,255,0.12);
+                border-radius: 10px;ra quyết định. "
         "**Không phải lời khuyên đầu tư.** Đầu tư cổ phiếu có rủi ro mất vốn."
     )
