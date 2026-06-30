@@ -1,18 +1,25 @@
+import re
+import requests
+from bs4 import BeautifulSoup
+
 import streamlit as st
 from styles import apply_premium_fintech_theme
 from pipeline import execute_equity_research_pipeline
 from symbols_loader import load_all_symbols, build_display_options
 from ui_components import (
-render_kpi_cards, render_tab_kqkd, render_tab_valuation,
-render_tab_dcf, render_tab_dupont, render_tab_volume, fmt,
+    render_kpi_cards, render_tab_kqkd, render_tab_valuation,
+    render_tab_dcf, render_tab_dupont, render_tab_volume, fmt,
 )
-import re
-import requests
-from bs4 import BeautifulSoup
 
-REC_KEYWORDS = ["MUA", "BÁN", "TĂNG TỈ TRỌNG", "TĂNG TỶ TRỌNG",
-                "GIẢM TỈ TRỌNG", "GIẢM TỶ TRỌNG", "NẮM GIỮ",
-                "TRUNG LẬP", "KHẢ QUAN", "THEO DÕI", "PHÙ HỢP THỊ TRƯỜNG"]
+st.set_page_config(page_title="Equity Research AI", layout="wide")
+apply_premium_fintech_theme()
+
+REC_KEYWORDS = [
+    "MUA", "BÁN", "TĂNG TỈ TRỌNG", "TĂNG TỶ TRỌNG",
+    "GIẢM TỈ TRỌNG", "GIẢM TỶ TRỌNG", "NẮM GIỮ",
+    "TRUNG LẬP", "KHẢ QUAN", "THEO DÕI", "PHÙ HỢP THỊ TRƯỜNG",
+]
+
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_cafef_reports(ticker: str, limit: int = 8):
@@ -73,12 +80,20 @@ def fetch_cafef_reports(ticker: str, limit: int = 8):
         return []
     return out
 
+
+def fmt_price(v):
+    if v in (None, "", "—"):
+        return "—"
+    try:
+        return f"{float(v):,.0f}đ"
+    except (ValueError, TypeError):
+        return str(v)
+
+
 st.title("🎯 AI Equity Research Terminal")
 st.caption("Khởi chạy hệ thống tự động 7 bước kết hợp cơ chế kiểm toán vượt 7 bẫy BCTC đặc thù thị trường Việt Nam.")
 
 # --- BÍ QUYẾT LÀM MƯỢT (CACHE DỮ LIỆU) ---
-# Dữ liệu cào về sẽ được lưu trong bộ nhớ 1 tiếng (3600 giây). 
-# Bấm chuyển tab sẽ mượt ngay lập tức vì không phải cào lại!
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_cached_pipeline(ticker):
     return execute_equity_research_pipeline(ticker)
@@ -112,7 +127,6 @@ if not ticker_input:
 
 # --- Pipeline với spinner ---
 with st.spinner(f"⏳ Đang tải dữ liệu {ticker_input}... Lần đầu có thể mất 10-15s, các lần sau sẽ mượt ngay lập tức!"):
-    # Gọi hàm đã bọc Cache thay vì gọi trực tiếp pipeline
     pipeline_output = get_cached_pipeline(ticker_input)
 
 if pipeline_output is None:
@@ -196,7 +210,7 @@ with tab_insights:
 with tab_volume:
     render_tab_volume(df_price_clean, tech, metrics)
 
-# --- TAB TIN TỨC: TIÊU ĐỀ TRẮNG + TÊN NGUỒN MÀU TÍM CHỦ ĐẠO ---
+# --- TAB TIN TỨC ---
 with tab_news:
     st.subheader("📰 Tin Tức & Sự Kiện Nổi Bật")
     if news_cards and len(news_cards) > 0:
@@ -205,27 +219,24 @@ with tab_news:
             link = news.get('url', '#')
             source = news.get('source', 'Hệ thống')
             pub_date = news.get('pub_date', '—')
-            
+
             if "Không có sự kiện bất thường" in title:
                 st.info(title)
                 continue
-                
-            # 1. Tiêu đề chữ trắng, link click được (đã bỏ icon 📰 và 🔗)
+
             st.markdown(
-                f'<h5><a href="{link}" target="_blank" style="color: white; text-decoration: none;">{title}</a></h5>', 
+                f'<h5><a href="{link}" target="_blank" style="color: white; text-decoration: none;">{title}</a></h5>',
                 unsafe_allow_html=True
             )
-            
-            # 2. Chỉ hiện tên nguồn (màu tím) + ngày, bỏ chữ "Nguồn:"
             st.markdown(
-                f'<p style="color: #a0a0a0; font-size: 14px;"><span style="color: #8B5CF6; font-weight: bold;">{source}</span> | Ngày cập nhật: {pub_date}</p>', 
+                f'<p style="color: #a0a0a0; font-size: 14px;"><span style="color: #8B5CF6; font-weight: bold;">{source}</span> | Ngày cập nhật: {pub_date}</p>',
                 unsafe_allow_html=True
             )
-            
             st.divider()
     else:
         st.info("Không có tin tức nào trong thời gian qua.")
 
+# --- TAB BÁO CÁO PHÂN TÍCH ---
 with tab_report:
     st.markdown("### 📑 Báo Cáo Phân Tích & Khuyến Nghị")
     st.caption(f"Tổng hợp khuyến nghị mới nhất cho mã {ticker_input.upper()} từ CafeF — không cần đăng nhập.")
@@ -233,10 +244,10 @@ with tab_report:
     cafef_url = f"https://s.cafef.vn/bao-cao-phan-tich/{ticker_input.lower()}.chn"
     vietstock_url = f"https://finance.vietstock.vn/{ticker_input.upper()}/bao-cao-phan-tich.htm"
 
-    col1, col2 = st.columns(2)
-    with col1:
+    rep_col1, rep_col2 = st.columns(2)
+    with rep_col1:
         st.link_button("🔗 Xem tất cả trên CafeF", cafef_url, use_container_width=True)
-    with col2:
+    with rep_col2:
         st.link_button("🔗 Xem tất cả trên Vietstock", vietstock_url, use_container_width=True)
 
     st.divider()
@@ -250,14 +261,6 @@ with tab_report:
         "BÁN": "#EF4444", "GIẢM TỈ TRỌNG": "#EF4444", "GIẢM TỶ TRỌNG": "#EF4444",
     }
 
-    def fmt_price(v):
-        if v in (None, "", "—"):
-            return "—"
-        try:
-            return f"{float(v):,.0f}đ"
-        except (ValueError, TypeError):
-            return str(v)
-
     if not reports_list:
         st.info(f"Hiện chưa cào được báo cáo nào cho mã {ticker_input.upper()}. Dùng nút phía trên để xem trực tiếp.")
     else:
@@ -268,8 +271,25 @@ with tab_report:
             color = REC_COLOR.get(rec, "#8B5CF6")
 
             card_html = f"""
-            <div style="
-                border: 1px solid rgba(255,255,255,0.12);
-                border-radius: 10px;ra quyết định. "
+<div style="border: 1px solid rgba(255,255,255,0.12); border-radius: 10px; padding: 14px 18px; margin-bottom: 14px; background-color: rgba(255,255,255,0.02);">
+  <div style="display: flex; flex-direction: row; flex-wrap: nowrap; align-items: center; gap: 18px; overflow-x: auto; white-space: nowrap;">
+    <div style="min-width:90px;"><b>Mã:</b> {r['ticker']}</div>
+    <div><span style="background-color:{color};color:white;padding:2px 12px;border-radius:6px;font-weight:bold;font-size:13px;">{rec}</span></div>
+    <div style="min-width:160px;"><b>Mục tiêu:</b> {fmt_price(r['target_price'])}</div>
+    <div style="min-width:170px;"><b>Giá khuyến nghị:</b> {fmt_price(r['ref_price'])}</div>
+    <div style="min-width:140px;"><b>Nguồn:</b> {r['source']}</div>
+  </div>
+  <div style="margin-top:10px; font-weight:600;">{r['title']}</div>
+  <div style="margin-top:8px;">
+    <a href="{r['url']}" target="_blank" style="display:inline-block;background-color:#8B5CF6;color:white;padding:6px 14px;text-decoration:none;border-radius:6px;font-size:13px;font-weight:bold;">📄 Xem báo cáo gốc (PDF/Web)</a>
+  </div>
+</div>
+"""
+            st.markdown(card_html, unsafe_allow_html=True)
+
+    st.divider()
+    st.caption(
+        "⚠️ **Disclaimer:** Báo cáo giáo dục/tham khảo. "
+        "Đối chiếu BCTC kiểm toán chính thức trước khi ra quyết định. "
         "**Không phải lời khuyên đầu tư.** Đầu tư cổ phiếu có rủi ro mất vốn."
     )
