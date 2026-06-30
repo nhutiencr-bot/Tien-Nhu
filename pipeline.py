@@ -98,7 +98,7 @@ def _safe_call(fn, label, source_used, default=None):
 
 
 @st.cache_data(ttl=1800)
-def execute_equity_research_pipeline(ticker):
+def execute_equity_research_pipeline(ticker, debug_cafef=False):
     try:
         q_engine, f_engine, c_engine, source_used = _build_engines_with_fallback(ticker)
         if source_used != 'VCI':
@@ -274,7 +274,7 @@ def execute_equity_research_pipeline(ticker):
         missing_years = sorted(target_years - existing_years)
         if missing_years:
             try:
-                cafef_full = fetch_cafef_yearly_full(ticker, missing_years)
+                cafef_full = fetch_cafef_yearly_full(ticker, missing_years, debug=debug_cafef)
                 for yr, val in cafef_full['revenue'].items():
                     revenue_series.loc[yr] = val
                 for yr, val in cafef_full['net_profit'].items():
@@ -371,7 +371,7 @@ def execute_equity_research_pipeline(ticker):
             ]
             if missing_quarters:
                 try:
-                    cafef_q = fetch_cafef_quarterly_full(ticker, missing_quarters)
+                    cafef_q = fetch_cafef_quarterly_full(ticker, missing_quarters, debug=debug_cafef)
                     for key, val in cafef_q['revenue'].items():
                         revenue_series_q.loc[key] = val
                     for key, val in cafef_q['net_profit'].items():
