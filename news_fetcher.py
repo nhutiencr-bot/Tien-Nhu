@@ -125,11 +125,15 @@ def fetch_news_google_rss(ticker: str, max_results: int = MAX_NEWS) -> list[dict
             if pub_date and not _is_within_months(pub_date, LOOKBACK_MONTHS):
                 continue
 
-            # Format ngày hiển thị
+            # Parse ngày thực để sắp xếp đúng thứ tự (mới nhất -> cũ nhất),
+            # đồng thời tạo chuỗi hiển thị dd/mm/yyyy
             try:
                 dt = parsedate_to_datetime(pub_date)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
                 pub_date_display = dt.strftime("%d/%m/%Y")
             except Exception:
+                dt = datetime.min.replace(tzinfo=timezone.utc)
                 pub_date_display = pub_date[:10] if pub_date else "—"
 
             # Bỏ qua bài không có tiêu đề hoặc tiêu đề quá ngắn
@@ -141,12 +145,15 @@ def fetch_news_google_rss(ticker: str, max_results: int = MAX_NEWS) -> list[dict
                 "source":   source.strip() if source else "Google News",
                 "url":      url.strip() if url else "#",
                 "pub_date": pub_date_display,
+                "_sort_dt": dt,
             })
 
-            if len(results) >= max_results:
-                break
+        # Sắp xếp theo ngày thực, mới nhất lên đầu, rồi mới cắt còn max_results
+        results.sort(key=lambda x: x["_sort_dt"], reverse=True)
+        for r in results:
+            del r["_sort_dt"]
 
-        return results
+        return results[:max_results]
 
     except Exception as e:
         # Không raise để tránh crash app — trả về rỗng, pipeline tự fallback
