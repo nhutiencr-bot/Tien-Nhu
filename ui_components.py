@@ -83,9 +83,10 @@ def render_tab_kqkd(df_5y_table, fundamentals, period_col='Năm'):
     )
     st.plotly_chart(fig_kqkd, use_container_width=True)
 
-    c1, c2 = st.columns(2)
-    c1.metric("CAGR Doanh Thu (5N)", fmt(fundamentals['revenue_cagr_pct'], suffix="%"))
-    c2.metric("CAGR LNST (5N)", fmt(fundamentals['net_profit_cagr_pct'], suffix="%"))
+    if period_col == 'Năm':
+        c1, c2 = st.columns(2)
+        c1.metric("CAGR Doanh Thu (5N)", fmt(fundamentals['revenue_cagr_pct'], suffix="%"))
+        c2.metric("CAGR LNST (5N)", fmt(fundamentals['net_profit_cagr_pct'], suffix="%"))
 
     # Chart biên lợi nhuận
     st.markdown("### Biên Lợi Nhuận & ROE")
@@ -110,18 +111,73 @@ def render_tab_kqkd(df_5y_table, fundamentals, period_col='Năm'):
     )
     st.plotly_chart(fig_margin, use_container_width=True)
 
-    # Bảng tổng hợp
+    # Bảng tổng hợp — bố cục giống ảnh mẫu: hàng = chỉ tiêu, cột = các kỳ,
+    # thêm cột CAGR (tăng trưởng kép) và cột "Tăng trưởng" (mini sparkline).
     st.markdown(f"### Bảng Tổng Hợp Tài Chính {label}")
-    df_fmt = df_5y_table.copy()
-    for col in [c for c in df_fmt.columns if c != period_col]:
+
+    indicator_cols = [c for c in df_5y_table.columns if c != period_col]
+    periods = df_5y_table[period_col].tolist()
+
+    def _calc_cagr(series_vals, n_periods_per_year=1):
+        """CAGR giữa giá trị đầu tiên và cuối cùng có dữ liệu hợp lệ."""
+        valid = [(i, v) for i, v in enumerate(series_vals) if pd.notnull(v) and v != 0]
+        if len(valid) < 2:
+            return None
+        (i0, v0), (i1, v1) = valid[0], valid[-1]
+        n_periods = i1 - i0
+        if n_periods <= 0:
+            return None
+        n_years = n_periods / n_periods_per_year
+        if v0 <= 0 or v1 <= 0 or n_years <= 0:
+            return None
         try:
-            df_fmt[col] = df_fmt[col].apply(
-                lambda x: "{:,.2f}".format(float(x))
-                if pd.notnull(x) and str(x).strip() != "" else "—"
-            )
+            return ((v1 / v0) ** (1 / n_years) - 1) * 100
         except Exception:
-            pass
-    st.dataframe(df_fmt.set_index(period_col).T, use_container_width=True)
+            return None
+
+    n_per_year = 4 if period_col == 'Quý' else 1
+    is_pct_row = lambda name: '%' in name  # ROE/ROA: không cộng dồn theo CAGR
+
+    def _sparkline(series_vals):
+        """Sinh chuỗi mini-bar Unicode thể hiện xu hướng tăng trưởng."""
+        bars = "▁▂▃▄▅▆▇█"
+        valid_vals = [v for v in series_vals if pd.notnull(v)]
+        if len(valid_vals) < 2:
+            return "—"
+        lo, hi = min(valid_vals), max(valid_vals)
+        rng = (hi - lo) if hi != lo else 1
+        out = []
+        for v in series_vals:
+            if pd.isnull(v):
+                out.append(" ")
+            else:
+                idx = int((v - lo) / rng * (len(bars) - 1))
+                out.append(bars[idx])
+        trend_up = valid_vals[-1] >= valid_vals[0]
+        arrow = "🟢▲" if trend_up else "🔴▼"
+        return f"{''.join(out)}  {arrow}"
+
+    rows = []
+    for col in indicator_cols:
+        vals = df_5y_table[col].tolist()
+        row = {"Chỉ tiêu": col}
+        for p, v in zip(periods, vals):
+            row[p] = "—" if pd.isnull(v) else "{:,.2f}".format(float(v))
+        if is_pct_row(col):
+            row["CAGR"] = "—"
+        else:
+            cagr_val = _calc_cagr(vals, n_periods_per_year=n_per_year)
+            row["CAGR"] = fmt(cagr_val, suffix="%") if cagr_val is not None else "—"
+        row["Tăng trưởng"] = _sparkline(vals)
+        rows.append(row)
+
+    df_display = pd.DataFrame(rows).set_index("Chỉ tiêu")
+    st.dataframe(df_display, use_container_width=True)
+    st.caption(
+        "CAGR = Tốc độ tăng trưởng kép giữa kỳ đầu và kỳ cuối có dữ liệu trong bảng "
+        f"(theo {'năm' if period_col == 'Năm' else 'quý, quy đổi ra năm'}). "
+        "Cột 'Tăng trưởng' là biểu đồ mini thể hiện xu hướng qua các kỳ."
+    )
 
 
 def render_tab_valuation(valuation_pkg, metrics):
