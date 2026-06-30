@@ -478,7 +478,7 @@ def execute_equity_research_pipeline(ticker, debug_cafef=False):
             "trend_signal": "KHẢ QUAN (Uptrend)" if current_price > df_price['MA20'].iloc[-1] else "RỦI RO (Downtrend)",
         }
 
-        r# ── 12. Trả về ────────────────────────────────────────────────
+        # ── 12. Trả về ────────────────────────────────────────────────
         return (
             df_price, df_5y_table, df_quarter_table, df_balance, clean_metrics, technical_summary,
             news_list, fundamentals_summary, df_dupont, valuation_package,
