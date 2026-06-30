@@ -1,6 +1,7 @@
 import re
 import requests
 from bs4 import BeautifulSoup
+from cafef_reports import fetch_cafef_reports
 
 import streamlit as st
 from styles import apply_premium_fintech_theme
