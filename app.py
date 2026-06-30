@@ -191,6 +191,12 @@ with tab_reports:
     else:
         st.info("Không tải được báo cáo phân tích vào lúc này. Vui lòng thử lại sau.")
 
+    debug_log = reports_pkg.get("debug_log", []) if reports_pkg else []
+    if debug_log:
+        with st.expander("🔧 Chi tiết kỹ thuật (debug nguồn dữ liệu)"):
+            for line in debug_log:
+                st.text(line)
+
 
 # --- Disclaimer ---
 st.divider()
