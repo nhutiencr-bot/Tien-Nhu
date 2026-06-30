@@ -89,6 +89,57 @@ def _extract_row_values(html_text: str, row_label_pattern: str):
     return [_parse_vn_number(n) for n in raw_numbers]
 
 
+def _fetch_one_period(ticker: str, year: int, quarter: int, slug: str):
+    """
+    Cào 1 kỳ (năm + quý) từ CafeF, trả về dict các chỉ tiêu thô tìm được
+    (đơn vị tỷ đồng, đã chia 1e9). Quarter=4 nghĩa là số liệu LŨY KẾ/CUỐI
+    NĂM (CafeF không có báo cáo "riêng Q4", cột cuối của request quý=4
+    chính là số liệu chốt năm cho bảng cân đối, và là số liệu QUÝ 4 cho
+    KQKD vì KQKD CafeF hiển thị theo từng quý rời, không lũy kế).
+    Trả về dict rỗng nếu lỗi/không tìm thấy.
+    """
+    out = {}
+    bsheet_url = f"https://cafef.vn/du-lieu/bao-cao-tai-chinh/{ticker.lower()}/bsheet/{year}/{quarter}/0/0/{slug}.chn"
+    incsta_url = f"https://cafef.vn/du-lieu/bao-cao-tai-chinh/{ticker.lower()}/incsta/{year}/{quarter}/0/0/{slug}.chn"
+
+    try:
+        resp = requests.get(bsheet_url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+        if resp.status_code == 200:
+            text = resp.text
+            equity_vals = _extract_row_values(text, r'D\.\s*VỐN CHỦ SỞ HỮU')
+            assets_vals = _extract_row_values(text, r'TỔNG CỘNG TÀI SẢN')
+            if equity_vals and equity_vals[-1] is not None:
+                out['equity'] = equity_vals[-1] / 1e9
+            if assets_vals and assets_vals[-1] is not None:
+                out['total_assets'] = assets_vals[-1] / 1e9
+    except Exception:
+        pass
+
+    try:
+        resp = requests.get(incsta_url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+        if resp.status_code == 200:
+            text = resp.text
+            # Doanh nghiệp thường: "Doanh thu thuần". Ngân hàng: không có dòng
+            # này, thử thêm "Tổng thu nhập hoạt động" / "Thu nhập lãi thuần".
+            revenue_vals = (
+                _extract_row_values(text, r'Doanh thu thuần') or
+                _extract_row_values(text, r'TỔNG THU NHẬP HOẠT ĐỘNG') or
+                _extract_row_values(text, r'Thu nhập lãi thuần')
+            )
+            profit_vals = (
+                _extract_row_values(text, r'Lợi nhuận sau thuế thu nhập doanh nghiệp') or
+                _extract_row_values(text, r'LỢI NHUẬN SAU THUẾ')
+            )
+            if revenue_vals and revenue_vals[-1] is not None:
+                out['revenue'] = revenue_vals[-1] / 1e9
+            if profit_vals and profit_vals[-1] is not None:
+                out['net_profit'] = profit_vals[-1] / 1e9
+    except Exception:
+        pass
+
+    return out
+
+
 @st.cache_data(ttl=3600 * 12)
 def fetch_cafef_balance_sheet_5y(ticker: str, end_year: int):
     """
@@ -106,32 +157,98 @@ def fetch_cafef_balance_sheet_5y(ticker: str, end_year: int):
     total_assets_by_year = {}
 
     for year in range(end_year - 4, end_year + 1):
-        url = f"https://cafef.vn/du-lieu/bao-cao-tai-chinh/{ticker.lower()}/bsheet/{year}/4/0/0/{slug}.chn"
-        try:
-            resp = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
-            if resp.status_code != 200:
-                continue
-
-            text = resp.text
-
-            equity_vals = _extract_row_values(text, r'D\.\s*VỐN CHỦ SỞ HỮU')
-            assets_vals = _extract_row_values(text, r'TỔNG CỘNG TÀI SẢN')
-
-            # Cột cuối cùng = kỳ gần nhất trong response = Q4 của `year`
-            if equity_vals and equity_vals[-1] is not None:
-                equity_by_year[year] = equity_vals[-1] / 1e9  # đồng -> tỷ đồng
-            if assets_vals and assets_vals[-1] is not None:
-                total_assets_by_year[year] = assets_vals[-1] / 1e9
-
-            time.sleep(0.5)  # tránh dồn request quá nhanh
-
-        except Exception as e:
-            st.warning(f"⚠️ [CafeF fallback] Lỗi khi lấy BCTC {ticker} năm {year}: {e}")
-            continue
+        data = _fetch_one_period(ticker, year, 4, slug)
+        if 'equity' in data:
+            equity_by_year[year] = data['equity']
+        if 'total_assets' in data:
+            total_assets_by_year[year] = data['total_assets']
+        time.sleep(0.4)
 
     return {
         "equity": pd.Series(equity_by_year).sort_index(),
         "total_assets": pd.Series(total_assets_by_year).sort_index(),
+    }
+
+
+@st.cache_data(ttl=3600 * 12)
+def fetch_cafef_yearly_full(ticker: str, years: list):
+    """
+    Cào ĐẦY ĐỦ Doanh thu thuần, LNST, Vốn CSH, Tổng tài sản cho danh sách
+    năm chỉ định (vd [2021, 2022, ...]) -- dùng để nối thêm năm cũ (2021)
+    mà vnstock không cung cấp (vnstock chỉ trả 4 năm gần nhất).
+
+    Trả về dict {'revenue':Series, 'net_profit':Series, 'equity':Series,
+    'total_assets':Series, 'roe':Series, 'roa':Series} theo TỶ ĐỒNG.
+    ROE/ROA tự tính = LNST / Vốn CSH (hoặc Tổng tài sản) * 100, đây là
+    CÔNG THỨC GẦN ĐÚNG (không phải số ROE/ROA chính thức công bố), dùng
+    khi không có cách nào khác.
+    """
+    slug = _find_company_slug(ticker)
+
+    revenue, net_profit, equity, total_assets = {}, {}, {}, {}
+
+    for year in years:
+        data = _fetch_one_period(ticker, year, 4, slug)
+        if 'revenue' in data:
+            revenue[year] = data['revenue']
+        if 'net_profit' in data:
+            net_profit[year] = data['net_profit']
+        if 'equity' in data:
+            equity[year] = data['equity']
+        if 'total_assets' in data:
+            total_assets[year] = data['total_assets']
+        time.sleep(0.4)
+
+    revenue_s, profit_s = pd.Series(revenue).sort_index(), pd.Series(net_profit).sort_index()
+    equity_s, assets_s = pd.Series(equity).sort_index(), pd.Series(total_assets).sort_index()
+
+    roe = (profit_s / equity_s.replace(0, float('nan')) * 100) if not equity_s.empty else pd.Series(dtype=float)
+    roa = (profit_s / assets_s.replace(0, float('nan')) * 100) if not assets_s.empty else pd.Series(dtype=float)
+
+    return {
+        "revenue": revenue_s, "net_profit": profit_s,
+        "equity": equity_s, "total_assets": assets_s,
+        "roe": roe.dropna(), "roa": roa.dropna(),
+    }
+
+
+@st.cache_data(ttl=3600 * 12)
+def fetch_cafef_quarterly_full(ticker: str, quarters: list):
+    """
+    Cào dữ liệu THEO QUÝ từ CafeF cho danh sách (year, quarter) chỉ định
+    -- dùng để bù các quý cũ mà vnstock không trả về (vnstock chỉ ổn định
+    4 quý gần nhất).
+
+    quarters: list các tuple (year:int, quarter:int), vd [(2022,1),(2022,2),...]
+
+    Trả về dict {'revenue':{key:val}, 'net_profit':{...}, 'equity':{...},
+    'total_assets':{...}} với key dạng chuỗi "YYYY-Qn", giá trị TỶ ĐỒNG.
+    Quý nào lỗi/không có dữ liệu sẽ bị bỏ qua (không có key đó).
+
+    ⚠️ Lưu ý: với LNST/Doanh thu, CafeF KQKD hiển thị số liệu RIÊNG của
+    từng quý (không lũy kế) nên dùng được trực tiếp. Với Vốn CSH/Tổng tài
+    sản (bảng cân đối), số liệu vốn dĩ là CUỐI KỲ nên cũng dùng trực tiếp.
+    """
+    slug = _find_company_slug(ticker)
+
+    revenue, net_profit, equity, total_assets = {}, {}, {}, {}
+
+    for year, q in quarters:
+        key = f"{year}-Q{q}"
+        data = _fetch_one_period(ticker, year, q, slug)
+        if 'revenue' in data:
+            revenue[key] = data['revenue']
+        if 'net_profit' in data:
+            net_profit[key] = data['net_profit']
+        if 'equity' in data:
+            equity[key] = data['equity']
+        if 'total_assets' in data:
+            total_assets[key] = data['total_assets']
+        time.sleep(0.4)
+
+    return {
+        "revenue": revenue, "net_profit": net_profit,
+        "equity": equity, "total_assets": total_assets,
     }
 
 
