@@ -58,7 +58,7 @@ if pipeline_output is None:
     st.stop()
 
 (df_price_clean, df_5y_table, df_quarter_table, df_balance_table, metrics, tech,
- news_cards, fundamentals, df_dupont, valuation_pkg) = pipeline_output
+ news_cards, fundamentals, df_dupont, valuation_pkg, reports_pkg) = pipeline_output
 
 # --- Header ---
 st.markdown(f"## Báo Cáo Định Giá Toàn Diện: {ticker_input}")
@@ -72,7 +72,7 @@ render_kpi_cards(metrics, fundamentals)
 
 # --- Tabs ---
 (tab_kqkd, tab_valuation, tab_multiples, tab_dcf, tab_dupont,
- tab_insights, tab_volume, tab_news) = st.tabs([
+ tab_insights, tab_volume, tab_news, tab_reports) = st.tabs([
     "📋 KQKD 5 Năm",
     "💰 Định Giá PE/PB · 9PP",
     "📐 Multiples Mở Rộng",
@@ -81,6 +81,7 @@ render_kpi_cards(metrics, fundamentals)
     "💡 Special Insights",
     "📊 Volume",
     "📰 Tin Tức 30 Ngày",
+    "📑 Báo Cáo Phân Tích",
 ])
 
 with tab_kqkd:
@@ -162,6 +163,34 @@ with tab_news:
             st.divider()
     else:
         st.info("Không có tin tức nào trong thời gian qua.")
+
+# --- TAB BÁO CÁO PHÂN TÍCH (CafeF) ---
+with tab_reports:
+    st.subheader("📑 Báo Cáo Phân Tích & Khuyến Nghị")
+    reports = reports_pkg.get("reports", []) if reports_pkg else []
+    is_specific = reports_pkg.get("is_ticker_specific", False) if reports_pkg else False
+
+    if not is_specific and reports:
+        st.info(
+            f"Chưa tìm thấy báo cáo riêng cho mã {ticker_input} trong danh sách mới nhất. "
+            "Dưới đây là các báo cáo phân tích mới nhất trên toàn thị trường."
+        )
+
+    if reports:
+        for r in reports:
+            st.markdown(
+                f'<h5><a href="{r["url"]}" target="_blank" style="color: white; text-decoration: none;">{r["title"]}</a></h5>',
+                unsafe_allow_html=True
+            )
+            st.markdown(
+                f'<p style="color: #a0a0a0; font-size: 14px;"><span style="color: #8B5CF6; font-weight: bold;">{r["source"]}</span> | Ngày cập nhật: {r["pub_date"]}</p>',
+                unsafe_allow_html=True
+            )
+            st.divider()
+        st.caption("Nguồn: Tổng hợp từ CafeF (cafef.vn/du-lieu/phan-tich-bao-cao.chn) · Tham khảo, không phải khuyến nghị đầu tư.")
+    else:
+        st.info("Không tải được báo cáo phân tích vào lúc này. Vui lòng thử lại sau.")
+
 
 # --- Disclaimer ---
 st.divider()
