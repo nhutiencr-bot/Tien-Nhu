@@ -133,7 +133,7 @@ with tab_insights:
 with tab_volume:
     render_tab_volume(df_price_clean, tech, metrics)
 
-# --- NÂNG CẤP TAB TIN TỨC: CLICK ĐƯỢC ---
+# --- CÁCH 1: TIÊU ĐỀ CHỮ TRẮNG + NÚT BẤM PREMIUM ---
 with tab_news:
     st.subheader("📰 Tin Tức & Sự Kiện Nổi Bật")
     if news_cards and len(news_cards) > 0:
@@ -143,14 +143,18 @@ with tab_news:
             source = news.get('source', 'Hệ thống')
             pub_date = news.get('pub_date', '—')
             
-            # Xử lý tin rỗng của hệ thống
             if "Không có sự kiện bất thường" in title:
                 st.info(title)
                 continue
                 
-            # Render link click được
-            st.markdown(f"##### 🔗 [{title}]({link})")
+            # 1. Tiêu đề hiện chữ trắng nguyên bản, không bị đổi màu link xấu
+            st.markdown(f"##### 📰 {title}")
+            
+            # 2. Dòng thông tin phụ
             st.caption(f"Nguồn: {source} | Ngày cập nhật: {pub_date}")
+            
+            # 3. Tạo nút bấm chuyển hướng đồng bộ màu với giao diện Premium
+            st.link_button("Đọc bài viết gốc 🔗", link)
             st.divider()
     else:
         st.info("Không có tin tức nào trong thời gian qua.")
