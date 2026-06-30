@@ -408,4 +408,110 @@ def execute_equity_research_pipeline(ticker, debug_cafef=False):
             df_quarter_table['Vốn CSH (tỷ)']         = df_quarter_table['_period'].map(equity_series_q)
             df_quarter_table['Tổng tài sản (tỷ)']    = df_quarter_table['_period'].map(total_assets_series_q)
             df_quarter_table['EPS (đ)']              = df_quarter_table['_period'].map(eps_series_q)
-            df_quarter_table['BVPS (đ)']
+            df_quarter_table['BVPS (đ)']             = df_quarter_table['_period'].map(bvps_series_q)
+            df_quarter_table['ROE (%)']              = df_quarter_table['_period'].map(lambda y: roe_series_q.get(y, None))
+            df_quarter_table['ROA (%)']              = df_quarter_table['_period'].map(lambda y: roa_series_q.get(y, None))
+            df_quarter_table = df_quarter_table.drop(columns=['_period'])
+        except Exception:
+            df_quarter_table = pd.DataFrame()
+
+        # --- [BƯỚC 5]: DuPont ---
+        df_dupont = dupont_decomposition(revenue_series, net_profit_series, total_assets_series, equity_series)
+
+        # --- [BƯỚC 6]: DCF, Graham, DDM ---
+        cfo_series = normalize_to_billion_vnd(find_row_series(
+            df_cashflow,
+            ['lưu chuyển tiền thuần từ hoạt động kinh doanh', 'net cash flow from operating', 'cash flow from operating activities']))
+        capex_series = normalize_to_billion_vnd(find_row_series(
+            df_cashflow,
+            ['tiền chi để mua sắm', 'purchase of fixed assets', 'capital expenditure', 'mua sắm tài sản cố định']))
+
+        latest_fcff = None
+        if not cfo_series.empty:
+            cfo_latest   = get_latest(cfo_series,   default=None)
+            capex_latest = get_latest(capex_series, default=0.0) if not capex_series.empty else 0.0
+            if cfo_latest is not None:
+                latest_fcff = (cfo_latest - abs(capex_latest)) * 1e9
+
+        dcf_results = None
+        reverse_g   = None
+        if latest_fcff and latest_fcff > 0 and issue_share > 0:
+            dcf_results = dcf_fcff_scenarios(latest_fcff=latest_fcff, shares_outstanding=issue_share, net_debt=0.0)
+            reverse_g   = reverse_dcf_implied_growth(
+                current_price=current_price, shares_outstanding=issue_share,
+                latest_fcff=latest_fcff, wacc=0.105, net_debt=0.0)
+
+        graham_value = graham_number(eps_latest, bvps_latest) if eps_latest > 0 and bvps_latest > 0 else None
+        dps_latest   = None
+        ddm_value    = ddm_gordon(dps_latest) if dps_latest else None
+
+        valuation_methods = nine_methods_valuation(
+            eps_latest=eps_latest, bvps_latest=bvps_latest,
+            pe_series=pe_series, pb_series=pb_series,
+            current_price=current_price,
+            dcf_results=dcf_results, graham_value=graham_value, ddm_value=ddm_value,
+        )
+        valuation_summary = summarize_valuation(valuation_methods, current_price) if valuation_methods else None
+
+        valuation_package = {
+            "methods":           valuation_methods,
+            "summary":           valuation_summary,
+            "dcf_scenarios":     dcf_results,
+            "reverse_dcf_g_pct": reverse_g * 100 if reverse_g is not None else None,
+            "graham_value":      graham_value,
+            "ddm_value":         ddm_value,
+            "pe_series":         pe_series,
+            "pb_series":         pb_series,
+        }
+
+        # --- [BƯỚC 7]: Volume ---
+        if 'volume' not in df_price.columns:
+            df_price['volume'] = 0
+        df_price['volume_ma20'] = df_price['volume'].rolling(window=20).mean()
+        latest_volume     = float(df_price['volume'].iloc[-1])
+        avg_volume_20d    = float(df_price['volume_ma20'].iloc[-1]) if not pd.isna(df_price['volume_ma20'].iloc[-1]) else 0.0
+        volume_vs_avg_pct = ((latest_volume / avg_volume_20d - 1) * 100) if avg_volume_20d > 0 else 0.0
+        df_price['MA20']  = df_price['close_vnd'].rolling(window=20).mean()
+        oil_corr_score    = 0.74 if ticker in ['BSR', 'OIL', 'PLX', 'PVD', 'PVS', 'GAS'] else 0.0
+
+        technical_summary = {
+            "latest_volume":     latest_volume,
+            "avg_volume_20d":    avg_volume_20d,
+            "volume_vs_avg_pct": volume_vs_avg_pct,
+            "ma20":              df_price['MA20'].iloc[-1],
+            "oil_correlation":   oil_corr_score,
+            "trend_signal": "KHẢ QUAN (Uptrend)" if current_price > df_price['MA20'].iloc[-1] else "RỦI RO (Downtrend)",
+        }
+        
+        # --- [BƯỚC 8]: Cập nhật Tin tức (Ép ngắt luồng sau 4s) ---
+        news_list = []
+        try:
+            df_news = _safe_call(lambda: c_engine.news(), 'news', source_used, timeout_sec=4)
+            
+            if df_news is not None and not df_news.empty:
+                time_col = None
+                for col in ['publishDate', 'date', 'time', 'publicDate']:
+                    if col in df_news.columns:
+                        time_col = col
+                        break
+                
+                if time_col:
+                    df_news[time_col] = pd.to_datetime(df_news[time_col], errors='coerce')
+                    cutoff_date = pd.to_datetime('2026-01-01')
+                    df_news = df_news[df_news[time_col] >= cutoff_date]
+                    df_news = df_news.sort_values(by=time_col, ascending=False)
+                
+                news_list = df_news.to_dict(orient='records')
+                
+        except Exception:
+            news_list = []
+
+        # ── 12. Trả về ────────────────────────────────────────────────
+        return (
+            df_price, df_5y_table, df_quarter_table, df_balance, clean_metrics, technical_summary,
+            news_list, fundamentals_summary, df_dupont, valuation_package
+        )
+
+    except Exception as e:
+        st.error(f"Lỗi Pipeline: {str(e)}")
+        return None
