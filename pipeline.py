@@ -309,22 +309,23 @@ def execute_equity_research_pipeline(ticker):
             "issue_share_million": issue_share / 1e6 if issue_share > 0 else 0,
             "source_used": source_used,
         }
-       # Bổ sung dữ liệu cho Multiples Mở Rộng
-revenue_latest = get_latest(revenue_series, default=0.0)  # tỷ VNĐ
-cfo_latest = get_latest(cfo_series, default=0.0) if not cfo_series.empty else 0.0  # tỷ VNĐ
 
-# EBITDA xấp xỉ = LNST + Khấu hao (nếu không có khấu hao riêng, dùng LNST làm proxy thận trọng)
-da_series = normalize_to_billion_vnd(find_row_series(
-    df_cashflow,
-    ['khấu hao tài sản cố định', 'khấu hao và phân bổ', 'depreciation and amortization']))
-da_latest = get_latest(da_series, default=0.0) if not da_series.empty else 0.0
-net_profit_latest = get_latest(net_profit_series, default=0.0)
-ebitda_latest = net_profit_latest + da_latest if (net_profit_latest or da_latest) else 0.0
+        # Bổ sung dữ liệu cho Multiples Mở Rộng
+        revenue_latest = get_latest(revenue_series, default=0.0)  # tỷ VNĐ
+        cfo_latest = get_latest(cfo_series, default=0.0) if not cfo_series.empty else 0.0  # tỷ VNĐ
 
-clean_metrics["revenue_latest_billion"] = revenue_latest
-clean_metrics["cfo_latest_billion"] = cfo_latest
-clean_metrics["ebitda_latest_billion"] = ebitda_latest
-clean_metrics["net_debt_billion"] = 0.0  # placeholder: chưa tách được nợ vay - tiền mặt từ balance sheet hiện có
+        # EBITDA xấp xỉ = LNST + Khấu hao (nếu không có khấu hao riêng, dùng LNST làm proxy thận trọng)
+        da_series = normalize_to_billion_vnd(find_row_series(
+            df_cashflow,
+            ['khấu hao tài sản cố định', 'khấu hao và phân bổ', 'depreciation and amortization']))
+        da_latest = get_latest(da_series, default=0.0) if not da_series.empty else 0.0
+        net_profit_latest = get_latest(net_profit_series, default=0.0)
+        ebitda_latest = net_profit_latest + da_latest if (net_profit_latest or da_latest) else 0.0
+
+        clean_metrics["revenue_latest_billion"] = revenue_latest
+        clean_metrics["cfo_latest_billion"] = cfo_latest
+        clean_metrics["ebitda_latest_billion"] = ebitda_latest
+        clean_metrics["net_debt_billion"] = 0.0  # placeholder: chưa tách được nợ vay - tiền mặt từ balance sheet hiện có
 
         # ── 6. Bảng KQKD theo Năm ─────────────────────────────────────────
         years_available = sorted(
