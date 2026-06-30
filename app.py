@@ -255,37 +255,62 @@ with tab_report:
     with st.spinner("Đang tải danh sách báo cáo..."):
         reports_list = fetch_cafef_reports(ticker_input)
 
-    REC_COLOR = {
-        "MUA": "#22C55E", "TĂNG TỈ TRỌNG": "#22C55E", "TĂNG TỶ TRỌNG": "#22C55E", "KHẢ QUAN": "#22C55E",
-        "NẮM GIỮ": "#F59E0B", "TRUNG LẬP": "#F59E0B", "THEO DÕI": "#F59E0B", "PHÙ HỢP THỊ TRƯỜNG": "#F59E0B",
-        "BÁN": "#EF4444", "GIẢM TỈ TRỌNG": "#EF4444", "GIẢM TỶ TRỌNG": "#EF4444",
-    }
+    current_price = metrics.get("current_price", 0) or 0
 
     if not reports_list:
-        st.info(f"Hiện chưa cào được báo cáo nào cho mã {ticker_input.upper()}. Dùng nút phía trên để xem trực tiếp.")
+        st.info(
+            f"Hiện chưa cào được báo cáo nào cho mã {ticker_input.upper()} từ CafeF. "
+            "Có thể trang đã đổi cấu trúc HTML hoặc không có báo cáo gần đây — dùng nút phía trên để xem trực tiếp."
+        )
     else:
-        st.success(f"Tìm thấy {len(reports_list)} báo cáo gần nhất!")
-
+        rows_html = ""
         for r in reports_list:
-            rec = r["recommendation"]
-            color = REC_COLOR.get(rec, "#8B5CF6")
+            tp = r["target_price"]
+            if tp and current_price > 0:
+                upside_pct = (tp - current_price) / current_price * 100
+                upside_str = f"{upside_pct:+.0f}%"
+                upside_color = "#22C55E" if upside_pct >= 0 else "#EF4444"
+            else:
+                upside_str = "—"
+                upside_color = "#888"
 
-            card_html = f"""
-<div style="border: 1px solid rgba(255,255,255,0.12); border-radius: 10px; padding: 14px 18px; margin-bottom: 14px; background-color: rgba(255,255,255,0.02);">
-  <div style="display: flex; flex-direction: row; flex-wrap: nowrap; align-items: center; gap: 18px; overflow-x: auto; white-space: nowrap;">
-    <div style="min-width:90px;"><b>Mã:</b> {r['ticker']}</div>
-    <div><span style="background-color:{color};color:white;padding:2px 12px;border-radius:6px;font-weight:bold;font-size:13px;">{rec}</span></div>
-    <div style="min-width:160px;"><b>Mục tiêu:</b> {fmt_price(r['target_price'])}</div>
-    <div style="min-width:170px;"><b>Giá khuyến nghị:</b> {fmt_price(r['ref_price'])}</div>
-    <div style="min-width:140px;"><b>Nguồn:</b> {r['source']}</div>
-  </div>
-  <div style="margin-top:10px; font-weight:600;">{r['title']}</div>
-  <div style="margin-top:8px;">
-    <a href="{r['url']}" target="_blank" style="display:inline-block;background-color:#8B5CF6;color:white;padding:6px 14px;text-decoration:none;border-radius:6px;font-size:13px;font-weight:bold;">📄 Xem báo cáo gốc (PDF/Web)</a>
-  </div>
-</div>
-"""
-            st.markdown(card_html, unsafe_allow_html=True)
+            tp_str = f"{tp:,.0f}" if tp else "—"
+
+            rows_html += f"""
+            <tr style="border-bottom: 1px solid rgba(255,255,255,0.08);">
+                <td style="padding:10px 14px; font-weight:bold;">{r['ticker']}</td>
+                <td style="padding:10px 14px;">{r['report_date']}</td>
+                <td style="padding:10px 14px;">{r['recommendation']}</td>
+                <td style="padding:10px 14px; text-align:right;">{tp_str}</td>
+                <td style="padding:10px 14px; text-align:right; color:{upside_color}; font-weight:bold;">{upside_str}</td>
+                <td style="padding:10px 14px;">{r['source']}</td>
+                <td style="padding:10px 14px;">
+                    <a href="{r['url']}" target="_blank" style="color:#8B5CF6; font-weight:bold; text-decoration:none;">Xem BCPT →</a>
+                </td>
+            </tr>
+            """
+
+        table_html = f"""
+        <div style="overflow-x:auto;">
+        <table style="width:100%; border-collapse:collapse; font-size:14px;">
+            <thead>
+                <tr style="border-bottom: 2px solid rgba(255,255,255,0.25); text-align:left;">
+                    <th style="padding:10px 14px;">Mã</th>
+                    <th style="padding:10px 14px;">Ngày khuyến nghị</th>
+                    <th style="padding:10px 14px;">Khuyến nghị</th>
+                    <th style="padding:10px 14px; text-align:right;">Giá mục tiêu</th>
+                    <th style="padding:10px 14px; text-align:right;">% upside</th>
+                    <th style="padding:10px 14px;">CTCK</th>
+                    <th style="padding:10px 14px;">Link BCPT</th>
+                </tr>
+            </thead>
+            <tbody>
+                {rows_html}
+            </tbody>
+        </table>
+        </div>
+        """
+        st.markdown(table_html, unsafe_allow_html=True)
 
     st.divider()
     st.caption(
