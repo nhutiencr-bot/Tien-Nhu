@@ -187,7 +187,7 @@ with tab_reports:
                 unsafe_allow_html=True
             )
             st.divider()
-        st.caption("Nguồn: Tổng hợp từ CafeF (cafef.vn/du-lieu/phan-tich-bao-cao.chn) · Tham khảo, không phải khuyến nghị đầu tư.")
+        st.caption(f"Nguồn: Tổng hợp từ {' + '.join(reports_pkg.get('sources_used', ['CafeF']))} · Tham khảo, không phải khuyến nghị đầu tư.")
     else:
         st.info("Không tải được báo cáo phân tích vào lúc này. Vui lòng thử lại sau.")
 
