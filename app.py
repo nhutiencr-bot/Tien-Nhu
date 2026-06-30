@@ -166,49 +166,88 @@ with tab_news:
 
 with tab_report:
     st.markdown("### 📑 Báo Cáo Phân Tích & Khuyến Nghị")
-    st.caption("Liên kết trực tiếp đến báo cáo phân tích từ CafeF và Vietstock — không cần đăng nhập, không cần tải về.")
+    st.caption("Tổng hợp khuyến nghị từ các công ty chứng khoán — không cần đăng nhập, không cần tải về.")
 
     cafef_url = f"https://s.cafef.vn/bao-cao-phan-tich/{ticker_input.lower()}.chn"
     vietstock_url = f"https://finance.vietstock.vn/{ticker_input.upper()}/bao-cao-phan-tich.htm"
 
     col1, col2 = st.columns(2)
     with col1:
-        st.link_button("🔗 Xem báo cáo trên CafeF", cafef_url, use_container_width=True)
+        st.link_button("🔗 Xem thêm trên CafeF", cafef_url, use_container_width=True)
     with col2:
-        st.link_button("🔗 Xem báo cáo trên Vietstock", vietstock_url, use_container_width=True)
+        st.link_button("🔗 Xem thêm trên Vietstock", vietstock_url, use_container_width=True)
 
-    st.info(f"Nhấn vào nút để mở danh sách báo cáo phân tích mới nhất cho mã **{ticker_input.upper()}**. Trang mở trong tab mới, không yêu cầu tài khoản.")
+    st.divider()
 
-    if not reports_pkg:
-        st.warning(f"Hiện chưa tìm thấy báo cáo phân tích mới nhất cho mã {ticker_input}.")
+    # --- Chuẩn hoá dữ liệu báo cáo, phòng trường hợp pipeline trả về sai định dạng ---
+    def normalize_reports(raw):
+        out = []
+        if not raw:
+            return out
+        for item in raw:
+            if isinstance(item, dict):
+                out.append({
+                    "ticker": item.get("ticker", ticker_input.upper()),
+                    "recommendation": item.get("recommendation", "—"),
+                    "target_price": item.get("target_price"),
+                    "ref_price": item.get("ref_price"),
+                    "report_date": item.get("report_date", "—"),
+                    "source": item.get("source", "—"),
+                    "url": item.get("url", "#"),
+                    "title": item.get("title", f"Báo cáo phân tích {ticker_input.upper()}"),
+                })
+            elif isinstance(item, str):
+                # item chỉ là 1 đường link PDF
+                out.append({
+                    "ticker": ticker_input.upper(),
+                    "recommendation": "—",
+                    "target_price": None,
+                    "ref_price": None,
+                    "report_date": "—",
+                    "source": "—",
+                    "url": item,
+                    "title": f"Báo cáo phân tích {ticker_input.upper()}",
+                })
+        return out
+
+    reports_list = normalize_reports(reports_pkg)
+
+    REC_COLOR = {
+        "MUA": "#22C55E", "TĂNG TỈ TRỌNG": "#22C55E", "TĂNG TỶ TRỌNG": "#22C55E",
+        "NẮM GIỮ": "#F59E0B", "TRUNG LẬP": "#F59E0B",
+        "BÁN": "#EF4444", "GIẢM TỈ TRỌNG": "#EF4444", "GIẢM TỶ TRỌNG": "#EF4444",
+    }
+
+    def fmt_price(v):
+        if v in (None, "", "—"):
+            return "—"
+        try:
+            return f"{float(v):,.0f}đ"
+        except (ValueError, TypeError):
+            return str(v)
+
+    if not reports_list:
+        st.info(f"Hiện chưa có dữ liệu báo cáo khuyến nghị tự động cho mã {ticker_input.upper()}. Dùng 2 nút phía trên để xem trực tiếp trên CafeF/Vietstock.")
     else:
-        st.success(f"Tìm thấy {len(reports_pkg)} báo cáo mới nhất!")
+        for r in reports_list:
+            rec = (r["recommendation"] or "—").upper()
+            color = REC_COLOR.get(rec, "#8B5CF6")
+            with st.container(border=True):
+                top = st.columns([2, 2, 2, 2, 2])
+                top[0].markdown(f"**Mã:** {r['ticker']}")
+                top[1].markdown(
+                    f"<span style='background-color:{color};color:white;padding:2px 10px;border-radius:6px;font-weight:bold;'>{rec}</span>",
+                    unsafe_allow_html=True,
+                )
+                top[2].markdown(f"**Mục tiêu:** {fmt_price(r['target_price'])}")
+                top[3].markdown(f"**Giá khuyến nghị:** {fmt_price(r['ref_price'])}")
+                top[4].markdown(f"**Nguồn:** {r['source']}")
 
-        for report in reports_pkg:
-            with st.container():
-                cols = st.columns([4, 1])
-                with cols[0]:
-                    st.markdown(f"**{report['title']}**")
-                    st.caption(f"Nguồn: {report.get('source', 'CafeF/Vietstock')}")
-                with cols[1]:
-                    st.markdown(
-                        f"""
-                        <a href="{report['url']}" target="_blank" style="
-                            background-color: #8B5CF6;
-                            color: white;
-                            padding: 8px 16px;
-                            text-decoration: none;
-                            border-radius: 5px;
-                            display: inline-block;
-                            font-size: 14px;
-                            font-weight: bold;">
-                            👁️ Xem Báo Cáo
-                        </a>
-                        """,
-                        unsafe_allow_html=True
-                    )
-                st.divider()
+                st.caption(f"Ngày khuyến nghị: {r['report_date']}")
+                st.markdown(f"**{r['title']}**")
+                st.link_button("📄 Xem báo cáo gốc (PDF)", r["url"], use_container_width=False)
 
+    st.divider()
     st.caption(
         "⚠️ **Disclaimer:** Báo cáo giáo dục/tham khảo. "
         "Đối chiếu BCTC kiểm toán chính thức trước khi ra quyết định. "
