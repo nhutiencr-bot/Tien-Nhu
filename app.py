@@ -164,42 +164,47 @@ with tab_news:
     else:
         st.info("Không có tin tức nào trong thời gian qua.")
 
-# --- TAB BÁO CÁO PHÂN TÍCH (CafeF) ---
-with tab_reports:
-    st.subheader("📑 Báo Cáo Phân Tích & Khuyến Nghị")
-    reports = reports_pkg.get("reports", []) if reports_pkg else []
-    is_specific = reports_pkg.get("is_ticker_specific", False) if reports_pkg else False
-
-    if not is_specific and reports:
-        st.info(
-            f"Chưa tìm thấy báo cáo riêng cho mã {ticker_input} trong danh sách mới nhất. "
-            "Dưới đây là các báo cáo phân tích mới nhất trên toàn thị trường."
-        )
-
-    if reports:
-        for r in reports:
-            st.markdown(
-                f'<h5><a href="{r["url"]}" target="_blank" style="color: white; text-decoration: none;">{r["title"]}</a></h5>',
-                unsafe_allow_html=True
-            )
-            st.markdown(
-                f'<p style="color: #a0a0a0; font-size: 14px;"><span style="color: #8B5CF6; font-weight: bold;">{r["source"]}</span> | Ngày cập nhật: {r["pub_date"]}</p>',
-                unsafe_allow_html=True
-            )
-            st.divider()
-        st.caption(f"Nguồn: Tổng hợp từ {' + '.join(reports_pkg.get('sources_used', ['CafeF']))} · Tham khảo, không phải khuyến nghị đầu tư.")
+# Giả sử bạn đang ở Tab Báo Cáo Phân Tích (tab_report)
+with tab_report:
+    st.markdown("### 📑 Báo Cáo Phân Tích & Khuyến Nghị")
+    
+    # Mã cổ phiếu hiện tại người dùng đang chọn (ví dụ 'BID' hoặc 'DPM')
+    current_ticker = "DPM" # Lấy từ biến của bạn
+    
+    with st.spinner("Đang tải dữ liệu báo cáo..."):
+        reports_data = get_analytical_reports(current_ticker)
+    
+    if not reports_data:
+        st.warning(f"Hiện chưa tìm thấy báo cáo phân tích mới nhất cho mã {current_ticker}. Nguồn: CafeF/Vietstock.")
     else:
-        st.info("Không tải được báo cáo phân tích vào lúc này. Vui lòng thử lại sau.")
-
-    debug_log = reports_pkg.get("debug_log", []) if reports_pkg else []
-    if debug_log:
-        with st.expander("🔧 Chi tiết kỹ thuật (debug nguồn dữ liệu)"):
-            for line in debug_log:
-                st.text(line)
-
-
-# --- Disclaimer ---
-st.divider()
+        st.success(f"Tìm thấy {len(reports_data)} báo cáo mới nhất!")
+        
+        # In ra danh sách báo cáo với nút bấm Xem trực tiếp (không cần tải)
+        for idx, report in enumerate(reports_data):
+            with st.container():
+                cols = st.columns([4, 1])
+                with cols[0]:
+                    st.markdown(f"**{report['title']}**")
+                    st.caption(f"Nguồn: {report['source']}")
+                with cols[1]:
+                    # Nút bấm mở thẳng tab mới xem PDF (Giống yêu cầu của bạn)
+                    st.markdown(
+                        f"""
+                        <a href="{report['url']}" target="_blank" style="
+                            background-color: #8B5CF6;
+                            color: white;
+                            padding: 8px 16px;
+                            text-decoration: none;
+                            border-radius: 5px;
+                            display: inline-block;
+                            font-size: 14px;
+                            font-weight: bold;">
+                            👁️ Xem Báo Cáo
+                        </a>
+                        """, 
+                        unsafe_allow_html=True
+                    )
+                st.divider()
 st.caption(
     f"⚠️ **Disclaimer:** Báo cáo giáo dục/tham khảo. Nguồn: vnstock API ({metrics.get('source_used', 'N/A')}). "
     "Đối chiếu BCTC kiểm toán chính thức trước khi ra quyết định. "
