@@ -50,6 +50,11 @@ TICKER_NAME_MAP = {
 LOOKBACK_MONTHS = 6
 MAX_NEWS = 20  # Số tin tối đa trả về
 
+# Timeout cho request RSS — giảm từ 15s xuống 5s để không kéo chậm cả pipeline
+# khi Google News phản hồi chậm hoặc mạng có vấn đề. Nếu timeout, hàm tự
+# fallback về [] và pipeline sẽ dùng news từ vnstock thay thế.
+RSS_TIMEOUT_SECONDS = 5
+
 
 def _build_search_query(ticker: str) -> str:
     """Tạo câu truy vấn tìm kiếm tốt nhất cho mã cổ phiếu."""
@@ -77,14 +82,15 @@ def _is_within_months(pub_date_str: str, months: int = LOOKBACK_MONTHS) -> bool:
 def fetch_news_google_rss(ticker: str, max_results: int = MAX_NEWS) -> list[dict]:
     """
     Lấy tin tức từ Google News RSS cho mã cổ phiếu ticker.
-    
+
     Trả về list of dict, mỗi dict có:
         title   : tiêu đề bài báo
         source  : tên nguồn (CafeF, VnExpress, ...)
         url     : đường dẫn bài gốc
         pub_date: ngày đăng (string dạng 'DD/MM/YYYY')
-    
-    Trả về [] nếu lỗi hoặc không có tin.
+
+    Trả về [] nếu lỗi, timeout, hoặc không có tin — KHÔNG raise exception,
+    để có thể gọi an toàn từ trong ThreadPoolExecutor của pipeline.py.
     """
     query = _build_search_query(ticker)
     encoded_query = urllib.parse.quote(query)
@@ -104,7 +110,9 @@ def fetch_news_google_rss(ticker: str, max_results: int = MAX_NEWS) -> list[dict
                 )
             },
         )
-        with urllib.request.urlopen(req, timeout=15) as response:
+        # Timeout ngắn (5s thay vì 15s cũ) — nếu Google News chậm thì bỏ qua
+        # nhanh và để pipeline fallback sang nguồn khác, tránh kéo chậm app.
+        with urllib.request.urlopen(req, timeout=RSS_TIMEOUT_SECONDS) as response:
             content = response.read()
 
         tree = ET.fromstring(content)
@@ -174,14 +182,21 @@ def fetch_news_google_rss(ticker: str, max_results: int = MAX_NEWS) -> list[dict
         return []
 
 
-def fetch_news_with_fallback(ticker: str, vnstock_news_cards: list) -> list[dict]:
+def fetch_news_with_fallback(ticker: str, vnstock_news_cards: list, rss_news: list | None = None) -> list[dict]:
     """
-    Hàm wrapper: thử Google News RSS trước, nếu rỗng thì fallback về
-    vnstock news_cards (đã có sẵn từ pipeline cũ).
-    
+    Hàm wrapper: ưu tiên dùng kết quả RSS đã có sẵn (nếu được truyền vào từ
+    pipeline, ví dụ khi đã fetch song song trong ThreadPoolExecutor), nếu
+    không có thì tự fetch RSS, cuối cùng mới fallback về vnstock news_cards.
+
     Trả về list of dict chuẩn hóa để render_tab_news() dùng được.
+
+    Tham số:
+        rss_news: kết quả của fetch_news_google_rss() đã fetch sẵn từ trước
+                  (vd trong thread pool). Truyền vào để tránh gọi network
+                  2 lần / chạy tuần tự sau khi pipeline đã xong việc khác.
     """
-    rss_news = fetch_news_google_rss(ticker)
+    if rss_news is None:
+        rss_news = fetch_news_google_rss(ticker)
 
     if rss_news:
         return rss_news
