@@ -72,7 +72,7 @@ render_kpi_cards(metrics, fundamentals)
 
 # --- Tabs ---
 (tab_kqkd, tab_valuation, tab_multiples, tab_dcf, tab_dupont,
- tab_insights, tab_volume, tab_news, tab_reports) = st.tabs([
+ tab_insights, tab_volume, tab_news, tab_report) = st.tabs([
     "📋 KQKD 5 Năm",
     "💰 Định Giá PE/PB · 9PP",
     "📐 Multiples Mở Rộng",
@@ -178,13 +178,13 @@ with tab_report:
         st.link_button("🔗 Xem báo cáo trên Vietstock", vietstock_url, use_container_width=True)
 
     st.info(f"Nhấn vào nút để mở danh sách báo cáo phân tích mới nhất cho mã **{ticker_input.upper()}**. Trang mở trong tab mới, không yêu cầu tài khoản.")
-    
-    if not reports_data:
-        st.warning(f"Hiện chưa tìm thấy báo cáo phân tích mới nhất cho mã {current_ticker}.")
+
+    if not reports_pkg:
+        st.warning(f"Hiện chưa tìm thấy báo cáo phân tích mới nhất cho mã {ticker_input}.")
     else:
-        st.success(f"Tìm thấy {len(reports_data)} báo cáo mới nhất!")
-        
-        for report in reports_data:
+        st.success(f"Tìm thấy {len(reports_pkg)} báo cáo mới nhất!")
+
+        for report in reports_pkg:
             with st.container():
                 cols = st.columns([4, 1])
                 with cols[0]:
@@ -204,12 +204,11 @@ with tab_report:
                             font-weight: bold;">
                             👁️ Xem Báo Cáo
                         </a>
-                        """, 
+                        """,
                         unsafe_allow_html=True
                     )
                 st.divider()
 
-    # Disclaimer an toàn (Không dùng biến metrics nếu không tồn tại)
     st.caption(
         "⚠️ **Disclaimer:** Báo cáo giáo dục/tham khảo. "
         "Đối chiếu BCTC kiểm toán chính thức trước khi ra quyết định. "
