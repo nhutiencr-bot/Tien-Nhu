@@ -25,6 +25,7 @@ _SESSION.headers.update(HEADERS)
 _REACHABLE_CACHE = {"ts": 0.0, "value": None}
 _REACHABLE_CACHE_TTL = 30  # giây
 
+
 def _cafef_is_reachable() -> bool:
     now = time.time()
     if _REACHABLE_CACHE["value"] is not None and (now - _REACHABLE_CACHE["ts"]) < _REACHABLE_CACHE_TTL:
@@ -38,15 +39,21 @@ def _cafef_is_reachable() -> bool:
     _REACHABLE_CACHE["value"] = ok
     return ok
 
+
 def _find_company_slug(ticker: str) -> str:
     return f"bao-cao-tai-chinh-{ticker.lower()}"
 
+
 def _parse_vn_number(raw: str):
     raw = raw.strip()
-    if not raw: return None
+    if not raw:
+        return None
     raw = raw.replace('.', '').replace(',', '.')
-    try: return float(raw)
-    except ValueError: return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
 
 def _extract_row_values(html_text: str, row_label_pattern: str):
     plain_text = re.sub(r'<[^>]+>', ' ', html_text)
@@ -54,10 +61,12 @@ def _extract_row_values(html_text: str, row_label_pattern: str):
     plain_text = re.sub(r'\s+', ' ', plain_text)
     pattern = re.compile(row_label_pattern + r'\s*((?:-?[\d.,]+\s*){1,40})', re.IGNORECASE)
     match = pattern.search(plain_text)
-    if not match: return []
+    if not match:
+        return []
     numbers_blob = match.group(1)
     raw_numbers = re.findall(r'-?[\d][\d.,]*', numbers_blob)
     return [_parse_vn_number(n) for n in raw_numbers]
+
 
 def _fetch_one_period(ticker: str, year: int, quarter: int, slug: str):
     out = {}
@@ -87,32 +96,38 @@ def _fetch_one_period(ticker: str, year: int, quarter: int, slug: str):
         assets_vals = (_extract_row_values(text_bs, r'TỔNG CỘNG TÀI SẢN') or
                        _extract_row_values(text_bs, r'TỔNG TÀI SẢN') or
                        _extract_row_values(text_bs, r'Tổng cộng tài sản'))
-        if equity_vals and equity_vals[-1] is not None: out['equity'] = equity_vals[-1] / 1e9
-        if assets_vals and assets_vals[-1] is not None: out['total_assets'] = assets_vals[-1] / 1e9
+        if equity_vals and equity_vals[-1] is not None:
+            out['equity'] = equity_vals[-1] / 1e9
+        if assets_vals and assets_vals[-1] is not None:
+            out['total_assets'] = assets_vals[-1] / 1e9
 
     if text_is:
         revenue_vals = (_extract_row_values(text_is, r'Doanh thu thuần') or
-                        _extract_row_values(text_is, r'TỔNG THU NHẬP HOẠT ĐỘNG') or
-                        _extract_row_values(text_is, r'Tổng thu nhập hoạt động') or
-                        _extract_row_values(text_is, r'Thu nhập lãi thuần') or
-                        _extract_row_values(text_is, r'Doanh thu hoạt động') or
-                        _extract_row_values(text_is, r'Tổng doanh thu hoạt động') or
-                        _extract_row_values(text_is, r'Tổng doanh thu') or
-                        _extract_row_values(text_is, r'Doanh thu bán hàng và cung cấp dịch vụ') or
-                        _extract_row_values(text_is, r'Doanh thu'))
+                         _extract_row_values(text_is, r'TỔNG THU NHẬP HOẠT ĐỘNG') or
+                         _extract_row_values(text_is, r'Tổng thu nhập hoạt động') or
+                         _extract_row_values(text_is, r'Thu nhập lãi thuần') or
+                         _extract_row_values(text_is, r'Doanh thu hoạt động') or
+                         _extract_row_values(text_is, r'Tổng doanh thu hoạt động') or
+                         _extract_row_values(text_is, r'Tổng doanh thu') or
+                         _extract_row_values(text_is, r'Doanh thu bán hàng và cung cấp dịch vụ') or
+                         _extract_row_values(text_is, r'Doanh thu'))
         profit_vals = (_extract_row_values(text_is, r'Lợi nhuận sau thuế thu nhập doanh nghiệp') or
                        _extract_row_values(text_is, r'LỢI NHUẬN SAU THUẾ') or
                        _extract_row_values(text_is, r'Lợi nhuận sau thuế') or
                        _extract_row_values(text_is, r'Lãi/\s*\(lỗ\) thuần sau thuế') or
                        _extract_row_values(text_is, r'Lợi nhuận thuần sau thuế'))
-        if revenue_vals and revenue_vals[-1] is not None: out['revenue'] = revenue_vals[-1] / 1e9
-        if profit_vals and profit_vals[-1] is not None: out['net_profit'] = profit_vals[-1] / 1e9
+        if revenue_vals and revenue_vals[-1] is not None:
+            out['revenue'] = revenue_vals[-1] / 1e9
+        if profit_vals and profit_vals[-1] is not None:
+            out['net_profit'] = profit_vals[-1] / 1e9
 
     return out
+
 
 def fetch_cafef_balance_sheet_5y(ticker: str, end_year: int):
     slug = _find_company_slug(ticker)
     equity_by_year, total_assets_by_year = {}, {}
+
     if not _cafef_is_reachable():
         return {"equity": pd.Series(dtype=float), "total_assets": pd.Series(dtype=float)}
 
@@ -125,22 +140,27 @@ def fetch_cafef_balance_sheet_5y(ticker: str, end_year: int):
         for future in concurrent.futures.as_completed(future_to_y):
             try:
                 year, data = future.result()
-                if 'equity' in data: equity_by_year[year] = data['equity']
-                if 'total_assets' in data: total_assets_by_year[year] = data['total_assets']
-            except Exception: pass
+                if 'equity' in data:
+                    equity_by_year[year] = data['equity']
+                if 'total_assets' in data:
+                    total_assets_by_year[year] = data['total_assets']
+            except Exception:
+                pass
 
     return {
         "equity": pd.Series(equity_by_year).sort_index(),
         "total_assets": pd.Series(total_assets_by_year).sort_index(),
     }
 
+
 def fetch_cafef_yearly_full(ticker: str, years: list, debug: bool = False):
     slug = _find_company_slug(ticker)
     revenue, net_profit, equity, total_assets = {}, {}, {}, {}
     empty = pd.Series(dtype=float)
-    
+
     if not _cafef_is_reachable() or not years:
-        return {"revenue": empty, "net_profit": empty, "equity": empty, "total_assets": empty, "roe": empty, "roa": empty}
+        return {"revenue": empty, "net_profit": empty, "equity": empty, "total_assets": empty,
+                "roe": empty, "roa": empty}
 
     def fetch_task(year):
         return year, _fetch_one_period(ticker, year, 4, slug)
@@ -151,11 +171,16 @@ def fetch_cafef_yearly_full(ticker: str, years: list, debug: bool = False):
         for future in concurrent.futures.as_completed(future_to_y):
             try:
                 year, data = future.result()
-                if 'revenue' in data: revenue[year] = data['revenue']
-                if 'net_profit' in data: net_profit[year] = data['net_profit']
-                if 'equity' in data: equity[year] = data['equity']
-                if 'total_assets' in data: total_assets[year] = data['total_assets']
-            except Exception: pass
+                if 'revenue' in data:
+                    revenue[year] = data['revenue']
+                if 'net_profit' in data:
+                    net_profit[year] = data['net_profit']
+                if 'equity' in data:
+                    equity[year] = data['equity']
+                if 'total_assets' in data:
+                    total_assets[year] = data['total_assets']
+            except Exception:
+                pass
 
     revenue_s, profit_s = pd.Series(revenue).sort_index(), pd.Series(net_profit).sort_index()
     equity_s, assets_s = pd.Series(equity).sort_index(), pd.Series(total_assets).sort_index()
@@ -168,10 +193,94 @@ def fetch_cafef_yearly_full(ticker: str, years: list, debug: bool = False):
         "roe": roe.dropna(), "roa": roa.dropna(),
     }
 
+
+def fetch_cafef_analysis_reports(ticker: str, page_size: int = 10):
+    """
+    Lấy danh sách báo cáo phân tích/khuyến nghị từ CafeF.
+
+    Trả về dict:
+        {
+            "reports": [{"title", "url", "source", "pub_date"}, ...],
+            "is_ticker_specific": bool,  # True nếu lọc được đúng theo mã,
+                                          # False nếu phải fallback sang
+                                          # danh sách báo cáo chung toàn thị trường
+            "sources_used": ["CafeF"],
+            "debug_log": [str, ...],
+        }
+
+    Lưu ý: CafeF không công bố API chính thức cho mục "Báo cáo phân tích",
+    nên hàm này dùng endpoint AJAX nội bộ (Type=2 ứng với nhóm "Báo cáo phân
+    tích" trong widget tin liên quan của CafeF). Nếu CafeF đổi cấu trúc,
+    hàm sẽ trả về reports rỗng một cách an toàn (không raise exception),
+    kèm debug_log để biết bước nào thất bại — bạn có thể mở expander
+    "Chi tiết kỹ thuật" trong tab Báo Cáo Phân Tích trên app để xem log này.
+    """
+    debug_log = []
+    ticker = ticker.upper().strip()
+
+    if not _cafef_is_reachable():
+        debug_log.append("CafeF không phản hồi (reachability check thất bại).")
+        return {"reports": [], "is_ticker_specific": False,
+                "sources_used": ["CafeF"], "debug_log": debug_log}
+
+    def _parse_items(html_text):
+        items = []
+        # Mỗi item trong widget CafeF thường có dạng:
+        # <a title="..." href="/đường-dẫn...">Tiêu đề</a> ... <span class="time">dd/mm/yyyy</span>
+        for m in re.finditer(
+            r'<a[^>]+href="([^"]+)"[^>]*title="([^"]*)"[^>]*>.*?</a>',
+            html_text, re.IGNORECASE | re.DOTALL
+        ):
+            url, title = m.group(1).strip(), m.group(2).strip()
+            if not title or len(title) < 8:
+                continue
+            if url.startswith("/"):
+                url = "https://s.cafef.vn" + url
+            items.append({"title": title, "url": url, "source": "CafeF", "pub_date": "—"})
+        return items
+
+    def _try_fetch(url, label):
+        try:
+            resp = _SESSION.get(url, timeout=REQUEST_TIMEOUT)
+            if resp.status_code != 200 or not resp.text:
+                debug_log.append(f"{label}: HTTP {resp.status_code}")
+                return []
+            items = _parse_items(resp.text)
+            debug_log.append(f"{label}: tìm thấy {len(items)} mục")
+            return items
+        except Exception as e:
+            debug_log.append(f"{label}: lỗi {e}")
+            return []
+
+    # 1) Thử lấy báo cáo riêng theo mã (Type=2 = "Báo cáo phân tích")
+    ticker_url = (
+        f"https://s.cafef.vn/Ajax/Events_RelatedNews_New.aspx"
+        f"?Symbol={ticker}&floorID=0&configID=0&PageIndex=1&PageSize={page_size}&Type=2"
+    )
+    reports = _try_fetch(ticker_url, f"Báo cáo riêng {ticker}")
+    is_specific = len(reports) > 0
+
+    # 2) Fallback: báo cáo phân tích chung toàn thị trường nếu không có theo mã
+    if not reports:
+        market_url = (
+            f"https://s.cafef.vn/Ajax/Events_RelatedNews_New.aspx"
+            f"?Symbol=&floorID=0&configID=0&PageIndex=1&PageSize={page_size}&Type=2"
+        )
+        reports = _try_fetch(market_url, "Báo cáo phân tích thị trường chung")
+        is_specific = False
+
+    return {
+        "reports": reports[:page_size],
+        "is_ticker_specific": is_specific,
+        "sources_used": ["CafeF"],
+        "debug_log": debug_log,
+    }
+
+
 def fetch_cafef_quarterly_full(ticker: str, quarters: list, debug: bool = False):
     slug = _find_company_slug(ticker)
     revenue, net_profit, equity, total_assets = {}, {}, {}, {}
-    
+
     if not _cafef_is_reachable() or not quarters:
         return {"revenue": {}, "net_profit": {}, "equity": {}, "total_assets": {}}
 
@@ -185,11 +294,16 @@ def fetch_cafef_quarterly_full(ticker: str, quarters: list, debug: bool = False)
         for future in concurrent.futures.as_completed(future_to_q):
             try:
                 key, data = future.result()
-                if 'revenue' in data: revenue[key] = data['revenue']
-                if 'net_profit' in data: net_profit[key] = data['net_profit']
-                if 'equity' in data: equity[key] = data['equity']
-                if 'total_assets' in data: total_assets[key] = data['total_assets']
-            except Exception: pass
+                if 'revenue' in data:
+                    revenue[key] = data['revenue']
+                if 'net_profit' in data:
+                    net_profit[key] = data['net_profit']
+                if 'equity' in data:
+                    equity[key] = data['equity']
+                if 'total_assets' in data:
+                    total_assets[key] = data['total_assets']
+            except Exception:
+                pass
 
     return {
         "revenue": revenue, "net_profit": net_profit,
