@@ -2,30 +2,18 @@
 reports_multisource.py
 -----------------------
 Mở rộng tab "Báo cáo phân tích" sang nhiều nguồn miễn phí, không chỉ CafeF.
-Thứ tự thử: CafeF (đã có, ổn định nhất) -> Vietstock (danh sách công khai,
-không cần login) -> Simplize (API ngầm phía sau trang bao-cao).
+Thứ tự thử: CafeF (parser dùng lxml, xem cafef_reports.py) -> Vietstock
+(danh sách công khai /bao-cao-phan-tich, không cần login) -> Simplize
+(best-effort qua API ngầm, có thể chưa hoạt động).
 
-LƯU Ý QUAN TRỌNG:
-- Vietstock: phần lớn nội dung bị khoá sau đăng nhập, chỉ có DANH SÁCH
-  TIÊU ĐỀ ở trang /bao-cao-phan-tich là công khai -> module này chỉ lấy
-  tiêu đề + link + nguồn, lọc theo mã (giống cơ chế cafef_reports.py).
-- Simplize: trang HTML trả về rỗng vì bảng load bằng JS gọi API. Hàm dưới
-  đoán endpoint phổ biến (api2.simplize.vn). Nếu Anthropic đoán sai /
-  endpoint đổi, hàm sẽ tự fail êm (trả về []) chứ không làm sập app -
-  BẠN NÊN MỞ DevTools > Network trên trang
-  https://simplize.vn/co-phieu/<MA>/bao-cao để lấy đúng URL API thật,
-  rồi sửa biến SIMPLIZE_API_CANDIDATES bên dưới.
-- Vì sandbox không gọi được các domain .vn nên toàn bộ phần này CHƯA được
-  test trực tiếp - hãy chạy thử trên Streamlit Cloud và xem log/caption
-  "Nguồn báo cáo" để biết nguồn nào thực sự hoạt động.
-
-Cách dùng: thay `from cafef_reports import fetch_analysis_reports`
-bằng `from reports_multisource import fetch_analysis_reports` trong pipeline.py
-(giữ nguyên signature nên không cần sửa gì khác).
+Cả 2 nguồn CafeF + Vietstock đều dùng lxml.html để parse DOM thật thay vì
+regex trên text thô -> không bị gãy khi tiêu đề báo cáo nằm lồng trong
+<span>/<h3> hay có ảnh thumbnail kèm theo trong cùng 1 khối.
 """
 
 import re
 import requests
+import lxml.html
 
 from cafef_reports import fetch_analysis_reports as _fetch_cafef_reports
 
@@ -38,12 +26,12 @@ TIMEOUT = 12
 
 # ─────────────────────────────────────────────
 # NGUỒN 2: Vietstock — danh sách công khai (không cần login)
+# Mẫu link thật: https://finance.vietstock.vn/bao-cao-phan-tich/20925/
+#                bmp-khuyen-nghi-kha-quan-voi-gia-muc-tieu-168500-...htm
 # ─────────────────────────────────────────────
 VIETSTOCK_LIST_URL = "https://finance.vietstock.vn/bao-cao-phan-tich"
-
-_VIETSTOCK_LINK_RE = re.compile(
-    r'href="(https?://finance\.vietstock\.vn/bao-cao-phan-tich/\d+/[^"]+\.htm)"[^>]*>\s*([^<]{8,200})\s*</a>',
-    re.IGNORECASE,
+_VIETSTOCK_HREF_RE = re.compile(
+    r'^https?://finance\.vietstock\.vn/bao-cao-phan-tich/\d+/.+\.htm$', re.IGNORECASE
 )
 _DATE_RE = re.compile(r'(\d{2}/\d{2}/\d{4})')
 
@@ -53,32 +41,47 @@ def _fetch_vietstock(ticker: str, max_results: int = 8):
         r = requests.get(VIETSTOCK_LIST_URL, headers=HEADERS, timeout=TIMEOUT)
         if r.status_code != 200 or not r.text:
             return []
-        html = r.text
+        tree = lxml.html.fromstring(r.text)
     except Exception:
         return []
 
-    matches = list(_VIETSTOCK_LINK_RE.finditer(html))
     ticker_upper = (ticker or "").strip().upper()
-    pattern = re.compile(rf'(^|[\s\(\[])({re.escape(ticker_upper)})([\s\-:\)\]]|$)') if ticker_upper else None
+    # Tiêu đề Vietstock thường ở dạng "BMP: Khuyến nghị..." hoặc "BMP - ..."
+    # nên chỉ cần khớp TICKER ở đầu câu, theo sau bởi dấu câu/khoảng trắng.
+    pattern = re.compile(rf'^{re.escape(ticker_upper)}([\s\-:,]|$)') if ticker_upper else None
 
     results = []
     seen = set()
-    for i, m in enumerate(matches):
-        url, title = m.group(1).strip(), m.group(2).strip()
-        if url in seen or len(title) < 8:
+    for a in tree.xpath("//a[@href]"):
+        href = (a.get("href") or "").strip()
+        if not _VIETSTOCK_HREF_RE.match(href):
+            continue
+        if href in seen:
+            continue
+        title = " ".join(a.text_content().split()).strip()
+        if len(title) < 8:
             continue
         if pattern and not pattern.search(title.upper()):
             continue
-        seen.add(url)
+        seen.add(href)
 
-        chunk_end = matches[i + 1].start() if i + 1 < len(matches) else min(len(html), m.end() + 800)
-        chunk = html[m.end():chunk_end]
-        date_match = _DATE_RE.search(chunk)
+        parent = a.getparent()
+        context_text = ""
+        if parent is not None:
+            try:
+                context_text = " ".join(parent.itertext())
+                nxt = parent.getnext()
+                if nxt is not None:
+                    context_text += " " + " ".join(nxt.itertext())
+            except Exception:
+                pass
+        date_match = _DATE_RE.search(context_text)
+        source_match = re.search(r'Ngu[oồ]n:\s*([A-Za-zÀ-ỹ&\.\-]+)', context_text)
 
         results.append({
             "title": title,
-            "url": url,
-            "source": "Vietstock",
+            "url": href,
+            "source": source_match.group(1).strip() if source_match else "Vietstock",
             "pub_date": date_match.group(1) if date_match else "—",
         })
         if len(results) >= max_results:
@@ -87,7 +90,11 @@ def _fetch_vietstock(ticker: str, max_results: int = 8):
 
 
 # ─────────────────────────────────────────────
-# NGUỒN 3: Simplize — API ngầm (CẦN XÁC NHẬN LẠI ENDPOINT THẬT)
+# NGUỒN 3: Simplize — API ngầm (best-effort, CÓ THỂ CHƯA HOẠT ĐỘNG)
+# Trang simplize.vn/co-phieu/{MA}/bao-cao load bảng báo cáo bằng JS gọi
+# API riêng. Nếu URL dưới sai, hàm tự fail êm (trả về []) chứ không
+# làm hỏng các nguồn khác. Mở DevTools > Network trên trang đó để lấy
+# đúng endpoint thật nếu muốn nguồn này hoạt động.
 # ─────────────────────────────────────────────
 SIMPLIZE_API_CANDIDATES = [
     "https://api2.simplize.vn/api/company/analysis-report/list/{ticker}?page=1&size=8",
@@ -141,9 +148,7 @@ def _fetch_simplize(ticker: str, max_results: int = 8):
 
 
 def _raw_probe(url, label, debug_log):
-    """Gọi thẳng 1 URL để xem status code / độ dài response thật,
-    không qua bất kỳ logic parse nào - giúp phân biệt 'bị chặn/404'
-    với 'request OK nhưng regex không khớp'."""
+    """Gọi thẳng 1 URL để xem status code / độ dài response thật."""
     try:
         r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
         snippet = (r.text or "")[:120].replace("\n", " ")
@@ -162,17 +167,13 @@ def fetch_analysis_reports(ticker: str, max_results: int = 8, debug: bool = Fals
     """
     Gộp báo cáo từ nhiều nguồn miễn phí, ưu tiên báo cáo RIÊNG cho mã.
     Trả về dict {"reports": [...], "is_ticker_specific": bool, "sources_used": [...], "debug_log": [...]}
-
-    debug_log thu thập lỗi thật của từng nguồn (status code / exception)
-    thay vì nuốt im lặng, để xác định nguồn nào bị chặn/timeout khi chạy
-    trên Streamlit Cloud.
     """
     all_reports = []
     sources_used = []
     debug_log = []
 
     debug_log.append("--- RAW PROBE (bỏ qua mọi logic parse) ---")
-    _raw_probe("https://s.cafef.vn", "s.cafef.vn (reachability check)", debug_log)
+    _raw_probe("https://cafef.vn/du-lieu/phan-tich-bao-cao.chn", "cafef.vn/du-lieu/phan-tich-bao-cao.chn", debug_log)
     _raw_probe(VIETSTOCK_LIST_URL, "finance.vietstock.vn/bao-cao-phan-tich", debug_log)
     _raw_probe(
         SIMPLIZE_API_CANDIDATES[0].format(ticker=(ticker or "").upper()),
