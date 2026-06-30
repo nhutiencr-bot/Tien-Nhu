@@ -99,6 +99,8 @@ def _safe_call(fn, label, source_used, default=None):
 
 @st.cache_data(ttl=1800)
 def execute_equity_research_pipeline(ticker, debug_cafef=False):
+    # Lưu ý: debug_cafef giữ lại ở tầng hàm nội bộ (không còn UI bật/tắt) --
+    # luôn chạy False, chỉ bật thủ công khi cần tự debug code trực tiếp.
     try:
         q_engine, f_engine, c_engine, source_used = _build_engines_with_fallback(ticker)
         if source_used != 'VCI':
