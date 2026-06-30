@@ -166,13 +166,18 @@ with tab_news:
 
 with tab_report:
     st.markdown("### 📑 Báo Cáo Phân Tích & Khuyến Nghị")
-    
-    # Mã cổ phiếu hiện tại người dùng đang chọn
-    # Đảm bảo current_ticker đã được định nghĩa ở trên (ví dụ từ st.session_state hoặc input)
-    if 'current_ticker' not in locals(): current_ticker = "DPM" 
-    
-    with st.spinner("Đang tải dữ liệu báo cáo..."):
-        reports_data = get_analytical_reports(current_ticker)
+    st.caption("Liên kết trực tiếp đến báo cáo phân tích từ CafeF và Vietstock — không cần đăng nhập, không cần tải về.")
+
+    cafef_url = f"https://s.cafef.vn/bao-cao-phan-tich/{ticker_input.lower()}.chn"
+    vietstock_url = f"https://finance.vietstock.vn/{ticker_input.upper()}/bao-cao-phan-tich.htm"
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.link_button("🔗 Xem báo cáo trên CafeF", cafef_url, use_container_width=True)
+    with col2:
+        st.link_button("🔗 Xem báo cáo trên Vietstock", vietstock_url, use_container_width=True)
+
+    st.info(f"Nhấn vào nút để mở danh sách báo cáo phân tích mới nhất cho mã **{ticker_input.upper()}**. Trang mở trong tab mới, không yêu cầu tài khoản.")
     
     if not reports_data:
         st.warning(f"Hiện chưa tìm thấy báo cáo phân tích mới nhất cho mã {current_ticker}.")
