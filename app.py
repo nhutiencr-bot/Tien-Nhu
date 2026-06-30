@@ -6,10 +6,72 @@ from ui_components import (
     render_kpi_cards, render_tab_kqkd, render_tab_valuation,
     render_tab_dcf, render_tab_dupont, render_tab_volume, fmt,
 )
-# Lưu ý: Tôi đã bỏ render_tab_news khỏi import vì chúng ta sẽ tự render đẹp hơn ở dưới
+import re
+import requests
+from bs4 import BeautifulSoup
 
-st.set_page_config(page_title="Equity Research AI", layout="wide")
-apply_premium_fintech_theme()
+REC_KEYWORDS = ["MUA", "BÁN", "TĂNG TỈ TRỌNG", "TĂNG TỶ TRỌNG",
+                "GIẢM TỈ TRỌNG", "GIẢM TỶ TRỌNG", "NẮM GIỮ",
+                "TRUNG LẬP", "KHẢ QUAN", "THEO DÕI", "PHÙ HỢP THỊ TRƯỜNG"]
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_cafef_reports(ticker: str, limit: int = 8):
+    """Cào danh sách báo cáo phân tích từ CafeF cho 1 mã, parse khuyến nghị + giá mục tiêu từ tiêu đề."""
+    url = f"https://s.cafef.vn/bao-cao-phan-tich/{ticker.lower()}.chn"
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    out = []
+    try:
+        resp = requests.get(url, headers=headers, timeout=10)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+
+        items = soup.select("a[href*='.chn']")
+        seen_links = set()
+
+        for a in items:
+            title = a.get_text(strip=True)
+            href = a.get("href", "")
+            if not title or len(title) < 15 or href in seen_links:
+                continue
+            if "report" not in href:
+                continue
+            if not href.startswith("http"):
+                href = "https://s.cafef.vn" + href if href.startswith("/") else "https://s.cafef.vn/" + href
+            seen_links.add(href)
+
+            rec = "—"
+            for kw in REC_KEYWORDS:
+                if kw in title.upper():
+                    rec = kw
+                    break
+
+            target_price = None
+            m = re.search(r"(?:giá mục tiêu|gmt)[:\s]*([\d.,]+)\s*(?:vnđ|đồng|đ)?", title, re.IGNORECASE)
+            if m:
+                raw = m.group(1).replace(".", "").replace(",", "")
+                try:
+                    target_price = float(raw)
+                except ValueError:
+                    target_price = None
+
+            source_match = re.search(r"-\s*([A-Z]{2,6})\s*$", title)
+            source = source_match.group(1) if source_match else "—"
+
+            out.append({
+                "ticker": ticker.upper(),
+                "recommendation": rec,
+                "target_price": target_price,
+                "ref_price": None,
+                "report_date": "—",
+                "source": source,
+                "url": href,
+                "title": title,
+            })
+            if len(out) >= limit:
+                break
+    except Exception:
+        return []
+    return out
 
 st.title("🎯 AI Equity Research Terminal")
 st.caption("Khởi chạy hệ thống tự động 7 bước kết hợp cơ chế kiểm toán vượt 7 bẫy BCTC đặc thù thị trường Việt Nam.")
@@ -166,26 +228,55 @@ with tab_news:
 
 with tab_report:
     st.markdown("### 📑 Báo Cáo Phân Tích & Khuyến Nghị")
-    st.caption(
-        f"Xem các báo cáo phân tích, khuyến nghị MUA/BÁN, giá mục tiêu mới nhất cho mã "
-        f"**{ticker_input.upper()}** từ CafeF và Vietstock — không cần đăng nhập."
-    )
+    st.caption(f"Tổng hợp khuyến nghị mới nhất cho mã {ticker_input.upper()} từ CafeF — không cần đăng nhập.")
 
     cafef_url = f"https://s.cafef.vn/bao-cao-phan-tich/{ticker_input.lower()}.chn"
     vietstock_url = f"https://finance.vietstock.vn/{ticker_input.upper()}/bao-cao-phan-tich.htm"
-    vietstock_search_url = f"https://finance.vietstock.vn/tim-kiem?key={ticker_input.upper()}"
 
     col1, col2 = st.columns(2)
     with col1:
-        st.link_button("🔗 Xem báo cáo trên CafeF", cafef_url, use_container_width=True)
+        st.link_button("🔗 Xem tất cả trên CafeF", cafef_url, use_container_width=True)
     with col2:
-        st.link_button("🔗 Xem báo cáo trên Vietstock", vietstock_url, use_container_width=True)
+        st.link_button("🔗 Xem tất cả trên Vietstock", vietstock_url, use_container_width=True)
 
-    st.info(
-        f"Bấm vào nút để mở danh sách báo cáo phân tích mới nhất cho **{ticker_input.upper()}**, "
-        "bao gồm khuyến nghị (MUA/BÁN/NẮM GIỮ), giá mục tiêu, ngày khuyến nghị và tên CTCK phát hành. "
-        "Trang mở trong tab mới, đọc trực tiếp không cần tải về."
-    )
+    st.divider()
+
+    with st.spinner("Đang tải danh sách báo cáo..."):
+        reports_list = fetch_cafef_reports(ticker_input)
+
+    REC_COLOR = {
+        "MUA": "#22C55E", "TĂNG TỈ TRỌNG": "#22C55E", "TĂNG TỶ TRỌNG": "#22C55E", "KHẢ QUAN": "#22C55E",
+        "NẮM GIỮ": "#F59E0B", "TRUNG LẬP": "#F59E0B", "THEO DÕI": "#F59E0B", "PHÙ HỢP THỊ TRƯỜNG": "#F59E0B",
+        "BÁN": "#EF4444", "GIẢM TỈ TRỌNG": "#EF4444", "GIẢM TỶ TRỌNG": "#EF4444",
+    }
+
+    def fmt_price(v):
+        if v in (None, "", "—"):
+            return "—"
+        try:
+            return f"{float(v):,.0f}đ"
+        except (ValueError, TypeError):
+            return str(v)
+
+    if not reports_list:
+        st.info(f"Hiện chưa cào được báo cáo nào cho mã {ticker_input.upper()}. Dùng nút phía trên để xem trực tiếp.")
+    else:
+        st.success(f"Tìm thấy {len(reports_list)} báo cáo gần nhất!")
+        for r in reports_list:
+            rec = r["recommendation"]
+            color = REC_COLOR.get(rec, "#8B5CF6")
+            with st.container(border=True):
+                top = st.columns([2, 2, 2, 2, 2])
+                top[0].markdown(f"**Mã:** {r['ticker']}")
+                top[1].markdown(
+                    f"<span style='background-color:{color};color:white;padding:2px 10px;border-radius:6px;font-weight:bold;'>{rec}</span>",
+                    unsafe_allow_html=True,
+                )
+                top[2].markdown(f"**Mục tiêu:** {fmt_price(r['target_price'])}")
+                top[3].markdown(f"**Giá khuyến nghị:** {fmt_price(r['ref_price'])}")
+                top[4].markdown(f"**Nguồn:** {r['source']}")
+                st.markdown(f"**{r['title']}**")
+                st.link_button("📄 Xem báo cáo gốc (PDF/Web)", r["url"])
 
     st.divider()
     st.caption(
