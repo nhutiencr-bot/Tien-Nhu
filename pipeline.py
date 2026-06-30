@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 import streamlit as st
+from news_fetcher import fetch_news_with_fallback
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -402,15 +403,20 @@ def execute_equity_research_pipeline(ticker):
         }
 
         # ── 11. Tin tức ────────────────────────────────────────────────────
-        news_list = []
-        if df_news_raw is not None and not df_news_raw.empty:
-            for _, row in df_news_raw.head(4).iterrows():
-                news_list.append({
-                    "title":  row.get('news_title',  'Cập nhật biến động thị trường'),
-                    "source": row.get('news_source', 'HOSE Disclosure'),
-                    "url":    row.get('news_url', '#'),
-                    "pub_date": "—",
-                })
+        # Lấy tin từ vnstock làm fallback
+news_raw = _safe_call(lambda: c_engine.news(), 'news', source_used, default=pd.DataFrame())
+vnstock_news = []
+if news_raw is not None and not news_raw.empty:
+    for _, row in news_raw.head(10).iterrows():
+        vnstock_news.append({
+            "title":  row.get('news_title', ''),
+            "source": row.get('news_source', 'vnstock'),
+            "url":    row.get('news_url', '#'),
+            "pub_date": "—",
+        })
+
+# Google News RSS là nguồn chính, vnstock làm fallback
+news_list = fetch_news_with_fallback(ticker, vnstock_news)
         else:
             news_list.append({
                 "title": "Không có sự kiện bất thường trong 30 ngày.",
