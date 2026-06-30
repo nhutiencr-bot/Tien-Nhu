@@ -478,44 +478,36 @@ def execute_equity_research_pipeline(ticker, debug_cafef=False):
             "trend_signal": "KHẢ QUAN (Uptrend)" if current_price > df_price['MA20'].iloc[-1] else "RỦI RO (Downtrend)",
         }
 
-        # --- [BƯỚC 8]: Tin tức ---
-        # Lưu ý: mỗi nguồn (VCI/KBS/DNSE) đặt tên cột khác nhau sau khi
-        # convert camelCase -> snake_case (vd VCI dùng 'news_title', KBS có
-        # thể dùng 'title' hoặc tên khác) -> dò nhiều biến thể tên cột thay
-        # vì chỉ giả định 1 tên cố định (tránh hiện toàn placeholder mặc định).
-        df_news_raw = _safe_call(lambda: c_engine.news(), 'news', source_used)
-        news_list = []
-
-        TITLE_COL_CANDIDATES  = ['news_title', 'title', 'headline', 'news_short_content', 'short_content', 'name']
-        SOURCE_COL_CANDIDATES = ['news_source', 'source', 'news_source_link', 'public_date', 'price_change_ratio', 'organ_short_name']
-
-        def _first_valid_col(df, candidates):
-            for c in candidates:
-                if c in df.columns:
-                    return c
-            return None
-
-        if df_news_raw is not None and not df_news_raw.empty:
-            title_col  = _first_valid_col(df_news_raw, TITLE_COL_CANDIDATES)
-            source_col = _first_valid_col(df_news_raw, SOURCE_COL_CANDIDATES)
-
-            if title_col is None:
-                # Không dò được cột tiêu đề nào phù hợp -> không tin tưởng
-                # được dữ liệu này, hiện thông báo trung thực thay vì bịa.
-                news_list.append({
-                    "title": f"Nguồn dữ liệu ({source_used}) trả về tin tức nhưng cấu trúc cột không nhận diện được.",
-                    "source": "Hệ thống tự động",
-                })
-            else:
-                for _, row in df_news_raw.head(4).iterrows():
-                    title_val  = row.get(title_col)
-                    source_val = row.get(source_col) if source_col else None
-                    news_list.append({
-                        "title":  str(title_val) if pd.notna(title_val) and str(title_val).strip() else "Cập nhật biến động thị trường",
-                        "source": str(source_val) if source_col and pd.notna(source_val) and str(source_val).strip() else source_used,
-                    })
-        else:
-            news_list.append({"title": "Không có sự kiện bất thường trong 30 ngày.", "source": "Hệ thống tự động"})
+       # --- TAB TIN TỨC: TIÊU ĐỀ TRẮNG + TÊN NGUỒN MÀU TÍM ---
+with tab_news:
+    st.subheader("📰 Tin Tức & Sự Kiện Nổi Bật")
+    if news_cards and len(news_cards) > 0:
+        for news in news_cards:
+            title = news.get('title', 'Không có tiêu đề')
+            link = news.get('url', '#')
+            source = news.get('source', 'Hệ thống')
+            pub_date = news.get('pub_date', '—')
+            
+            if "Không có sự kiện bất thường" in title:
+                st.info(title)
+                continue
+                
+            # 1. Tiêu đề chữ trắng, link click được
+            st.markdown(
+                f'<h5>📰 <a href="{link}" target="_blank" style="color: white; text-decoration: none;">{title} 🔗</a></h5>', 
+                unsafe_allow_html=True
+            )
+            
+            # 2. Đổi màu TÊN NGUỒN (Màu tím nhạt sang trọng)
+            # Bạn có thể thay mã màu #bd93f9 bằng mã màu khác ở phần style="color: ..."
+            st.markdown(
+                f'<p style="color: #a0a0a0; font-size: 14px;">Nguồn: <span style="color: #bd93f9; font-weight: bold;">{source}</span> | Ngày cập nhật: {pub_date}</p>', 
+                unsafe_allow_html=True
+            )
+            
+            st.divider()
+    else:
+        st.info("Không có tin tức nào trong thời gian qua.")
 
         return (
             df_price, df_5y_table, df_quarter_table, df_balance, clean_metrics, technical_summary,
