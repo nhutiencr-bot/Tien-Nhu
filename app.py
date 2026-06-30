@@ -205,7 +205,8 @@ with tab_report:
                         unsafe_allow_html=True
                     )
                 st.divider()
-st.caption(
+                st.caption(
+
     f"⚠️ **Disclaimer:** Báo cáo giáo dục/tham khảo. Nguồn: vnstock API ({metrics.get('source_used', 'N/A')}). "
     "Đối chiếu BCTC kiểm toán chính thức trước khi ra quyết định. "
     "**Không phải lời khuyên đầu tư.** Đầu tư cổ phiếu có rủi ro mất vốn."
