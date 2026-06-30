@@ -282,7 +282,10 @@ def execute_equity_research_pipeline(ticker, debug_cafef=False):
             existing_q_keys = set(revenue_series_q.index) | set(net_profit_series_q.index) | set(equity_series_q.index) | set(total_assets_series_q.index)
             today = datetime.today()
             cur_q = (today.month - 1) // 3 + 1
-            all_target_quarters = [(y, q) for y in range(2022, today.year + 1) for q in range(1, 5) if not (y == today.year and q > cur_q)]
+            # Chỉ bù 2 năm gần nhất (8 quý) thay vì từ 2022 -> giảm mạnh số request
+            # cào CafeF, vốn là nguyên nhân chính khiến trang tải gần 1 phút.
+            start_year_q = today.year - 1
+            all_target_quarters = [(y, q) for y in range(start_year_q, today.year + 1) for q in range(1, 5) if not (y == today.year and q > cur_q)]
             
             missing_quarters = [(y, q) for (y, q) in all_target_quarters if f"{y}-Q{q}" not in existing_q_keys]
             if missing_quarters:
