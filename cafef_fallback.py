@@ -12,7 +12,7 @@ HEADERS = {
 }
 
 # Timeout ngắn hơn cho từng request đơn lẻ -> tránh treo cả pipeline khi cafef chậm/rớt mạng.
-REQUEST_TIMEOUT = 2.5
+REQUEST_TIMEOUT = 6
 
 # Dùng chung 1 Session để tái sử dụng kết nối TCP/TLS (keep-alive) thay vì
 # mở kết nối mới cho mỗi request -> nhanh hơn đáng kể khi cào nhiều trang.
