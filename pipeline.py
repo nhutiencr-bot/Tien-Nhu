@@ -20,6 +20,7 @@ from cafef_fallback import (
     fetch_cafef_balance_sheet_5y, fetch_cafef_yearly_full, fetch_cafef_quarterly_full,
 )
 from news_fetcher import fetch_news_with_fallback
+from cafef_reports import fetch_analysis_reports
 
 SOURCE_FALLBACK_ORDER = ['VCI', 'KBS', 'DNSE']
 
@@ -121,19 +122,25 @@ def execute_equity_research_pipeline(ticker, debug_cafef=False):
             'ratio_q': lambda: f_engine.ratio(period='quarter'),
             'bs_y': lambda: fetch_bs('year'),
             'bs_q': lambda: fetch_bs('quarter'),
-            'news': fetch_news
+            'news': fetch_news,
+            'reports': lambda: fetch_analysis_reports(ticker),
         }
 
         raw_data = {}
-        # Mở 10 "cửa" lấy dữ liệu cùng một lúc, giới hạn thời gian tối đa 6 giây!
-        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        # Mở 11 "cửa" lấy dữ liệu cùng một lúc, giới hạn thời gian tối đa 6 giây!
+        with concurrent.futures.ThreadPoolExecutor(max_workers=11) as executor:
             future_to_name = {executor.submit(func): name for name, func in tasks.items()}
             for future in concurrent.futures.as_completed(future_to_name):
                 name = future_to_name[future]
                 try:
                     raw_data[name] = future.result(timeout=6)
                 except Exception:
-                    raw_data[name] = pd.DataFrame() if name != 'news' else []
+                    if name == 'news':
+                        raw_data[name] = []
+                    elif name == 'reports':
+                        raw_data[name] = {"reports": [], "is_ticker_specific": False}
+                    else:
+                        raw_data[name] = pd.DataFrame()
 
         df_price = raw_data['price']
         if df_price is None or df_price.empty:
@@ -156,6 +163,7 @@ def execute_equity_research_pipeline(ticker, debug_cafef=False):
         df_balance_q = raw_data['bs_q']
         news_list = raw_data['news']
         if isinstance(news_list, pd.DataFrame): news_list = []
+        reports_pkg = raw_data.get('reports') or {"reports": [], "is_ticker_specific": False}
 
         is_bank = ticker in ['VCB', 'BID', 'CTG', 'TCB', 'MBB', 'ACB', 'STB']
         current_price = float(df_price['close_vnd'].iloc[-1])
@@ -357,7 +365,7 @@ def execute_equity_research_pipeline(ticker, debug_cafef=False):
             "trend_signal": "KHẢ QUAN (Uptrend)" if current_price > df_price['MA20'].iloc[-1] else "RỦI RO (Downtrend)",
         }
         
-        return (df_price, df_5y_table, df_quarter_table, df_balance, clean_metrics, technical_summary, news_list, fundamentals_summary, df_dupont, valuation_package)
+        return (df_price, df_5y_table, df_quarter_table, df_balance, clean_metrics, technical_summary, news_list, fundamentals_summary, df_dupont, valuation_package, reports_pkg)
 
     except Exception as e:
         st.error(f"Lỗi Pipeline: {str(e)}")
