@@ -19,6 +19,7 @@ from valuation import (
 from cafef_fallback import (
     fetch_cafef_balance_sheet_5y, fetch_cafef_yearly_full, fetch_cafef_quarterly_full,
 )
+from news_fetcher import fetch_news_with_fallback
 
 SOURCE_FALLBACK_ORDER = ['VCI', 'KBS', 'DNSE']
 
@@ -94,16 +95,20 @@ def execute_equity_research_pipeline(ticker, debug_cafef=False):
             return pd.DataFrame()
 
         def fetch_news():
+            vnstock_cards = []
             try:
                 df = c_engine.news()
                 if df is not None and not df.empty:
                     time_col = next((col for col in ['publishDate', 'date', 'time', 'publicDate'] if col in df.columns), None)
                     if time_col:
                         df[time_col] = pd.to_datetime(df[time_col], errors='coerce')
-                        df = df[df[time_col] >= pd.to_datetime('2026-01-01')].sort_values(by=time_col, ascending=False)
-                        return df.to_dict(orient='records')
-            except: pass
-            return []
+                        df = df.sort_values(by=time_col, ascending=False)
+                        vnstock_cards = df.to_dict(orient='records')
+            except Exception:
+                pass
+            # Nguồn chính: Google News RSS (luôn có tin, không phụ thuộc vnstock).
+            # Nếu RSS lỗi/rỗng -> tự fallback về tin từ vnstock (nếu có).
+            return fetch_news_with_fallback(ticker, vnstock_cards)
 
         # TẤT CẢ TÁC VỤ KÉO DỮ LIỆU ĐƯỢC ĐÓNG GÓI VÀ CHẠY SONG SONG
         tasks = {
