@@ -87,16 +87,29 @@ def _parse_vn_number(raw: str):
 def _extract_row_values(html_text: str, row_label_pattern: str):
     """
     Tìm 1 dòng trong bảng theo nhãn (regex), trích các số liệu theo SAU
-    nhãn đó trên cùng dòng text (markdown table đã được web_fetch/requests
-    trả về dạng text thuần với các số cách nhau bởi khoảng trắng).
+    nhãn đó trên cùng dòng text.
 
-    Trả về list[float|None], thứ tự từ cột cũ nhất -> mới nhất (theo đúng
-    thứ tự xuất hiện trong HTML, CafeF luôn hiển thị trái->phải = cũ->mới).
+    ⚠️ FIX QUAN TRỌNG: html_text là HTML THÔ (vd '<td>D. VỐN CHỦ SỞ
+    HỮU</td><td>123.456.789</td>'), KHÔNG PHẢI text thuần đã tách bảng.
+    Giữa nhãn và số liệu là các THẺ HTML (</td><td>...), không phải
+    khoảng trắng -- regex pattern cũ dùng '\\s*' nên KHÔNG BAO GIỜ khớp
+    được, khiến toàn bộ cơ chế cào CafeF luôn trả về rỗng dù trang có
+    dữ liệu. Sửa bằng cách bóc hết thẻ HTML (thay = khoảng trắng) TRƯỚC
+    khi chạy regex, để nhãn và số liệu trở thành text liền mạch.
+
+    Trả về list[float|None], thứ tự từ cột cũ nhất -> mới nhất (CafeF
+    luôn hiển thị trái->phải = cũ->mới).
     """
+    # Bóc HTML tags -> text thuần (thay tag bằng khoảng trắng để không
+    # dính chữ liền nhau giữa 2 ô khác nhau)
+    plain_text = re.sub(r'<[^>]+>', ' ', html_text)
+    plain_text = re.sub(r'&nbsp;', ' ', plain_text)
+    plain_text = re.sub(r'\s+', ' ', plain_text)
+
     pattern = re.compile(
-        row_label_pattern + r'\s*((?:-?[\d.,]+\s*)+)', re.IGNORECASE
+        row_label_pattern + r'\s*((?:-?[\d.,]+\s*){1,40})', re.IGNORECASE
     )
-    match = pattern.search(html_text)
+    match = pattern.search(plain_text)
     if not match:
         return []
 
