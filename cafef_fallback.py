@@ -1,4 +1,5 @@
 import re
+import time
 import pandas as pd
 import requests
 import concurrent.futures
@@ -10,14 +11,32 @@ HEADERS = {
     "Referer": "https://s.cafef.vn/",
 }
 
-REQUEST_TIMEOUT = 3  
+# Timeout ngắn hơn cho từng request đơn lẻ -> tránh treo cả pipeline khi cafef chậm/rớt mạng.
+REQUEST_TIMEOUT = 2.5
+
+# Dùng chung 1 Session để tái sử dụng kết nối TCP/TLS (keep-alive) thay vì
+# mở kết nối mới cho mỗi request -> nhanh hơn đáng kể khi cào nhiều trang.
+_SESSION = requests.Session()
+_SESSION.headers.update(HEADERS)
+
+# Cache kết quả "cafef có phản hồi không" trong vài giây để KHÔNG phải bắn
+# request kiểm tra reachability nhiều lần trong cùng 1 lượt tải dữ liệu
+# (trước đây mỗi hàm fetch_cafef_* tự kiểm tra riêng -> tốn thêm round-trip).
+_REACHABLE_CACHE = {"ts": 0.0, "value": None}
+_REACHABLE_CACHE_TTL = 30  # giây
 
 def _cafef_is_reachable() -> bool:
+    now = time.time()
+    if _REACHABLE_CACHE["value"] is not None and (now - _REACHABLE_CACHE["ts"]) < _REACHABLE_CACHE_TTL:
+        return _REACHABLE_CACHE["value"]
     try:
-        resp = requests.get("https://s.cafef.vn", headers=HEADERS, timeout=3)
-        return resp.status_code == 200
+        resp = _SESSION.get("https://s.cafef.vn", timeout=REQUEST_TIMEOUT)
+        ok = resp.status_code == 200
     except Exception:
-        return False
+        ok = False
+    _REACHABLE_CACHE["ts"] = now
+    _REACHABLE_CACHE["value"] = ok
+    return ok
 
 def _find_company_slug(ticker: str) -> str:
     return f"bao-cao-tai-chinh-{ticker.lower()}"
@@ -45,17 +64,20 @@ def _fetch_one_period(ticker: str, year: int, quarter: int, slug: str):
     bsheet_url = f"https://s.cafef.vn/bao-cao-tai-chinh/{ticker.upper()}/bsheet/{year}/{quarter}/0/0/{slug}.chn"
     incsta_url = f"https://s.cafef.vn/bao-cao-tai-chinh/{ticker.upper()}/incsta/{year}/{quarter}/0/0/{slug}.chn"
 
-    try:
-        resp_bs = requests.get(bsheet_url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
-        text_bs = resp_bs.text if resp_bs.status_code == 200 else ""
-    except Exception:
-        text_bs = ""
+    def _get(url):
+        try:
+            resp = _SESSION.get(url, timeout=REQUEST_TIMEOUT)
+            return resp.text if resp.status_code == 200 else ""
+        except Exception:
+            return ""
 
-    try:
-        resp_is = requests.get(incsta_url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
-        text_is = resp_is.text if resp_is.status_code == 200 else ""
-    except Exception:
-        text_is = ""
+    # Bắn 2 request (bsheet + incsta) CÙNG LÚC thay vì lần lượt -> giảm ~một nửa
+    # thời gian chờ cho mỗi kỳ báo cáo.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pair_executor:
+        fut_bs = pair_executor.submit(_get, bsheet_url)
+        fut_is = pair_executor.submit(_get, incsta_url)
+        text_bs = fut_bs.result()
+        text_is = fut_is.result()
 
     if text_bs:
         equity_vals = (_extract_row_values(text_bs, r'D\.\s*VỐN CHỦ SỞ HỮU') or
@@ -124,7 +146,7 @@ def fetch_cafef_yearly_full(ticker: str, years: list, debug: bool = False):
         return year, _fetch_one_period(ticker, year, 4, slug)
 
     # ĐA LUỒNG: Cào bù nhiều năm cùng 1 lúc
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(years)) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(years), 6)) as executor:
         future_to_y = {executor.submit(fetch_task, y): y for y in years}
         for future in concurrent.futures.as_completed(future_to_y):
             try:
@@ -158,7 +180,7 @@ def fetch_cafef_quarterly_full(ticker: str, quarters: list, debug: bool = False)
         return f"{year}-Q{q}", _fetch_one_period(ticker, year, q, slug)
 
     # ĐA LUỒNG: Phóng cào 14 Quý cùng MỘT TÍCH TẮC
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(quarters)) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(quarters), 6)) as executor:
         future_to_q = {executor.submit(fetch_task, qt): qt for qt in quarters}
         for future in concurrent.futures.as_completed(future_to_q):
             try:
