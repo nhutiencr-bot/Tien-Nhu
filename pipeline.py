@@ -18,7 +18,7 @@ from valuation import (
     dupont_decomposition, dcf_fcff_scenarios, reverse_dcf_implied_growth,
     graham_number, ddm_gordon, nine_methods_valuation, summarize_valuation,
 )
-from cafef_fallback import fetch_cafef_balance_sheet_5y
+from cafef_fallback import fetch_cafef_balance_sheet_5y, fetch_cafef_analysis_reports
 
 SOURCE_FALLBACK_ORDER = ['VCI', 'KBS', 'DNSE']
 
@@ -141,8 +141,6 @@ def execute_equity_research_pipeline(ticker):
     try:
         # ── 1. Chọn nguồn dữ liệu (đã cache theo ticker, xem _resolve_source) ──
         q_engine, f_engine, c_engine, source_used = _build_engines_with_fallback(ticker)
-        if source_used != 'VCI':
-            st.info(f"ℹ️ Nguồn VCI không khả dụng cho {ticker}, đang dùng: {source_used}")
 
         end_date = datetime.today().strftime('%Y-%m-%d')
         start_date = (datetime.today() - timedelta(days=365 * 3)).strftime('%Y-%m-%d')
@@ -163,6 +161,7 @@ def execute_equity_research_pipeline(ticker):
             "balance_q": lambda: _fetch_balance_sheet(ticker, period='quarter'),
             "news_vnstock": lambda: c_engine.news(),
             "news_rss": lambda: fetch_news_google_rss(ticker),
+            "reports": lambda: fetch_cafef_analysis_reports(ticker),
         }
 
         results = {}
@@ -176,7 +175,13 @@ def execute_equity_research_pipeline(ticker):
                 try:
                     results[key] = future.result(timeout=TASK_TIMEOUT_SECONDS)
                 except Exception:
-                    results[key] = [] if key == "news_rss" else pd.DataFrame()
+                    if key == "news_rss":
+                        results[key] = []
+                    elif key == "reports":
+                        results[key] = {"reports": [], "is_ticker_specific": False,
+                                         "sources_used": ["CafeF"], "debug_log": ["Timeout/lỗi khi fetch."]}
+                    else:
+                        results[key] = pd.DataFrame()
 
         df_price = results.get("price", pd.DataFrame())
         df_overview = results.get("overview", pd.DataFrame())
@@ -189,6 +194,8 @@ def execute_equity_research_pipeline(ticker):
         df_balance_q = results.get("balance_q", pd.DataFrame())
         df_news_raw = results.get("news_vnstock", pd.DataFrame())
         rss_news_raw = results.get("news_rss", [])
+        reports_pkg = results.get("reports", {"reports": [], "is_ticker_specific": False,
+                                               "sources_used": ["CafeF"], "debug_log": []})
 
         # ── 3. Xử lý giá ──────────────────────────────────────────────────
         if df_price is None or df_price.empty:
@@ -457,6 +464,7 @@ def execute_equity_research_pipeline(ticker):
             df_price, df_5y_table, df_quarter_table, df_balance,
             clean_metrics, technical_summary,
             news_list, fundamentals_summary, df_dupont, valuation_package,
+            reports_pkg,
         )
 
     except Exception as e:
