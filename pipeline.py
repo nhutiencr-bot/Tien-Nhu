@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 import streamlit as st
+import concurrent.futures
 from datetime import datetime, timedelta
 
 from vnstock.api.quote import Quote
@@ -40,9 +41,7 @@ def normalize_to_billion_vnd(series):
 
 
 def normalize_net_profit_with_anchor(net_profit_raw, equity_series, roe_series):
-    """
-    Chuẩn hoá net_profit dùng equity * roe% làm điểm neo để detect đơn vị đúng.
-    """
+    """Chuẩn hoá net_profit dùng equity * roe% làm điểm neo để detect đơn vị đúng."""
     base = normalize_to_billion_vnd(net_profit_raw)
     if base is None or base.empty:
         return base
@@ -70,88 +69,112 @@ def _build_engines_with_fallback(ticker):
     last_error = None
     test_end = datetime.today().strftime('%Y-%m-%d')
     test_start = (datetime.today() - timedelta(days=10)).strftime('%Y-%m-%d')
+    
     for source in SOURCE_FALLBACK_ORDER:
-        try:
-            q_engine = Quote(symbol=ticker, source=source)
+        def test_source(src):
+            q_engine = Quote(symbol=ticker, source=src)
             probe = q_engine.history(start=test_start, end=test_end, interval='1D')
             if probe is None or probe.empty:
-                raise ValueError(f"Nguồn {source} trả về dữ liệu rỗng cho {ticker}")
-            f_engine = Finance(symbol=ticker, source=source, period='year')
-            c_engine = Company(symbol=ticker, source=source)
-            return q_engine, f_engine, c_engine, source
-        except Exception as e:
-            last_error = e
-            continue
+                raise ValueError("Dữ liệu rỗng")
+            f_engine = Finance(symbol=ticker, source=src, period='year')
+            c_engine = Company(symbol=ticker, source=src)
+            return q_engine, f_engine, c_engine, src
+
+        # CẦU DAO: Bắt buộc ngắt sau 4 giây nếu nguồn bị treo
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(test_source, source)
+            try:
+                return future.result(timeout=4)
+            except concurrent.futures.TimeoutError:
+                last_error = f"Nguồn {source} bị treo (Timeout 4s)."
+                continue
+            except Exception as e:
+                last_error = e
+                continue
+
     raise ConnectionError(
-        f"Không lấy được dữ liệu cho mã {ticker} từ bất kỳ nguồn nào "
-        f"({', '.join(SOURCE_FALLBACK_ORDER)}). Lỗi cuối cùng: {last_error}"
+        f"Không lấy được dữ liệu cho mã {ticker} từ bất kỳ nguồn nào. Lỗi cuối: {last_error}"
     )
 
 
-def _safe_call(fn, label, source_used, default=None):
+def _safe_call(fn, label, source_used, default=None, timeout_sec=4):
+    """Gói gọi hàm có ép xung thời gian Timeout"""
     try:
-        result = fn()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(fn)
+            result = future.result(timeout=timeout_sec)
         return result if result is not None else (default if default is not None else pd.DataFrame())
-    except Exception as e:
-        st.warning(f"Không lấy được {label}() từ nguồn {source_used}: {e}")
+    except concurrent.futures.TimeoutError:
+        return default if default is not None else pd.DataFrame()
+    except Exception:
         return default if default is not None else pd.DataFrame()
 
 
 @st.cache_data(ttl=1800)
 def execute_equity_research_pipeline(ticker, debug_cafef=False):
-    # Lưu ý: debug_cafef giữ lại ở tầng hàm nội bộ (không còn UI bật/tắt) --
-    # luôn chạy False, chỉ bật thủ công khi cần tự debug code trực tiếp.
     try:
         q_engine, f_engine, c_engine, source_used = _build_engines_with_fallback(ticker)
-        if source_used != 'VCI':
-            st.info(f"ℹ️ Nguồn VCI không khả dụng cho mã {ticker}, đang dùng nguồn dự phòng: {source_used}")
+        
+        # MẸO TỐI ƯU: Đưa nguồn đang sống lên đầu danh sách để thử trước, tránh đập đầu vào nguồn đã chết
+        bs_sources = [source_used] + [s for s in ['VCI', 'KBS', 'DNSE'] if s != source_used]
 
         # --- [BƯỚC 1]: Lịch sử Giá ---
         end_date = datetime.today().strftime('%Y-%m-%d')
         start_date = (datetime.today() - timedelta(days=365 * 3)).strftime('%Y-%m-%d')
-        df_price = q_engine.history(start=start_date, end=end_date, interval='1D')
+        
+        # Cắt lỗ ở 5s để đảm bảo bảng giá (dữ liệu cốt lõi) có thêm một chút thời gian kéo
+        df_price = _safe_call(lambda: q_engine.history(start=start_date, end=end_date, interval='1D'), 'price', source_used, timeout_sec=5)
+        
         if df_price is None or df_price.empty:
             st.error(f"Không có dữ liệu giá lịch sử cho mã {ticker}.")
             return None
+            
         df_price = df_price.dropna(subset=['close']).sort_values('time').reset_index(drop=True)
         df_price['close_vnd'] = df_price['close'] * 1000
         df_price['open_vnd']  = df_price['open']  * 1000
         df_price['high_vnd']  = df_price['high']  * 1000
         df_price['low_vnd']   = df_price['low']   * 1000
 
-        # --- [BƯỚC 2]: Thu thập BCTC ---
+        # --- [BƯỚC 2]: Thu thập BCTC (Ép ngắt hết trong 4s) ---
         df_overview = _safe_call(lambda: c_engine.overview(), 'overview', source_used)
-        df_income   = _safe_call(lambda: f_engine.income_statement(period='year'), 'income_statement', source_used)
+        df_income   = _safe_call(lambda: f_engine.income_statement(period='year'), 'income', source_used)
         df_cashflow = _safe_call(lambda: f_engine.cash_flow(period='year'), 'cash_flow', source_used)
         df_ratio    = _safe_call(lambda: f_engine.ratio(period='year'), 'ratio', source_used)
 
-        # Dữ liệu theo quý (dùng cho bảng "Theo Quý" trong UI)
-        df_income_q = _safe_call(lambda: f_engine.income_statement(period='quarter'), 'income_statement(quarter)', source_used)
-        df_ratio_q  = _safe_call(lambda: f_engine.ratio(period='quarter'), 'ratio(quarter)', source_used)
+        df_income_q = _safe_call(lambda: f_engine.income_statement(period='quarter'), 'income_q', source_used)
+        df_ratio_q  = _safe_call(lambda: f_engine.ratio(period='quarter'), 'ratio_q', source_used)
 
-        # Balance sheet: thử tất cả nguồn
+        # Balance sheet năm: Chỉ thử từ danh sách bs_sources đã ưu tiên
         df_balance = pd.DataFrame()
-        for bs_source in ['VCI', 'KBS', 'DNSE']:
-            try:
-                f_bs = Finance(symbol=ticker, source=bs_source, period='year')
-                df_bs = f_bs.balance_sheet(period='year')
-                if df_bs is not None and not df_bs.empty:
-                    df_balance = df_bs
-                    break
-            except Exception:
-                continue
+        for bs_source in bs_sources:
+            def fetch_bs(s):
+                return Finance(symbol=ticker, source=s, period='year').balance_sheet(period='year')
+            
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(fetch_bs, bs_source)
+                try:
+                    df_bs = future.result(timeout=4)
+                    if df_bs is not None and not df_bs.empty:
+                        df_balance = df_bs
+                        break
+                except Exception:
+                    continue
 
-        # Balance sheet theo quý
+        # Balance sheet quý
         df_balance_q = pd.DataFrame()
-        for bs_source in ['VCI', 'KBS', 'DNSE']:
-            try:
-                f_bs_q = Finance(symbol=ticker, source=bs_source, period='quarter')
-                df_bs_q = f_bs_q.balance_sheet(period='quarter')
-                if df_bs_q is not None and not df_bs_q.empty:
-                    df_balance_q = df_bs_q
-                    break
-            except Exception:
-                continue
+        for bs_source in bs_sources:
+            def fetch_bs_q(s):
+                return Finance(symbol=ticker, source=s, period='quarter').balance_sheet(period='quarter')
+            
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(fetch_bs_q, bs_source)
+                try:
+                    df_bs_q = future.result(timeout=4)
+                    if df_bs_q is not None and not df_bs_q.empty:
+                        df_balance_q = df_bs_q
+                        break
+                except Exception:
+                    continue
 
         is_bank = ticker in ['VCB', 'BID', 'CTG', 'TCB', 'MBB', 'ACB', 'STB']
         current_price = float(df_price['close_vnd'].iloc[-1])
@@ -186,21 +209,14 @@ def execute_equity_research_pipeline(ticker, debug_cafef=False):
                 if len(common_years) > 0:
                     equity_series = (total_assets_series.loc[common_years] - total_liab_series.loc[common_years])
 
-        # Fallback CafeF
+        # Fallback CafeF (Nhanh, vì file cafef_fallback đã có Timeout riêng)
         if equity_series.empty or total_assets_series.empty:
             current_year = datetime.today().year
             cafef_data = fetch_cafef_balance_sheet_5y(ticker, end_year=current_year)
             if equity_series.empty and not cafef_data['equity'].empty:
                 equity_series = cafef_data['equity']
-                st.info(f"ℹ️ Đã lấy 'Vốn chủ sở hữu' cho {ticker} từ CafeF.")
             if total_assets_series.empty and not cafef_data['total_assets'].empty:
                 total_assets_series = cafef_data['total_assets']
-                st.info(f"ℹ️ Đã lấy 'Tổng tài sản' cho {ticker} từ CafeF.")
-
-        if equity_series.empty:
-            st.warning(f"⚠️ Không dò được 'Vốn chủ sở hữu' cho {ticker} từ vnstock ({source_used}) và cả CafeF. Các chỉ số BVPS/DuPont/9PP liên quan sẽ thiếu hoặc không chính xác.")
-        if total_assets_series.empty:
-            st.warning(f"⚠️ Không dò được 'Tổng tài sản' cho {ticker} từ vnstock ({source_used}) và cả CafeF. DuPont sẽ không tính được.")
 
         # Số CP lưu hành
         market_cap_series_raw = fin5.get('market_cap', pd.Series(dtype=float))
@@ -271,6 +287,7 @@ def execute_equity_research_pipeline(ticker, debug_cafef=False):
                           set(equity_series.index) | set(total_assets_series.index)
         target_years = set(range(2021, min(current_year, 2025) + 1))
         missing_years = sorted(target_years - existing_years)
+        
         if missing_years:
             try:
                 cafef_full = fetch_cafef_yearly_full(ticker, missing_years, debug=debug_cafef)
@@ -289,10 +306,8 @@ def execute_equity_research_pipeline(ticker, debug_cafef=False):
                 revenue_series, net_profit_series = revenue_series.sort_index(), net_profit_series.sort_index()
                 equity_series, total_assets_series = equity_series.sort_index(), total_assets_series.sort_index()
                 roe_series, roa_series = roe_series.sort_index(), roa_series.sort_index()
-                if not cafef_full['revenue'].empty or not cafef_full['equity'].empty:
-                    st.info(f"ℹ️ Đã bù dữ liệu năm {missing_years} cho {ticker} từ CafeF ")
-            except Exception as e:
-                st.warning(f"⚠️ Lỗi khi cào bù dữ liệu năm cũ từ CafeF: {e}")
+            except Exception:
+                pass
 
         years_available = sorted(
             set(revenue_series.index) | set(net_profit_series.index) |
@@ -376,10 +391,8 @@ def execute_equity_research_pipeline(ticker, debug_cafef=False):
                         equity_series_q.loc[key] = val
                     for key, val in cafef_q['total_assets'].items():
                         total_assets_series_q.loc[key] = val
-                    if any(cafef_q[k] for k in cafef_q):
-                        st.info(f"ℹ️ Đã bù {len(missing_quarters)} quý còn thiếu cho {ticker} từ CafeF.")
-                except Exception as e:
-                    st.warning(f"⚠️ Lỗi khi cào bù dữ liệu quý cũ từ CafeF: {e}")
+                except Exception:
+                    pass
 
             quarters_available = sorted(
                 set(revenue_series_q.index) | set(net_profit_series_q.index) |
@@ -399,8 +412,7 @@ def execute_equity_research_pipeline(ticker, debug_cafef=False):
             df_quarter_table['ROE (%)']              = df_quarter_table['_period'].map(lambda y: roe_series_q.get(y, None))
             df_quarter_table['ROA (%)']              = df_quarter_table['_period'].map(lambda y: roa_series_q.get(y, None))
             df_quarter_table = df_quarter_table.drop(columns=['_period'])
-        except Exception as e:
-            st.warning(f"Không dựng được bảng theo Quý: {e}")
+        except Exception:
             df_quarter_table = pd.DataFrame()
 
         # --- [BƯỚC 5]: DuPont ---
@@ -471,14 +483,12 @@ def execute_equity_research_pipeline(ticker, debug_cafef=False):
             "trend_signal": "KHẢ QUAN (Uptrend)" if current_price > df_price['MA20'].iloc[-1] else "RỦI RO (Downtrend)",
         }
         
-        # --- [BƯỚC 8]: Cập nhật Tin tức (Lấy từ đầu năm 2026 - 6 tháng qua) ---
+        # --- [BƯỚC 8]: Cập nhật Tin tức (Ép ngắt luồng sau 4s) ---
         news_list = []
         try:
-            # Lấy toàn bộ tin tức từ vnstock thông qua c_engine
-            df_news = _safe_call(lambda: c_engine.news(), 'news', source_used)
+            df_news = _safe_call(lambda: c_engine.news(), 'news', source_used, timeout_sec=4)
             
             if df_news is not None and not df_news.empty:
-                # Dò tìm cột chứa thời gian (vnstock có thể trả về 'publishDate', 'date', hoặc 'publicDate')
                 time_col = None
                 for col in ['publishDate', 'date', 'time', 'publicDate']:
                     if col in df_news.columns:
@@ -486,21 +496,14 @@ def execute_equity_research_pipeline(ticker, debug_cafef=False):
                         break
                 
                 if time_col:
-                    # Ép kiểu dữ liệu về dạng Datetime để so sánh
                     df_news[time_col] = pd.to_datetime(df_news[time_col], errors='coerce')
-                    
-                    # Lọc tin tức lấy từ 01/01/2026 đến nay
                     cutoff_date = pd.to_datetime('2026-01-01')
                     df_news = df_news[df_news[time_col] >= cutoff_date]
-                    
-                    # Sắp xếp tin mới nhất lên đầu (Descending)
                     df_news = df_news.sort_values(by=time_col, ascending=False)
                 
-                # Chuyển DataFrame thành danh sách (List of Dictionaries) để UI dễ dàng render bằng vòng lặp for
                 news_list = df_news.to_dict(orient='records')
                 
-        except Exception as e:
-            st.warning(f"⚠️ Lỗi khi cào tin tức 6 tháng qua: {e}")
+        except Exception:
             news_list = []
 
         # ── 12. Trả về ────────────────────────────────────────────────
