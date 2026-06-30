@@ -133,7 +133,7 @@ with tab_insights:
 with tab_volume:
     render_tab_volume(df_price_clean, tech, metrics)
 
-# --- NÂNG CẤP TAB TIN TỨC: CLICK ĐƯỢC ---
+# --- TAB TIN TỨC: TIÊU ĐỀ TRẮNG + TÊN NGUỒN MÀU TÍM CHỦ ĐẠO ---
 with tab_news:
     st.subheader("📰 Tin Tức & Sự Kiện Nổi Bật")
     if news_cards and len(news_cards) > 0:
@@ -143,14 +143,22 @@ with tab_news:
             source = news.get('source', 'Hệ thống')
             pub_date = news.get('pub_date', '—')
             
-            # Xử lý tin rỗng của hệ thống
             if "Không có sự kiện bất thường" in title:
                 st.info(title)
                 continue
                 
-            # Render link click được
-            st.markdown(f"##### 🔗 [{title}]({link})")
-            st.caption(f"Nguồn: {source} | Ngày cập nhật: {pub_date}")
+            # 1. Tiêu đề chữ trắng, link click được
+            st.markdown(
+                f'<h5>📰 <a href="{link}" target="_blank" style="color: white; text-decoration: none;">{title} 🔗</a></h5>', 
+                unsafe_allow_html=True
+            )
+            
+            # 2. Đổi màu TÊN NGUỒN sang màu Tím chủ đạo Fintech (#8B5CF6)
+            st.markdown(
+                f'<p style="color: #a0a0a0; font-size: 14px;">Nguồn: <span style="color: #8B5CF6; font-weight: bold;">{source}</span> | Ngày cập nhật: {pub_date}</p>', 
+                unsafe_allow_html=True
+            )
+            
             st.divider()
     else:
         st.info("Không có tin tức nào trong thời gian qua.")
