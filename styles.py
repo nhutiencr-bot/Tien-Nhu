@@ -63,16 +63,17 @@ def apply_premium_fintech_theme():
         }
 
         /* Đồng bộ màu thanh Header mặc định của Streamlit (chứa nút Stop/Share...)
-           với nền tím-đen của dashboard, thay vì để màu đen mặc định */
+           với nền tối của dashboard. Dùng màu ĐẶC (không gradient) vì thanh quá
+           mỏng khiến radial-gradient bị bóp méo thành vệt loang màu xấu. */
         [data-testid="stHeader"] {
             background-color: #0a0a14 !important;
-            background-image: radial-gradient(circle at 50% 0%, #1a0933 0%, #0a0a14 65%);
+            background-image: none !important;
         }
 
-        /* Đồng bộ thanh "đang chạy" mỏng trên cùng (mặc định màu đỏ/xanh)
-           sang gradient tím-hồng giống theme */
+        /* Ẩn hẳn vạch "đang chạy" mỏng trên cùng cho liền mạch với nền,
+           thay vì cố tô màu (vạch quá mỏng nên tô gradient cũng không đẹp) */
         [data-testid="stDecoration"] {
-            background-image: linear-gradient(90deg, #a855f7 0%, #ec4899 100%) !important;
+            display: none !important;
         }
 
         /* Toolbar (Manage app, các icon) ở góc cũng đồng bộ nền tối */
