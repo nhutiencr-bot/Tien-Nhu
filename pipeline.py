@@ -126,7 +126,6 @@ def execute_equity_research_pipeline(ticker, debug_cafef=False):
         df_ratio    = _safe_call(lambda: f_engine.ratio(period='year'), 'ratio', source_used)
 
         # Dữ liệu theo quý (dùng cho bảng "Theo Quý" trong UI)
-        # Lưu ý: nguồn dữ liệu (VCI) chỉ cung cấp ổn định 4 kỳ gần nhất cho period='quarter'.
         df_income_q = _safe_call(lambda: f_engine.income_statement(period='quarter'), 'income_statement(quarter)', source_used)
         df_ratio_q  = _safe_call(lambda: f_engine.ratio(period='quarter'), 'ratio(quarter)', source_used)
 
@@ -142,7 +141,7 @@ def execute_equity_research_pipeline(ticker, debug_cafef=False):
             except Exception:
                 continue
 
-        # Balance sheet theo quý (cũng chỉ ổn định trong 4 kỳ gần nhất, như trên)
+        # Balance sheet theo quý
         df_balance_q = pd.DataFrame()
         for bs_source in ['VCI', 'KBS', 'DNSE']:
             try:
@@ -176,7 +175,7 @@ def execute_equity_research_pipeline(ticker, debug_cafef=False):
         net_margin_series         = fin5['net_margin']
         asset_turnover_series     = fin5['asset_turnover']
 
-        # Fallback equity = total_assets - total_liabilities
+        # Fallback equity
         if equity_series.empty and not total_assets_series.empty:
             total_liab_series = normalize_to_billion_vnd(find_row_series(
                 df_balance,
@@ -266,9 +265,7 @@ def execute_equity_research_pipeline(ticker, debug_cafef=False):
             "source_used": source_used,
         }
 
-        # --- [BƯỚC 4]: Bảng KQKD Năm — nối thêm năm cũ (2021) từ CafeF ---
-        # vnstock chỉ trả ổn định 4 năm gần nhất; để có đủ 2021-2025, cào
-        # bù các năm còn thiếu (so với mốc 2021) trực tiếp từ CafeF.
+        # --- [BƯỚC 4]: Bảng KQKD Năm ---
         current_year = datetime.today().year
         existing_years = set(revenue_series.index) | set(net_profit_series.index) | \
                           set(equity_series.index) | set(total_assets_series.index)
@@ -293,8 +290,7 @@ def execute_equity_research_pipeline(ticker, debug_cafef=False):
                 equity_series, total_assets_series = equity_series.sort_index(), total_assets_series.sort_index()
                 roe_series, roa_series = roe_series.sort_index(), roa_series.sort_index()
                 if not cafef_full['revenue'].empty or not cafef_full['equity'].empty:
-                    st.info(f"ℹ️ Đã bù dữ liệu năm {missing_years} cho {ticker} từ CafeF "
-                            f"(EPS/BVPS năm này có thể thiếu — CafeF không cung cấp số CP lưu hành theo năm cũ).")
+                    st.info(f"ℹ️ Đã bù dữ liệu năm {missing_years} cho {ticker} từ CafeF ")
             except Exception as e:
                 st.warning(f"⚠️ Lỗi khi cào bù dữ liệu năm cũ từ CafeF: {e}")
 
@@ -324,7 +320,7 @@ def execute_equity_research_pipeline(ticker, debug_cafef=False):
             "roa_latest":  get_latest(roa_series, default=None),
         }
 
-        # --- [BƯỚC 4b]: Bảng KQKD theo Quý (Q1/2022 -> hiện tại) ---
+        # --- [BƯỚC 4b]: Bảng KQKD theo Quý ---
         df_quarter_table = pd.DataFrame()
         try:
             fin_q = build_financial_table(df_income_q, df_balance_q, df_ratio_q, ticker=ticker, period='quarter')
@@ -349,8 +345,6 @@ def execute_equity_research_pipeline(ticker, debug_cafef=False):
             roe_series_q = _normalize_pct_q(fin_q['roe'])
             roa_series_q = _normalize_pct_q(fin_q['roa'])
 
-            # --- Bù các quý còn thiếu (so với Q1/2022 -> quý hiện tại) bằng CafeF ---
-            # vnstock chỉ trả ổn định 4 quý gần nhất; cào thêm các quý còn lại.
             def _quarter_range(start_y, start_q, end_y, end_q):
                 out = []
                 y, q = start_y, start_q
@@ -383,8 +377,7 @@ def execute_equity_research_pipeline(ticker, debug_cafef=False):
                     for key, val in cafef_q['total_assets'].items():
                         total_assets_series_q.loc[key] = val
                     if any(cafef_q[k] for k in cafef_q):
-                        st.info(f"ℹ️ Đã bù {len(missing_quarters)} quý còn thiếu cho {ticker} từ CafeF "
-                                f"(EPS/BVPS/ROE/ROA các quý này có thể thiếu — CafeF không cung cấp).")
+                        st.info(f"ℹ️ Đã bù {len(missing_quarters)} quý còn thiếu cho {ticker} từ CafeF.")
                 except Exception as e:
                     st.warning(f"⚠️ Lỗi khi cào bù dữ liệu quý cũ từ CafeF: {e}")
 
@@ -477,11 +470,14 @@ def execute_equity_research_pipeline(ticker, debug_cafef=False):
             "oil_correlation":   oil_corr_score,
             "trend_signal": "KHẢ QUAN (Uptrend)" if current_price > df_price['MA20'].iloc[-1] else "RỦI RO (Downtrend)",
         }
+        
+        # --- [BƯỚC 8]: Gán danh sách tin tức (Ngăn lỗi UnboundLocalError) ---
+        news_list = []
 
         # ── 12. Trả về ────────────────────────────────────────────────
         return (
             df_price, df_5y_table, df_quarter_table, df_balance, clean_metrics, technical_summary,
-            news_list, fundamentals_summary, df_dupont, valuation_package,
+            news_list, fundamentals_summary, df_dupont, valuation_package
         )
 
     except Exception as e:
