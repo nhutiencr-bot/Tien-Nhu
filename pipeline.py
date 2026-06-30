@@ -509,6 +509,7 @@ with tab_news:
     else:
         st.info("Không có tin tức nào trong thời gian qua.")
 
+        r# ── 12. Trả về ────────────────────────────────────────────────
         return (
             df_price, df_5y_table, df_quarter_table, df_balance, clean_metrics, technical_summary,
             news_list, fundamentals_summary, df_dupont, valuation_package,
