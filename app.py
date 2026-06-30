@@ -133,7 +133,7 @@ with tab_insights:
 with tab_volume:
     render_tab_volume(df_price_clean, tech, metrics)
 
-# --- CÁCH 2: ÉP TIÊU ĐỀ CHỮ TRẮNG BẰNG HTML ---
+# --- TAB TIN TỨC: TIÊU ĐỀ TRẮNG + TÊN NGUỒN MÀU TÍM ---
 with tab_news:
     st.subheader("📰 Tin Tức & Sự Kiện Nổi Bật")
     if news_cards and len(news_cards) > 0:
@@ -147,14 +147,19 @@ with tab_news:
                 st.info(title)
                 continue
                 
-            # Sử dụng thẻ HTML <a> và ép style màu trắng (color: white)
-            # target="_blank" để khi bấm sẽ mở tab mới chứ không đè lên app
+            # 1. Tiêu đề chữ trắng, link click được
             st.markdown(
                 f'<h5>📰 <a href="{link}" target="_blank" style="color: white; text-decoration: none;">{title} 🔗</a></h5>', 
                 unsafe_allow_html=True
             )
             
-            st.caption(f"Nguồn: {source} | Ngày cập nhật: {pub_date}")
+            # 2. Đổi màu TÊN NGUỒN (Màu tím nhạt sang trọng)
+            # Bạn có thể thay mã màu #bd93f9 bằng mã màu khác ở phần style="color: ..."
+            st.markdown(
+                f'<p style="color: #a0a0a0; font-size: 14px;">Nguồn: <span style="color: #bd93f9; font-weight: bold;">{source}</span> | Ngày cập nhật: {pub_date}</p>', 
+                unsafe_allow_html=True
+            )
+            
             st.divider()
     else:
         st.info("Không có tin tức nào trong thời gian qua.")
