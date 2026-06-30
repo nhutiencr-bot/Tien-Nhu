@@ -76,6 +76,7 @@ def render_tab_kqkd(df_5y_table, fundamentals, period_col='Năm'):
     fig_kqkd.update_layout(
         template='plotly_dark',
         paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+        xaxis=dict(type='category'),
         yaxis=dict(title='Doanh thu (tỷ)'),
         yaxis2=dict(title='LNST (tỷ)', overlaying='y', side='right'),
         legend=dict(orientation='h', y=1.1),
@@ -107,6 +108,7 @@ def render_tab_kqkd(df_5y_table, fundamentals, period_col='Năm'):
     fig_margin.update_layout(
         template='plotly_dark',
         paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+        xaxis=dict(type='category'),
         margin=dict(t=20, b=20),
     )
     st.plotly_chart(fig_margin, use_container_width=True)
