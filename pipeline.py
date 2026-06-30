@@ -478,37 +478,6 @@ def execute_equity_research_pipeline(ticker, debug_cafef=False):
             "trend_signal": "KHẢ QUAN (Uptrend)" if current_price > df_price['MA20'].iloc[-1] else "RỦI RO (Downtrend)",
         }
 
-       # --- TAB TIN TỨC: TIÊU ĐỀ TRẮNG + TÊN NGUỒN MÀU TÍM ---
-with tab_news:
-    st.subheader("📰 Tin Tức & Sự Kiện Nổi Bật")
-    if news_cards and len(news_cards) > 0:
-        for news in news_cards:
-            title = news.get('title', 'Không có tiêu đề')
-            link = news.get('url', '#')
-            source = news.get('source', 'Hệ thống')
-            pub_date = news.get('pub_date', '—')
-            
-            if "Không có sự kiện bất thường" in title:
-                st.info(title)
-                continue
-                
-            # 1. Tiêu đề chữ trắng, link click được
-            st.markdown(
-                f'<h5>📰 <a href="{link}" target="_blank" style="color: white; text-decoration: none;">{title} 🔗</a></h5>', 
-                unsafe_allow_html=True
-            )
-            
-            # 2. Đổi màu TÊN NGUỒN (Màu tím nhạt sang trọng)
-            # Bạn có thể thay mã màu #bd93f9 bằng mã màu khác ở phần style="color: ..."
-            st.markdown(
-                f'<p style="color: #a0a0a0; font-size: 14px;">Nguồn: <span style="color: #bd93f9; font-weight: bold;">{source}</span> | Ngày cập nhật: {pub_date}</p>', 
-                unsafe_allow_html=True
-            )
-            
-            st.divider()
-    else:
-        st.info("Không có tin tức nào trong thời gian qua.")
-
         r# ── 12. Trả về ────────────────────────────────────────────────
         return (
             df_price, df_5y_table, df_quarter_table, df_balance, clean_metrics, technical_summary,
