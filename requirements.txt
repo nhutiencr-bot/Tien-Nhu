@@ -6,3 +6,4 @@ yfinance
 vnstock>=4.0.0
 requests
 lxml
+beautifulsoup4
