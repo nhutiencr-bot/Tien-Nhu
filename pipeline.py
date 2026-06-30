@@ -479,14 +479,41 @@ def execute_equity_research_pipeline(ticker, debug_cafef=False):
         }
 
         # --- [BƯỚC 8]: Tin tức ---
+        # Lưu ý: mỗi nguồn (VCI/KBS/DNSE) đặt tên cột khác nhau sau khi
+        # convert camelCase -> snake_case (vd VCI dùng 'news_title', KBS có
+        # thể dùng 'title' hoặc tên khác) -> dò nhiều biến thể tên cột thay
+        # vì chỉ giả định 1 tên cố định (tránh hiện toàn placeholder mặc định).
         df_news_raw = _safe_call(lambda: c_engine.news(), 'news', source_used)
         news_list = []
+
+        TITLE_COL_CANDIDATES  = ['news_title', 'title', 'headline', 'news_short_content', 'short_content', 'name']
+        SOURCE_COL_CANDIDATES = ['news_source', 'source', 'news_source_link', 'public_date', 'price_change_ratio', 'organ_short_name']
+
+        def _first_valid_col(df, candidates):
+            for c in candidates:
+                if c in df.columns:
+                    return c
+            return None
+
         if df_news_raw is not None and not df_news_raw.empty:
-            for _, row in df_news_raw.head(4).iterrows():
+            title_col  = _first_valid_col(df_news_raw, TITLE_COL_CANDIDATES)
+            source_col = _first_valid_col(df_news_raw, SOURCE_COL_CANDIDATES)
+
+            if title_col is None:
+                # Không dò được cột tiêu đề nào phù hợp -> không tin tưởng
+                # được dữ liệu này, hiện thông báo trung thực thay vì bịa.
                 news_list.append({
-                    "title":  row.get('news_title',  'Cập nhật biến động thị trường'),
-                    "source": row.get('news_source', 'HOSE Disclosure'),
+                    "title": f"Nguồn dữ liệu ({source_used}) trả về tin tức nhưng cấu trúc cột không nhận diện được.",
+                    "source": "Hệ thống tự động",
                 })
+            else:
+                for _, row in df_news_raw.head(4).iterrows():
+                    title_val  = row.get(title_col)
+                    source_val = row.get(source_col) if source_col else None
+                    news_list.append({
+                        "title":  str(title_val) if pd.notna(title_val) and str(title_val).strip() else "Cập nhật biến động thị trường",
+                        "source": str(source_val) if source_col and pd.notna(source_val) and str(source_val).strip() else source_used,
+                    })
         else:
             news_list.append({"title": "Không có sự kiện bất thường trong 30 ngày.", "source": "Hệ thống tự động"})
 
