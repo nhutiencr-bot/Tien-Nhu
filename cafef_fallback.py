@@ -196,82 +196,105 @@ def fetch_cafef_yearly_full(ticker: str, years: list, debug: bool = False):
 
 def fetch_cafef_analysis_reports(ticker: str, page_size: int = 10):
     """
-    Lấy danh sách báo cáo phân tích/khuyến nghị từ CafeF.
+    Lấy danh sách báo cáo phân tích/khuyến nghị từ CafeF (CTCK: SSI, VND, VCI,
+    HCM, MAS, DNSE, KBS, TCBS, VCBS, VPBS, VDS, ...).
+
+    Trang nguồn: https://cafef.vn/du-lieu/phan-tich-bao-cao.chn (server-render
+    sẵn, không cần JS) — đây là feed chung của toàn thị trường (CafeF không
+    public 1 endpoint lọc thẳng theo mã). Vì vậy hàm sẽ:
+      1. Tải feed báo cáo mới nhất.
+      2. Lọc các báo cáo có MÃ TICKER xuất hiện (dạng từ riêng, in hoa) trong
+         tiêu đề -> coi là báo cáo riêng cho mã đó (is_ticker_specific=True).
+      3. Nếu không có báo cáo riêng, fallback trả về toàn bộ feed mới nhất
+         (is_ticker_specific=False) để người dùng vẫn có báo cáo tham khảo.
 
     Trả về dict:
         {
             "reports": [{"title", "url", "source", "pub_date"}, ...],
-            "is_ticker_specific": bool,  # True nếu lọc được đúng theo mã,
-                                          # False nếu phải fallback sang
-                                          # danh sách báo cáo chung toàn thị trường
+            "is_ticker_specific": bool,
             "sources_used": ["CafeF"],
             "debug_log": [str, ...],
         }
 
-    Lưu ý: CafeF không công bố API chính thức cho mục "Báo cáo phân tích",
-    nên hàm này dùng endpoint AJAX nội bộ (Type=2 ứng với nhóm "Báo cáo phân
-    tích" trong widget tin liên quan của CafeF). Nếu CafeF đổi cấu trúc,
-    hàm sẽ trả về reports rỗng một cách an toàn (không raise exception),
-    kèm debug_log để biết bước nào thất bại — bạn có thể mở expander
-    "Chi tiết kỹ thuật" trong tab Báo Cáo Phân Tích trên app để xem log này.
+    Không raise exception — lỗi/timeout sẽ trả về reports rỗng kèm debug_log.
     """
     debug_log = []
     ticker = ticker.upper().strip()
+    feed_url = "https://cafef.vn/du-lieu/phan-tich-bao-cao.chn"
 
     if not _cafef_is_reachable():
         debug_log.append("CafeF không phản hồi (reachability check thất bại).")
         return {"reports": [], "is_ticker_specific": False,
                 "sources_used": ["CafeF"], "debug_log": debug_log}
 
-    def _parse_items(html_text):
-        items = []
-        # Mỗi item trong widget CafeF thường có dạng:
-        # <a title="..." href="/đường-dẫn...">Tiêu đề</a> ... <span class="time">dd/mm/yyyy</span>
-        for m in re.finditer(
-            r'<a[^>]+href="([^"]+)"[^>]*title="([^"]*)"[^>]*>.*?</a>',
-            html_text, re.IGNORECASE | re.DOTALL
-        ):
-            url, title = m.group(1).strip(), m.group(2).strip()
-            if not title or len(title) < 8:
-                continue
-            if url.startswith("/"):
-                url = "https://s.cafef.vn" + url
-            items.append({"title": title, "url": url, "source": "CafeF", "pub_date": "—"})
-        return items
+    try:
+        resp = _SESSION.get(feed_url, timeout=REQUEST_TIMEOUT)
+        if resp.status_code != 200 or not resp.text:
+            debug_log.append(f"Tải feed báo cáo: HTTP {resp.status_code}")
+            return {"reports": [], "is_ticker_specific": False,
+                    "sources_used": ["CafeF"], "debug_log": debug_log}
+        html_text = resp.text
+    except Exception as e:
+        debug_log.append(f"Tải feed báo cáo: lỗi {e}")
+        return {"reports": [], "is_ticker_specific": False,
+                "sources_used": ["CafeF"], "debug_log": debug_log}
 
-    def _try_fetch(url, label):
-        try:
-            resp = _SESSION.get(url, timeout=REQUEST_TIMEOUT)
-            if resp.status_code != 200 or not resp.text:
-                debug_log.append(f"{label}: HTTP {resp.status_code}")
-                return []
-            items = _parse_items(resp.text)
-            debug_log.append(f"{label}: tìm thấy {len(items)} mục")
-            return items
-        except Exception as e:
-            debug_log.append(f"{label}: lỗi {e}")
-            return []
-
-    # 1) Thử lấy báo cáo riêng theo mã (Type=2 = "Báo cáo phân tích")
-    ticker_url = (
-        f"https://s.cafef.vn/Ajax/Events_RelatedNews_New.aspx"
-        f"?Symbol={ticker}&floorID=0&configID=0&PageIndex=1&PageSize={page_size}&Type=2"
+    # Mỗi báo cáo là 1 thẻ <a href=".../du-lieu/report/<slug>.chn...">Tiêu đề</a>
+    # Lấy toàn bộ link kèm vị trí xuất hiện trong văn bản, để sau đó tìm
+    # "Nguồn: <CTCK>" và ngày dd/mm/yyyy nằm gần đó (trong vòng ~400 ký tự
+    # phía sau, đúng với thứ tự hiển thị thật trên trang).
+    link_pattern = re.compile(
+        r'href="(https?://cafef\.vn/du-lieu/report/[^"]+\.chn[^"]*)"[^>]*>([^<]{8,200})</a>',
+        re.IGNORECASE
     )
-    reports = _try_fetch(ticker_url, f"Báo cáo riêng {ticker}")
-    is_specific = len(reports) > 0
 
-    # 2) Fallback: báo cáo phân tích chung toàn thị trường nếu không có theo mã
-    if not reports:
-        market_url = (
-            f"https://s.cafef.vn/Ajax/Events_RelatedNews_New.aspx"
-            f"?Symbol=&floorID=0&configID=0&PageIndex=1&PageSize={page_size}&Type=2"
-        )
-        reports = _try_fetch(market_url, "Báo cáo phân tích thị trường chung")
-        is_specific = False
+    seen_urls = set()
+    raw_reports = []
+    for m in link_pattern.finditer(html_text):
+        url, title = m.group(1).strip(), m.group(2).strip()
+        clean_url = url.split('?')[0]
+        if clean_url in seen_urls:
+            continue
+        title = re.sub(r'\s+', ' ', title).strip()
+        if not title or len(title) < 8:
+            continue
+        seen_urls.add(clean_url)
 
+        # Tìm "Nguồn: XXX" và ngày dd/mm/yyyy trong đoạn văn bản ngay sau link
+        window = html_text[m.end(): m.end() + 600]
+        window_plain = re.sub(r'<[^>]+>', ' ', window)
+        window_plain = re.sub(r'\s+', ' ', window_plain)
+
+        source_match = re.search(r'Ngu.n[:\s]+([A-Za-zÀ-ỹ\-\. ]{2,30}?)(?=\s*\d|\s*$)', window_plain)
+        source = source_match.group(1).strip() if source_match else "CafeF"
+
+        date_match = re.search(r'\b(\d{1,2}/\d{1,2}/\d{4})\b', window_plain)
+        pub_date = date_match.group(1) if date_match else "—"
+
+        raw_reports.append({
+            "title": title, "url": clean_url,
+            "source": source, "pub_date": pub_date,
+        })
+
+    debug_log.append(f"Feed chung CafeF: tìm thấy {len(raw_reports)} báo cáo.")
+
+    # Lọc theo mã ticker (xuất hiện như 1 từ riêng, in hoa, trong tiêu đề)
+    ticker_pattern = re.compile(rf'\b{re.escape(ticker)}\b')
+    ticker_reports = [r for r in raw_reports if ticker_pattern.search(r["title"])]
+    debug_log.append(f"Lọc theo mã {ticker}: tìm thấy {len(ticker_reports)} báo cáo riêng.")
+
+    if ticker_reports:
+        return {
+            "reports": ticker_reports[:page_size],
+            "is_ticker_specific": True,
+            "sources_used": ["CafeF"],
+            "debug_log": debug_log,
+        }
+
+    # Fallback: không có báo cáo riêng cho mã -> trả về feed chung mới nhất
     return {
-        "reports": reports[:page_size],
-        "is_ticker_specific": is_specific,
+        "reports": raw_reports[:page_size],
+        "is_ticker_specific": False,
         "sources_used": ["CafeF"],
         "debug_log": debug_log,
     }
