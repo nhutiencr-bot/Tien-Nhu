@@ -1,0 +1,181 @@
+"""
+news_fetcher.py
+---------------
+Lấy tin tức liên quan đến mã cổ phiếu từ Google News RSS.
+- Không cần API key, hoàn toàn miễn phí.
+- Google News tự tổng hợp từ: CafeF, VnExpress, NDH, Vietstock, Nhịp Cầu Đầu Tư...
+- Lọc chỉ giữ tin trong 6 tháng gần nhất.
+- Fallback: nếu RSS lỗi, trả về list rỗng để pipeline xử lý.
+"""
+
+import urllib.request
+import urllib.parse
+import xml.etree.ElementTree as ET
+from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
+
+
+# Bảng tên công ty đầy đủ để tăng chất lượng tìm kiếm
+# (Google News tìm theo tên công ty cho kết quả tốt hơn chỉ tìm theo mã)
+TICKER_NAME_MAP = {
+    "BSR": "Lọc Hóa Dầu Bình Sơn",
+    "FPT": "FPT Corporation",
+    "VCB": "Vietcombank",
+    "TCB": "Techcombank",
+    "MBB": "MB Bank",
+    "BID": "BIDV",
+    "CTG": "VietinBank",
+    "ACB": "ACB",
+    "STB": "Sacombank",
+    "HPG": "Hòa Phát",
+    "VHM": "Vinhomes",
+    "VIC": "Vingroup",
+    "MSN": "Masan",
+    "VNM": "Vinamilk",
+    "SAB": "Sabeco",
+    "GVR": "Cao su Việt Nam",
+    "PLX": "Petrolimex",
+    "POW": "PV Power",
+    "GAS": "PV Gas",
+    "VJC": "Vietjet",
+    "HVN": "Vietnam Airlines",
+    "MWG": "Thế Giới Di Động",
+    "PNJ": "PNJ",
+    "REE": "REE Corporation",
+    "DPM": "Đạm Phú Mỹ",
+    "DCM": "Đạm Cà Mau",
+}
+
+LOOKBACK_MONTHS = 6
+MAX_NEWS = 20  # Số tin tối đa trả về
+
+
+def _build_search_query(ticker: str) -> str:
+    """Tạo câu truy vấn tìm kiếm tốt nhất cho mã cổ phiếu."""
+    company_name = TICKER_NAME_MAP.get(ticker.upper(), "")
+    if company_name:
+        # Kết hợp cả mã và tên để tăng độ chính xác
+        return f"{ticker} {company_name} cổ phiếu chứng khoán"
+    else:
+        return f"{ticker} cổ phiếu chứng khoán Việt Nam"
+
+
+def _is_within_months(pub_date_str: str, months: int = LOOKBACK_MONTHS) -> bool:
+    """Kiểm tra xem tin có nằm trong khoảng thời gian months tháng gần nhất không."""
+    try:
+        pub_dt = parsedate_to_datetime(pub_date_str)
+        # Đảm bảo timezone-aware
+        if pub_dt.tzinfo is None:
+            pub_dt = pub_dt.replace(tzinfo=timezone.utc)
+        cutoff = datetime.now(tz=timezone.utc) - timedelta(days=months * 30)
+        return pub_dt >= cutoff
+    except Exception:
+        return True  # Nếu không parse được ngày, giữ lại bài (an toàn hơn là bỏ)
+
+
+def fetch_news_google_rss(ticker: str, max_results: int = MAX_NEWS) -> list[dict]:
+    """
+    Lấy tin tức từ Google News RSS cho mã cổ phiếu ticker.
+    
+    Trả về list of dict, mỗi dict có:
+        title   : tiêu đề bài báo
+        source  : tên nguồn (CafeF, VnExpress, ...)
+        url     : đường dẫn bài gốc
+        pub_date: ngày đăng (string dạng 'DD/MM/YYYY')
+    
+    Trả về [] nếu lỗi hoặc không có tin.
+    """
+    query = _build_search_query(ticker)
+    encoded_query = urllib.parse.quote(query)
+    rss_url = (
+        f"https://news.google.com/rss/search"
+        f"?q={encoded_query}&hl=vi&gl=VN&ceid=VN:vi"
+    )
+
+    try:
+        req = urllib.request.Request(
+            rss_url,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/124.0.0.0 Safari/537.36"
+                )
+            },
+        )
+        with urllib.request.urlopen(req, timeout=15) as response:
+            content = response.read()
+
+        tree = ET.fromstring(content)
+        items = tree.findall(".//item")
+
+        results = []
+        for item in items:
+            title_el   = item.find("title")
+            link_el    = item.find("link")
+            source_el  = item.find("source")
+            pubdate_el = item.find("pubDate")
+
+            title    = title_el.text   if title_el   is not None else ""
+            url      = link_el.text    if link_el    is not None else ""
+            source   = source_el.text  if source_el  is not None else "Google News"
+            pub_date = pubdate_el.text if pubdate_el is not None else ""
+
+            # Bỏ qua tin quá cũ (hơn LOOKBACK_MONTHS tháng)
+            if pub_date and not _is_within_months(pub_date, LOOKBACK_MONTHS):
+                continue
+
+            # Format ngày hiển thị
+            try:
+                dt = parsedate_to_datetime(pub_date)
+                pub_date_display = dt.strftime("%d/%m/%Y")
+            except Exception:
+                pub_date_display = pub_date[:10] if pub_date else "—"
+
+            # Bỏ qua bài không có tiêu đề hoặc tiêu đề quá ngắn
+            if not title or len(title.strip()) < 10:
+                continue
+
+            results.append({
+                "title":    title.strip(),
+                "source":   source.strip() if source else "Google News",
+                "url":      url.strip() if url else "#",
+                "pub_date": pub_date_display,
+            })
+
+            if len(results) >= max_results:
+                break
+
+        return results
+
+    except Exception as e:
+        # Không raise để tránh crash app — trả về rỗng, pipeline tự fallback
+        print(f"[news_fetcher] Lỗi lấy tin RSS cho {ticker}: {e}")
+        return []
+
+
+def fetch_news_with_fallback(ticker: str, vnstock_news_cards: list) -> list[dict]:
+    """
+    Hàm wrapper: thử Google News RSS trước, nếu rỗng thì fallback về
+    vnstock news_cards (đã có sẵn từ pipeline cũ).
+    
+    Trả về list of dict chuẩn hóa để render_tab_news() dùng được.
+    """
+    rss_news = fetch_news_google_rss(ticker)
+
+    if rss_news:
+        return rss_news
+
+    # Fallback: convert vnstock news_cards sang format giống RSS
+    if vnstock_news_cards:
+        return [
+            {
+                "title":    item.get("title", "Không có tiêu đề"),
+                "source":   item.get("source", "vnstock"),
+                "url":      item.get("url", "#"),
+                "pub_date": item.get("pub_date", "—"),
+            }
+            for item in vnstock_news_cards
+        ]
+
+    return [{"title": "Không có tin tức trong 6 tháng gần nhất.", "source": "Hệ thống", "url": "#", "pub_date": "—"}]
