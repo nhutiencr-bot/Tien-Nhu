@@ -471,15 +471,34 @@ def execute_equity_research_pipeline(ticker, debug_cafef=False):
             "trend_signal": "KHẢ QUAN (Uptrend)" if current_price > df_price['MA20'].iloc[-1] else "RỦI RO (Downtrend)",
         }
         
-        # --- [BƯỚC 8]: Gán danh sách tin tức (Ngăn lỗi UnboundLocalError) ---
+        # --- [BƯỚC 8]: Cập nhật Tin tức (Lấy từ đầu năm 2026 - 6 tháng qua) ---
         news_list = []
-
-        # ── 12. Trả về ────────────────────────────────────────────────
-        return (
-            df_price, df_5y_table, df_quarter_table, df_balance, clean_metrics, technical_summary,
-            news_list, fundamentals_summary, df_dupont, valuation_package
-        )
-
-    except Exception as e:
-        st.error(f"Lỗi Pipeline: {str(e)}")
-        return None
+        try:
+            # Lấy toàn bộ tin tức từ vnstock thông qua c_engine
+            df_news = _safe_call(lambda: c_engine.news(), 'news', source_used)
+            
+            if df_news is not None and not df_news.empty:
+                # Dò tìm cột chứa thời gian (vnstock có thể trả về 'publishDate', 'date', hoặc 'publicDate')
+                time_col = None
+                for col in ['publishDate', 'date', 'time', 'publicDate']:
+                    if col in df_news.columns:
+                        time_col = col
+                        break
+                
+                if time_col:
+                    # Ép kiểu dữ liệu về dạng Datetime để so sánh
+                    df_news[time_col] = pd.to_datetime(df_news[time_col], errors='coerce')
+                    
+                    # Lọc tin tức lấy từ 01/01/2026 đến nay
+                    cutoff_date = pd.to_datetime('2026-01-01')
+                    df_news = df_news[df_news[time_col] >= cutoff_date]
+                    
+                    # Sắp xếp tin mới nhất lên đầu (Descending)
+                    df_news = df_news.sort_values(by=time_col, ascending=False)
+                
+                # Chuyển DataFrame thành danh sách (List of Dictionaries) để UI dễ dàng render bằng vòng lặp for
+                news_list = df_news.to_dict(orient='records')
+                
+        except Exception as e:
+            st.warning(f"⚠️ Lỗi khi cào tin tức 6 tháng qua: {e}")
+            news_list = []
