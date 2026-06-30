@@ -20,7 +20,7 @@ from cafef_fallback import (
     fetch_cafef_balance_sheet_5y, fetch_cafef_yearly_full, fetch_cafef_quarterly_full,
 )
 from news_fetcher import fetch_news_with_fallback
-from cafef_reports import fetch_analysis_reports
+from reports_multisource import fetch_analysis_reports
 
 SOURCE_FALLBACK_ORDER = ['VCI', 'KBS', 'DNSE']
 
