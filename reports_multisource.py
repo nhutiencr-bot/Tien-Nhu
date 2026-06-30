@@ -140,6 +140,21 @@ def _fetch_simplize(ticker: str, max_results: int = 8):
     return []
 
 
+def _raw_probe(url, label, debug_log):
+    """Gọi thẳng 1 URL để xem status code / độ dài response thật,
+    không qua bất kỳ logic parse nào - giúp phân biệt 'bị chặn/404'
+    với 'request OK nhưng regex không khớp'."""
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
+        snippet = (r.text or "")[:120].replace("\n", " ")
+        debug_log.append(
+            f"  [probe] {label}: HTTP {r.status_code}, {len(r.text or '')} ký tự, "
+            f"đầu trang: {snippet!r}"
+        )
+    except Exception as e:
+        debug_log.append(f"  [probe] {label}: LỖI -> {type(e).__name__}: {e}")
+
+
 # ─────────────────────────────────────────────
 # PUBLIC API — giữ nguyên signature như cafef_reports.fetch_analysis_reports
 # ─────────────────────────────────────────────
@@ -155,6 +170,15 @@ def fetch_analysis_reports(ticker: str, max_results: int = 8, debug: bool = Fals
     all_reports = []
     sources_used = []
     debug_log = []
+
+    debug_log.append("--- RAW PROBE (bỏ qua mọi logic parse) ---")
+    _raw_probe("https://s.cafef.vn", "s.cafef.vn (reachability check)", debug_log)
+    _raw_probe(VIETSTOCK_LIST_URL, "finance.vietstock.vn/bao-cao-phan-tich", debug_log)
+    _raw_probe(
+        SIMPLIZE_API_CANDIDATES[0].format(ticker=(ticker or "").upper()),
+        "Simplize API candidate #1", debug_log,
+    )
+    debug_log.append("--- KẾT QUẢ TỪNG NGUỒN SAU PARSE ---")
 
     # 1. CafeF (nguồn chính, ổn định nhất hiện nay)
     try:
