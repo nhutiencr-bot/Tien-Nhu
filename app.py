@@ -178,12 +178,32 @@ with tab_valuation:
 
 with tab_multiples:
     st.markdown("### Multiples Mở Rộng")
+
+    market_cap_b = metrics.get('market_cap_billion', 0) or 0
+    revenue_b = metrics.get('revenue_latest_billion', 0) or 0
+    cfo_b = metrics.get('cfo_latest_billion', 0) or 0
+    ebitda_b = metrics.get('ebitda_latest_billion', 0) or 0
+    net_debt_b = metrics.get('net_debt_billion', 0) or 0
+    ev_b = market_cap_b + net_debt_b
+
+    ps = (market_cap_b / revenue_b) if revenue_b > 0 else None
+    pcf = (market_cap_b / cfo_b) if cfo_b > 0 else None
+    ev_ebitda = (ev_b / ebitda_b) if ebitda_b > 0 else None
+
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("P/E", f"{metrics.get('pe', 0):.2f}x")
     m2.metric("P/B", f"{metrics.get('pb', 0):.2f}x")
     m3.metric("EPS", fmt(fundamentals.get('eps_latest', 0), suffix=" đ", decimals=0))
     m4.metric("BVPS", fmt(fundamentals.get('bvps_latest', 0), suffix=" đ", decimals=0))
-    st.info("ℹ️ EV/EBITDA, P/CF, P/S phụ thuộc field bổ sung không phải nguồn nào cũng có.")
+
+    st.markdown("---")
+    e1, e2, e3 = st.columns(3)
+    e1.metric("P/S", f"{ps:.2f}x" if ps else "—")
+    e2.metric("P/CF", f"{pcf:.2f}x" if pcf else "—")
+    e3.metric("EV/EBITDA", f"{ev_ebitda:.2f}x" if ev_ebitda else "—")
+
+    if not (ps and pcf and ev_ebitda):
+        st.caption("ℹ️ Một số chỉ số hiển thị '—' do thiếu dữ liệu Doanh thu/Dòng tiền HĐKD/Khấu hao từ nguồn API cho mã này.")
 
 with tab_dcf:
     render_tab_dcf(valuation_pkg, metrics)
