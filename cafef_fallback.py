@@ -112,8 +112,17 @@ def _fetch_one_period(ticker: str, year: int, quarter: int, slug: str, debug: bo
                        f"độ dài HTML={len(resp.text) if resp.status_code == 200 else 0}, url={bsheet_url}")
         if resp.status_code == 200:
             text = resp.text
-            equity_vals = _extract_row_values(text, r'D\.\s*VỐN CHỦ SỞ HỮU')
-            assets_vals = _extract_row_values(text, r'TỔNG CỘNG TÀI SẢN')
+            equity_vals = (
+                _extract_row_values(text, r'D\.\s*VỐN CHỦ SỞ HỮU') or
+                _extract_row_values(text, r'VỐN CHỦ SỞ HỮU') or
+                _extract_row_values(text, r'I\.\s*Vốn chủ sở hữu') or
+                _extract_row_values(text, r'Vốn chủ sở hữu')
+            )
+            assets_vals = (
+                _extract_row_values(text, r'TỔNG CỘNG TÀI SẢN') or
+                _extract_row_values(text, r'TỔNG TÀI SẢN') or
+                _extract_row_values(text, r'Tổng cộng tài sản')
+            )
             if debug:
                 st.caption(f"    → Vốn CSH khớp: {equity_vals[-3:] if equity_vals else 'KHÔNG TÌM THẤY dòng'}")
                 st.caption(f"    → Tổng tài sản khớp: {assets_vals[-3:] if assets_vals else 'KHÔNG TÌM THẤY dòng'}")
@@ -132,16 +141,27 @@ def _fetch_one_period(ticker: str, year: int, quarter: int, slug: str, debug: bo
                        f"độ dài HTML={len(resp.text) if resp.status_code == 200 else 0}, url={incsta_url}")
         if resp.status_code == 200:
             text = resp.text
-            # Doanh nghiệp thường: "Doanh thu thuần". Ngân hàng: không có dòng
-            # này, thử thêm "Tổng thu nhập hoạt động" / "Thu nhập lãi thuần".
+            # Doanh nghiệp thường: "Doanh thu thuần". Ngân hàng/CK/bảo hiểm
+            # không có dòng này -> thử lần lượt các biến thể tên dòng KQKD
+            # đặc thù (tổng thu nhập hoạt động, thu nhập lãi thuần, doanh thu
+            # hoạt động, tổng doanh thu...).
             revenue_vals = (
                 _extract_row_values(text, r'Doanh thu thuần') or
                 _extract_row_values(text, r'TỔNG THU NHẬP HOẠT ĐỘNG') or
-                _extract_row_values(text, r'Thu nhập lãi thuần')
+                _extract_row_values(text, r'Tổng thu nhập hoạt động') or
+                _extract_row_values(text, r'Thu nhập lãi thuần') or
+                _extract_row_values(text, r'Doanh thu hoạt động') or
+                _extract_row_values(text, r'Tổng doanh thu hoạt động') or
+                _extract_row_values(text, r'Tổng doanh thu') or
+                _extract_row_values(text, r'Doanh thu bán hàng và cung cấp dịch vụ') or
+                _extract_row_values(text, r'Doanh thu')
             )
             profit_vals = (
                 _extract_row_values(text, r'Lợi nhuận sau thuế thu nhập doanh nghiệp') or
-                _extract_row_values(text, r'LỢI NHUẬN SAU THUẾ')
+                _extract_row_values(text, r'LỢI NHUẬN SAU THUẾ') or
+                _extract_row_values(text, r'Lợi nhuận sau thuế') or
+                _extract_row_values(text, r'Lãi/\s*\(lỗ\) thuần sau thuế') or
+                _extract_row_values(text, r'Lợi nhuận thuần sau thuế')
             )
             if debug:
                 st.caption(f"    → Doanh thu khớp: {revenue_vals[-3:] if revenue_vals else 'KHÔNG TÌM THẤY dòng'}")
