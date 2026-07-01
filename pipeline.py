@@ -467,9 +467,18 @@ def execute_equity_research_pipeline(ticker):
         da_latest = get_latest(da_series, default=0.0) if not da_series.empty else 0.0
 
         # ── 6. Bảng KQKD theo Năm ─────────────────────────────────────────
-        years_available = sorted(
-            set(revenue_series.index) | set(net_profit_series.index) |
-            set(equity_series.index) | set(total_assets_series.index))
+        raw_years = set(revenue_series.index) | set(net_profit_series.index) | set(equity_series.index) | set(total_assets_series.index)
+        
+        # [SỬA LỖI] Ép toàn bộ các năm lẫn lộn (Chữ/Số) về cùng một chuẩn là Số Nguyên (int)
+        clean_years = []
+        for y in raw_years:
+            try:
+                if pd.notna(y):
+                    clean_years.append(int(float(y)))
+            except Exception:
+                pass
+                
+        years_available = sorted(list(set(clean_years)))
 
         df_5y_table = pd.DataFrame({'Năm': years_available})
         df_5y_table['Doanh thu thuần (tỷ)'] = df_5y_table['Năm'].map(revenue_series)
