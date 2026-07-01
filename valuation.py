@@ -23,7 +23,7 @@ import numpy as np
 # ============================================================
 
 def dupont_decomposition(revenue: pd.Series, net_profit: pd.Series,
-                         total_assets: pd.Series, equity: pd.Series):
+                          total_assets: pd.Series, equity: pd.Series):
     """
     Tính 3 thành phần DuPont theo từng năm (chỉ tính năm có đủ cả 4 chỉ
     tiêu). Trả về DataFrame index=năm, cột: net_margin, asset_turnover,
@@ -205,13 +205,13 @@ def ddm_gordon(dps, required_return=0.12, g=0.03):
 # ============================================================
 
 def nine_methods_valuation(eps_latest, bvps_latest, pe_series: pd.Series,
-                           pb_series: pd.Series, current_price,
-                           dcf_results=None, graham_value=None, ddm_value=None,
-                           ev_ebitda_series: pd.Series = None, ebitda_latest=None,
-                           net_debt_latest=None,
-                           p_cf_series: pd.Series = None, cfo_latest=None,
-                           ps_series: pd.Series = None, revenue_latest=None,
-                           shares_outstanding=None):
+                            pb_series: pd.Series, current_price,
+                            dcf_results=None, graham_value=None, ddm_value=None,
+                            ev_ebitda_series: pd.Series = None, ebitda_latest=None,
+                            net_debt_latest=None,
+                            p_cf_series: pd.Series = None, cfo_latest=None,
+                            ps_series: pd.Series = None, revenue_latest=None,
+                            shares_outstanding=None):
     """
     Tổng hợp các phương pháp định giá dùng hệ số LỊCH SỬ CỦA CHÍNH MÃ
     (median 5N cho PE/PB/EV-EBITDA/P-CF/P-S), cộng các phương pháp intrinsic
