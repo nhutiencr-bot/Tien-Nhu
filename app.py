@@ -243,7 +243,8 @@ with tab_multiples:
                         low_note="Rẻ hơn TB 5N", high_note="Đắt hơn TB 5N")
     _render_card(m2, "P/B", f"{pb_now:.2f}x" if pb_now else "—", c, n)
     m3.metric("EPS", fmt(fundamentals.get('eps_latest', 0), suffix=" đ", decimals=0))
-    m4.metric("BVPS", fmt(fundamentals.get('bvps_latest', 0), suffix=" đ", decimals=0))
+    bvps_display = fundamentals.get('bvps_latest', 0)
+    m4.metric("BVPS", fmt(bvps_display if bvps_display else None, suffix=" đ", decimals=0))
 
     st.markdown("---")
     is_bank_flag = metrics.get('excl_extended_multiples', False) or metrics.get('is_bank', False)
