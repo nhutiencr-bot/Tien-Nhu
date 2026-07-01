@@ -304,24 +304,75 @@ def render_tab_dupont(df_dupont):
     d3.metric("Đòn Bẩy", f"{r['leverage']:.2f}x")
 
 
-def render_tab_volume(df_price, tech, metrics):
-    st.markdown("### Phân Tích Khối Lượng Giao Dịch 20 Ngày")
-    fig = go.Figure()
-    fig.add_trace(go.Bar(x=df_price['time'], y=df_price['volume'],
-                         name="Khối lượng GD", marker_color='#a855f7', opacity=0.6))
-    fig.add_trace(go.Scatter(x=df_price['time'], y=df_price['volume_ma20'],
-                             line=dict(color='#ec4899', width=2), name="Volume MA20"))
-    fig.update_layout(template='plotly_dark',
-                      paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
-                      margin=dict(t=20, b=20))
-    st.plotly_chart(fig, use_container_width=True)
+def render_tab_technical(df_price, tech, metrics):
+    """Technical Analysis đầy đủ (data thật từ vnstock): Giá + MA20/MA50,
+    RSI(14), Khối lượng GD 20 ngày, tương quan giá dầu (nếu áp dụng)."""
+    st.markdown("### 📈 Phân Tích Kỹ Thuật")
 
-    c1, c2, c3 = st.columns(3)
-    c1.metric("KL Phiên Gần Nhất", f"{tech['latest_volume']:,.0f} CP")
-    c2.metric("KL TB 20 Ngày", f"{tech['avg_volume_20d']:,.0f} CP")
-    c3.metric("So Với TB", f"{tech['volume_vs_avg_pct']:+.1f}%",
+    # -- Giá + MA20 + MA50 --
+    fig_price = go.Figure()
+    fig_price.add_trace(go.Scatter(x=df_price['time'], y=df_price['close_vnd'],
+                                    name='Giá đóng cửa', line=dict(color='#f0f0ff', width=1.5)))
+    if 'MA20' in df_price.columns:
+        fig_price.add_trace(go.Scatter(x=df_price['time'], y=df_price['MA20'],
+                                        name='MA20', line=dict(color='#a855f7', width=1.5, dash='dot')))
+    if 'MA50' in df_price.columns:
+        fig_price.add_trace(go.Scatter(x=df_price['time'], y=df_price['MA50'],
+                                        name='MA50', line=dict(color='#ec4899', width=1.5, dash='dot')))
+    fig_price.update_layout(template='plotly_dark',
+                             paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+                             margin=dict(t=20, b=20), legend=dict(orientation='h', y=1.1))
+    st.plotly_chart(fig_price, use_container_width=True)
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Giá Hiện Tại", f"{metrics.get('current_price', 0):,.0f} đ")
+    c2.metric("MA20", f"{tech.get('ma20', 0):,.0f} đ" if tech.get('ma20') == tech.get('ma20') else "—")
+    c3.metric("MA50", f"{tech.get('ma50', 0):,.0f} đ" if tech.get('ma50') == tech.get('ma50') else "—")
+    c4.metric("Xu Hướng", tech.get('trend_signal', 'N/A'))
+
+    st.markdown("---")
+
+    # -- RSI(14) --
+    st.markdown("#### RSI (14 phiên) — Chỉ Báo Động Lượng")
+    if 'RSI14' in df_price.columns:
+        fig_rsi = go.Figure()
+        fig_rsi.add_trace(go.Scatter(x=df_price['time'], y=df_price['RSI14'],
+                                      name='RSI14', line=dict(color='#06b6d4', width=2)))
+        fig_rsi.add_hline(y=70, line_dash='dash', line_color='#ff4d6d', annotation_text='Quá mua (70)')
+        fig_rsi.add_hline(y=30, line_dash='dash', line_color='#10d98a', annotation_text='Quá bán (30)')
+        fig_rsi.update_layout(template='plotly_dark',
+                               paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+                               yaxis=dict(range=[0, 100]), margin=dict(t=20, b=20))
+        st.plotly_chart(fig_rsi, use_container_width=True)
+
+    r1, r2 = st.columns(2)
+    r1.metric("RSI (14)", f"{tech.get('rsi14', 50):.1f}")
+    r2.metric("Tín Hiệu RSI", tech.get('rsi_signal', 'N/A'))
+
+    st.markdown("---")
+
+    # -- Khối lượng giao dịch (gộp từ tab Volume cũ) --
+    st.markdown("#### Khối Lượng Giao Dịch 20 Ngày")
+    fig_vol = go.Figure()
+    fig_vol.add_trace(go.Bar(x=df_price['time'], y=df_price['volume'],
+                              name="Khối lượng GD", marker_color='#a855f7', opacity=0.6))
+    if 'volume_ma20' in df_price.columns:
+        fig_vol.add_trace(go.Scatter(x=df_price['time'], y=df_price['volume_ma20'],
+                                      line=dict(color='#ec4899', width=2), name="Volume MA20"))
+    fig_vol.update_layout(template='plotly_dark',
+                           paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+                           margin=dict(t=20, b=20))
+    st.plotly_chart(fig_vol, use_container_width=True)
+
+    v1, v2, v3 = st.columns(3)
+    v1.metric("KL Phiên Gần Nhất", f"{tech['latest_volume']:,.0f} CP")
+    v2.metric("KL TB 20 Ngày", f"{tech['avg_volume_20d']:,.0f} CP")
+    v3.metric("So Với TB", f"{tech['volume_vs_avg_pct']:+.1f}%",
               delta=f"{tech['volume_vs_avg_pct']:+.1f}%")
-    st.caption(f"Xu Hướng: **{tech['trend_signal']}** | CP Lưu Hành: **{metrics['issue_share_million']:,.1f} Tr CP**")
+    st.caption(f"CP Lưu Hành: **{metrics['issue_share_million']:,.1f} Tr CP**")
+
+    if tech.get('oil_correlation', 0.0) != 0.0:
+        st.warning(f"🛢️ Tương quan giá dầu: **{tech['oil_correlation']:.2f}** — mã nhạy cảm với biến động dầu thô WTI.")
 
 
 def render_tab_news(news_cards):
