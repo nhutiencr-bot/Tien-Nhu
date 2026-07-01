@@ -190,17 +190,50 @@ with tab_multiples:
     pcf = (market_cap_b / cfo_b) if cfo_b > 0 else None
     ev_ebitda = (ev_b / ebitda_b) if ebitda_b > 0 else None
 
+    pe_now = metrics.get('pe', 0) or 0
+    pb_now = metrics.get('pb', 0) or 0
+
+    def _card_label(value, avg=None, low_note="Dưới TB 5N", high_note="Trên TB 5N",
+                     low_thresh=None, low_msg=None, high_msg=None):
+        """Trả về (màu, dòng chú thích nhỏ) theo phong cách dashboard tham chiếu."""
+        if value is None:
+            return "#888", "Thiếu dữ liệu"
+        if avg is not None and avg > 0:
+            if value < avg:
+                return "#22c55e", f"{low_note} ({avg:.2f}x)"
+            return "#ef4444", f"{high_note} ({avg:.2f}x)"
+        if low_thresh is not None:
+            if value < low_thresh:
+                return "#22c55e", low_msg or "Hấp dẫn"
+            return "#eab308", high_msg or "Bình thường"
+        return "#e5e7eb", ""
+
+    def _render_card(col, title, value_str, color, note):
+        col.markdown(
+            f"""<div style="padding:0.5rem 0;">
+                <div style="opacity:0.7;font-size:0.85rem;">{title}</div>
+                <div style="font-size:1.9rem;font-weight:700;color:{color};">{value_str}</div>
+                <div style="opacity:0.75;font-size:0.8rem;">{note}</div>
+            </div>""",
+            unsafe_allow_html=True,
+        )
+
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("P/E", f"{metrics.get('pe', 0):.2f}x")
-    m2.metric("P/B", f"{metrics.get('pb', 0):.2f}x")
+    c, n = _card_label(pe_now if pe_now else None, low_thresh=15, low_msg="Định giá hấp dẫn", high_msg="Định giá cao")
+    _render_card(m1, "P/E", f"{pe_now:.2f}x" if pe_now else "—", c, n)
+    c, n = _card_label(pb_now if pb_now else None, low_thresh=2, low_msg="Định giá hấp dẫn", high_msg="Định giá cao")
+    _render_card(m2, "P/B", f"{pb_now:.2f}x" if pb_now else "—", c, n)
     m3.metric("EPS", fmt(fundamentals.get('eps_latest', 0), suffix=" đ", decimals=0))
     m4.metric("BVPS", fmt(fundamentals.get('bvps_latest', 0), suffix=" đ", decimals=0))
 
     st.markdown("---")
     e1, e2, e3 = st.columns(3)
-    e1.metric("P/S", f"{ps:.2f}x" if ps else "—")
-    e2.metric("P/CF", f"{pcf:.2f}x" if pcf else "—")
-    e3.metric("EV/EBITDA", f"{ev_ebitda:.2f}x" if ev_ebitda else "—")
+    c, n = _card_label(ps, low_thresh=1.5, low_msg="Cạnh tranh tốt", high_msg="Định giá cao")
+    _render_card(e1, "P/S", f"{ps:.2f}x" if ps else "—", c, n)
+    c, n = _card_label(pcf, low_thresh=10, low_msg="Dòng tiền hấp dẫn", high_msg="Bình thường")
+    _render_card(e2, "P/CF", f"{pcf:.2f}x" if pcf else "—", c, n)
+    c, n = _card_label(ev_ebitda, low_thresh=10, low_msg="Định giá hợp lý", high_msg="Bình thường")
+    _render_card(e3, "EV/EBITDA", f"{ev_ebitda:.2f}x" if ev_ebitda else "—", c, n)
 
     if not (ps and pcf and ev_ebitda):
         st.caption("ℹ️ Một số chỉ số hiển thị '—' do thiếu dữ liệu Doanh thu/Dòng tiền HĐKD/Khấu hao từ nguồn API cho mã này.")
