@@ -281,6 +281,7 @@ def execute_equity_research_pipeline(ticker):
 
 
         roa_series = fin5['roa']
+        roe_series = fin5['roe']
         pe_series = fin5['pe']
         pb_series = fin5['pb']
         outstanding_shares_series = fin5['outstanding_shares']
