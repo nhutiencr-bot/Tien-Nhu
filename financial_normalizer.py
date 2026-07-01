@@ -2,6 +2,60 @@ import pandas as pd
 import re
 
 # ════════════════════════════════════════════════════════════════
+# HÀM CÒN THIẾU (được thêm vào để fix lỗi import)
+# ════════════════════════════════════════════════════════════════
+
+def find_row_series(df, keywords, exclude_keywords=None, item_ids=None, period='year'):
+    """
+    Tìm dòng dữ liệu trong DataFrame dựa trên từ khóa (không phân biệt hoa thường).
+    Trả về Series các giá trị số (bỏ cột tên chỉ tiêu), hoặc Series rỗng nếu không tìm thấy.
+    """
+    if df is None or df.empty:
+        return pd.Series(dtype=float)
+    
+    # Xác định cột chứa tên chỉ tiêu
+    col = 'Chỉ tiêu' if 'Chỉ tiêu' in df.columns else df.columns[0]
+    
+    if isinstance(keywords, str):
+        keywords = [keywords]
+    
+    # Tạo mask tìm kiếm (OR các từ khóa)
+    mask = pd.Series(False, index=df.index)
+    for kw in keywords:
+        mask |= df[col].str.contains(kw, case=False, na=False, regex=False)
+    
+    # Loại trừ nếu có
+    if exclude_keywords:
+        if isinstance(exclude_keywords, str):
+            exclude_keywords = [exclude_keywords]
+        for ek in exclude_keywords:
+            mask &= ~df[col].str.contains(ek, case=False, na=False, regex=False)
+    
+    matched = df[mask]
+    if matched.empty:
+        return pd.Series(dtype=float)
+    
+    # Lấy dòng đầu tiên khớp, bỏ cột tên, giữ lại các cột số (năm/quý)
+    row = matched.iloc[0]
+    # Giả định các cột sau cột đầu tiên là dữ liệu số
+    numeric_cols = df.columns[1:]  # hoặc có thể dùng row.drop(col) nhưng cẩn thận
+    return row.drop(col).dropna()
+
+def get_latest(series: pd.Series):
+    """Lấy giá trị mới nhất (cuối cùng) của Series, bỏ qua NaN."""
+    if series is None or series.empty:
+        return None
+    clean = series.dropna()
+    return clean.iloc[-1] if not clean.empty else None
+
+def get_latest_n_years(series: pd.Series, n: int):
+    """Lấy n giá trị mới nhất (cuối cùng) của Series, bỏ qua NaN, trả về Series."""
+    if series is None or series.empty:
+        return pd.Series(dtype=float)
+    clean = series.dropna()
+    return clean.tail(n)
+
+# ════════════════════════════════════════════════════════════════
 # PATCH A — Sử dụng registry động thay cho các set hardcode cũ
 # ════════════════════════════════════════════════════════════════
 from ticker_registry import get_sector
