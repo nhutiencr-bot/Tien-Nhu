@@ -123,31 +123,41 @@ def dcf_fcff_scenarios(latest_fcff, shares_outstanding, net_debt=0.0,
 
 def reverse_dcf_implied_growth(current_price, shares_outstanding, latest_fcff,
                                 wacc=0.105, years=5, net_debt=0.0,
-                                g_min=-0.05, g_max=0.20, tol=1.0):
+                                g_min=-0.05, g_max=0.35, tol=1.0,
+                                terminal_g=0.03):
     """
-    Reverse DCF: dò ngược tốc độ tăng trưởng g mà thị trường đang "ngụ ý"
-    tại giá hiện tại, bằng binary search trên hàm dcf_fcff_scenarios-style.
-    Trả về g (float, có thể None nếu không hội tụ hoặc thiếu input).
+    Reverse DCF: dò ngược tốc độ tăng trưởng g (giai đoạn 5 năm tường minh)
+    mà thị trường đang "ngụ ý" tại giá hiện tại, bằng binary search.
+
+    QUAN TRỌNG: terminal growth (tăng trưởng vĩnh viễn sau năm `years`) được
+    CỐ ĐỊNH ở `terminal_g` (mặc định 3%, xấp xỉ tăng trưởng GDP dài hạn),
+    KHÔNG dùng chung với g tường minh đang dò. Lý do: (1) không công ty
+    nào duy trì tăng trưởng cao vĩnh viễn — cực kỳ phi thực tế nếu implied
+    g tường minh > 15-20%; (2) nếu dùng chung g, hàm sẽ trả về None ngay
+    khi g tường minh vượt WACC dù giai đoạn 5 năm đó vẫn hợp lý.
+
+    Trả về g (float, giai đoạn tường minh 5 năm), None nếu không hội tụ.
     """
     if not all([current_price, shares_outstanding, latest_fcff]) or shares_outstanding <= 0:
+        return None
+    if wacc <= terminal_g:
         return None
 
     target_equity_value = current_price * shares_outstanding
 
     def equity_value_for_g(g):
-        if wacc <= g:
-            return None
         pv_explicit = 0.0
         fcff_t = latest_fcff
         for t in range(1, years + 1):
             fcff_t = fcff_t * (1 + g)
             pv_explicit += fcff_t / ((1 + wacc) ** t)
-        terminal_fcff = fcff_t * (1 + g)
-        terminal_value = terminal_fcff / (wacc - g)
+        # Terminal value dùng terminal_g CỐ ĐỊNH, không dùng g tường minh
+        terminal_fcff = fcff_t * (1 + terminal_g)
+        terminal_value = terminal_fcff / (wacc - terminal_g)
         pv_terminal = terminal_value / ((1 + wacc) ** years)
         return pv_explicit + pv_terminal - net_debt
 
-    lo, hi = g_min, min(g_max, wacc - 0.001)
+    lo, hi = g_min, g_max
     for _ in range(60):
         mid = (lo + hi) / 2
         val = equity_value_for_g(mid)
