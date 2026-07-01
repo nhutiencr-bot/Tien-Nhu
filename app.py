@@ -228,16 +228,35 @@ with tab_multiples:
     m4.metric("BVPS", fmt(fundamentals.get('bvps_latest', 0), suffix=" đ", decimals=0))
 
     st.markdown("---")
-    e1, e2, e3 = st.columns(3)
-    c, n = _card_label(ps, low_thresh=1.5, low_msg="Cạnh tranh tốt", high_msg="Định giá cao")
-    _render_card(e1, "P/S", f"{ps:.2f}x" if ps else "—", c, n)
-    c, n = _card_label(pcf, low_thresh=10, low_msg="Dòng tiền hấp dẫn", high_msg="Bình thường")
-    _render_card(e2, "P/CF", f"{pcf:.2f}x" if pcf else "—", c, n)
-    c, n = _card_label(ev_ebitda, low_thresh=10, low_msg="Định giá hợp lý", high_msg="Bình thường")
-    _render_card(e3, "EV/EBITDA", f"{ev_ebitda:.2f}x" if ev_ebitda else "—", c, n)
+    is_bank_flag = metrics.get('excl_extended_multiples', False) or metrics.get('is_bank', False)
 
-    if not (ps and pcf and ev_ebitda):
-        st.caption("ℹ️ Một số chỉ số hiển thị '—' do thiếu dữ liệu Doanh thu/Dòng tiền HĐKD/Khấu hao từ nguồn API cho mã này.")
+    if is_bank_flag:
+        st.info(
+            "ℹ️ **P/S và EV/EBITDA không áp dụng cho cổ phiếu ngân hàng** — "
+            "khái niệm 'Doanh thu' và 'EBITDA' không phản ánh đúng bản chất kinh doanh "
+            "của ngân hàng (thu nhập lãi thuần, chi phí dự phòng rủi ro tín dụng có cấu trúc khác). "
+            "Với ngân hàng nên dùng P/B + ROE, NIM, NPL, CAR thay thế."
+        )
+        e1, e2 = st.columns(2)
+        c, n = _card_label(pcf, low_thresh=10, low_msg="Dòng tiền hấp dẫn", high_msg="Bình thường")
+        _render_card(e1, "P/CF", f"{pcf:.2f}x" if pcf else "—", c, n)
+        e2.markdown(
+            "<div style='padding:0.5rem 0;opacity:0.6;'>"
+            "<div style='font-size:0.85rem;'>P/S · EV/EBITDA</div>"
+            "<div style='font-size:1.3rem;'>Không áp dụng</div></div>",
+            unsafe_allow_html=True,
+        )
+    else:
+        e1, e2, e3 = st.columns(3)
+        c, n = _card_label(ps, low_thresh=1.5, low_msg="Cạnh tranh tốt", high_msg="Định giá cao")
+        _render_card(e1, "P/S", f"{ps:.2f}x" if ps else "—", c, n)
+        c, n = _card_label(pcf, low_thresh=10, low_msg="Dòng tiền hấp dẫn", high_msg="Bình thường")
+        _render_card(e2, "P/CF", f"{pcf:.2f}x" if pcf else "—", c, n)
+        c, n = _card_label(ev_ebitda, low_thresh=10, low_msg="Định giá hợp lý", high_msg="Bình thường")
+        _render_card(e3, "EV/EBITDA", f"{ev_ebitda:.2f}x" if ev_ebitda else "—", c, n)
+
+        if not (ps and pcf and ev_ebitda):
+            st.caption("ℹ️ Một số chỉ số hiển thị '—' do thiếu dữ liệu Doanh thu/Dòng tiền HĐKD/Khấu hao từ nguồn API cho mã này.")
 
 with tab_dcf:
     render_tab_dcf(valuation_pkg, metrics)
