@@ -9,7 +9,7 @@ from pipeline import execute_equity_research_pipeline
 from symbols_loader import load_all_symbols, build_display_options
 from ui_components import (
     render_kpi_cards, render_tab_kqkd, render_tab_valuation,
-    render_tab_dcf, render_tab_dupont, render_tab_volume, render_tab_forecast, fmt,
+    render_tab_dcf, render_tab_dupont, render_tab_technical, render_tab_forecast, fmt,
 )
 
 st.set_page_config(page_title="Equity Research AI", layout="wide")
@@ -149,7 +149,7 @@ render_kpi_cards(metrics, fundamentals)
 
 # --- Tabs ---
 (tab_kqkd, tab_valuation, tab_multiples, tab_dcf, tab_dupont,
- tab_insights, tab_forecast, tab_volume, tab_news, tab_report) = st.tabs([
+ tab_insights, tab_forecast, tab_technical, tab_news, tab_report) = st.tabs([
     "📋 KQKD 5 Năm",
     "💰 Định Giá PE/PB · 9PP",
     "📐 Multiples Mở Rộng",
@@ -157,7 +157,7 @@ render_kpi_cards(metrics, fundamentals)
     "🔺 DuPont · ROE",
     "💡 Special Insights",
     "🔮 Dự Phóng 2026-2027",
-    "📊 Volume",
+    "📈 Technical Analysis",
     "📰 Tin Tức 30 Ngày",
     "📑 Báo Cáo Phân Tích",
 ])
@@ -265,8 +265,8 @@ with tab_insights:
 with tab_forecast:
     render_tab_forecast(df_5y_table, fundamentals, metrics, tech, valuation_pkg, period_col="Năm")
 
-with tab_volume:
-    render_tab_volume(df_price_clean, tech, metrics)
+with tab_technical:
+    render_tab_technical(df_price_clean, tech, metrics)
 
 # --- TAB TIN TỨC ---
 with tab_news:
