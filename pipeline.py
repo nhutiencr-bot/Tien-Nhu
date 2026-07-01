@@ -394,6 +394,53 @@ def execute_equity_research_pipeline(ticker):
             ['tiền chi để mua sắm', 'purchase of fixed assets',
              'capital expenditure', 'mua sắm tài sản cố định']))
 
+        # ── 9b. Bổ sung Multiples Mở Rộng: P/S, P/CF, EV/EBITDA ────────────
+        cfo_latest = get_latest(cfo_series, default=0.0) if not cfo_series.empty else 0.0
+
+        # EBITDA ≈ Lợi nhuận trước thuế + Chi phí lãi vay + Khấu hao & phân bổ
+        # (các khoản mục điều chỉnh đầu báo cáo lưu chuyển tiền tệ gián tiếp)
+        pretax_profit_series = normalize_to_billion_vnd(find_row_series(
+            df_cashflow,
+            ['lợi nhuận trước thuế', 'tổng lợi nhuận kế toán trước thuế',
+             'profit before tax']))
+        interest_expense_series = normalize_to_billion_vnd(find_row_series(
+            df_cashflow,
+            ['chi phí lãi vay', 'lãi vay đã trả', 'interest expense']))
+
+        pretax_latest = get_latest(pretax_profit_series, default=0.0) if not pretax_profit_series.empty else 0.0
+        interest_latest = get_latest(interest_expense_series, default=0.0) if not interest_expense_series.empty else 0.0
+
+        ebitda_latest = 0.0
+        if pretax_latest:
+            ebitda_latest = abs(pretax_latest) + abs(interest_latest) + abs(da_latest)
+        elif da_latest and not net_profit_series.empty:
+            # Fallback: LNST + D&A (thiếu lãi vay/thuế, chỉ là ước tính thô)
+            ebitda_latest = abs(get_latest(net_profit_series, default=0.0)) + abs(da_latest)
+
+        # Nợ vay ròng = (Vay ngắn hạn + Vay dài hạn) - Tiền và tương đương tiền
+        short_debt_series = normalize_to_billion_vnd(find_row_series(
+            df_balance,
+            ['vay và nợ thuê tài chính ngắn hạn', 'vay ngắn hạn', 'short-term borrowings']))
+        long_debt_series = normalize_to_billion_vnd(find_row_series(
+            df_balance,
+            ['vay và nợ thuê tài chính dài hạn', 'vay dài hạn', 'long-term borrowings']))
+        cash_series = normalize_to_billion_vnd(find_row_series(
+            df_balance,
+            ['tiền và các khoản tương đương tiền', 'tiền và tương đương tiền',
+             'cash and cash equivalents']))
+
+        short_debt_latest = get_latest(short_debt_series, default=0.0) if not short_debt_series.empty else 0.0
+        long_debt_latest = get_latest(long_debt_series, default=0.0) if not long_debt_series.empty else 0.0
+        cash_latest = get_latest(cash_series, default=0.0) if not cash_series.empty else 0.0
+        net_debt_latest = (short_debt_latest + long_debt_latest) - cash_latest
+
+        clean_metrics.update({
+            "revenue_latest_billion": revenue_latest,
+            "cfo_latest_billion": cfo_latest,
+            "ebitda_latest_billion": ebitda_latest,
+            "net_debt_billion": net_debt_latest,
+        })
+
         latest_fcff = None
         if not cfo_series.empty:
             cfo_l = get_latest(cfo_series, default=None)
