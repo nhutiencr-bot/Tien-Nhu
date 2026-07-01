@@ -1,108 +1,143 @@
-import streamlit as st
 import pandas as pd
-from vnstock.api.listing import Listing
+import numpy as np
 
-# Cache danh sách mã 12 giờ
-LISTING_CACHE_TTL = 12 * 60 * 60
-
-EXCHANGE_NORMALIZE_MAP = {
-    "HSX": "HOSE",
-    "HOSE": "HOSE",
-    "HNX": "HNX",
-    "UPCOM": "UPCOM",
-}
-
-
-def _normalize_exchange_label(value):
-    if pd.isna(value):
-        return "KHÁC"
-    v = str(value).strip().upper()
-    return EXCHANGE_NORMALIZE_MAP.get(v, v)
-
-
-@st.cache_data(ttl=LISTING_CACHE_TTL)
-def load_all_symbols():
+def find_row_series(df: pd.DataFrame, keywords: list, exclude_keywords: list = None):
     """
-    Lấy toàn bộ mã cổ phiếu trên 3 sàn HOSE/HNX/UPCOM kèm tên công ty và sàn.
-    Trả về DataFrame với 3 cột chuẩn hoá: symbol, organ_name, exchange.
-    Fallback lần lượt qua VCI -> KBS -> DNSE.
+    Tìm trong DataFrame báo cáo tài chính (index là tên chỉ tiêu, cột là kỳ)
+    dòng đầu tiên có index chứa ít nhất một từ khóa trong `keywords`,
+    đồng thời không chứa bất kỳ từ khóa nào trong `exclude_keywords` (nếu có).
+
+    Trả về Series với index là các kỳ (năm hoặc quý), giá trị là số liệu.
+    Nếu không tìm thấy, trả về Series rỗng.
     """
-    last_error = None
+    if df is None or df.empty:
+        return pd.Series(dtype=float)
+    if exclude_keywords is None:
+        exclude_keywords = []
 
-    for source in ["VCI", "KBS", "DNSE"]:
-        try:
-            lst = Listing(source=source)
-            df = lst.symbols_by_exchange()
-
-            # Chuẩn hóa tên cột
-            cols_lower = {c.lower(): c for c in df.columns}
-            symbol_col = cols_lower.get("symbol", "symbol")
-            exchange_col = cols_lower.get("exchange", cols_lower.get("board", "exchange"))
-            name_col = cols_lower.get("organ_name", cols_lower.get("organ_short_name", None))
-
-            if symbol_col not in df.columns:
-                raise ValueError(f"Nguồn {source} thiếu cột symbol")
-
-            out = pd.DataFrame()
-            out["symbol"] = df[symbol_col].astype(str).str.strip().str.upper()
-            out["exchange"] = (
-                df[exchange_col].apply(_normalize_exchange_label)
-                if exchange_col in df.columns
-                else "KHÁC"
-            )
-            out["organ_name"] = (
-                df[name_col] if name_col and name_col in df.columns else ""
-            )
-
-            # Giữ lại 3 sàn chính
-            out = out[out["exchange"].isin(["HOSE", "HNX", "UPCOM"])]
-            # Chỉ lấy mã cổ phiếu thường (3 chữ cái)
-            out = out[out["symbol"].str.fullmatch(r"[A-Z]{3}")]
-            # Bỏ dòng không có tên công ty
-            out["organ_name"] = out["organ_name"].astype(str).str.strip()
-            out = out[~out["organ_name"].isin(["", "nan", "None", "NaN"])]
-
-            # Kiểm tra rỗng trước khi sort để tránh lỗi
-            if out.empty:
-                raise ValueError(f"Nguồn {source} trả về danh sách rỗng sau khi lọc")
-
-            out = out.drop_duplicates(subset="symbol")
-            out = out.sort_values(["exchange", "symbol"]).reset_index(drop=True)
-
-            out.attrs["source_used"] = source
-            return out
-
-        except Exception as e:
-            last_error = e
-            # Log ra console để debug nếu cần (có thể hiện warning nhẹ)
-            print(f"[SYMBOLS] Fallback từ nguồn {source}: {e}")
+    for idx in df.index:
+        idx_str = str(idx).lower()
+        # Kiểm tra có chứa ít nhất 1 từ khóa chính
+        if not any(k.lower() in idx_str for k in keywords):
             continue
+        # Kiểm tra loại trừ
+        if any(k.lower() in idx_str for k in exclude_keywords):
+            continue
+        # Trả về dòng đầu tiên khớp
+        series = df.loc[idx]
+        # Chuyển sang Series float, cố gắng ép kiểu số
+        numeric = pd.to_numeric(series, errors='coerce')
+        return numeric.dropna()
+    return pd.Series(dtype=float)
 
-    # Tất cả nguồn lỗi -> fallback DataFrame rỗng + cảnh báo
-    st.warning(
-        f"Không tải được danh sách mã từ VCI/KBS/DNSE (lỗi cuối: {last_error}). "
-        "Bạn vẫn có thể gõ tay mã cổ phiếu."
-    )
-    return pd.DataFrame(columns=["symbol", "exchange", "organ_name"])
 
-
-def build_display_options(df_symbols: pd.DataFrame):
+def build_5y_financial_table(df_income, df_balance, df_ratio, ticker=None):
     """
-    Tạo list string hiển thị dạng 'MÃ — Tên công ty (SÀN)' và dict map ngược.
+    Từ các DataFrame báo cáo tài chính (năm), trích xuất các chỉ tiêu cơ bản.
+    Trả về dictionary gồm các Series đã được lọc theo kỳ năm.
     """
-    if df_symbols.empty:
-        return [], {}
+    result = {}
 
-    display_list = []
-    display_to_symbol = {}
+    # --- Từ Báo cáo KQKD (income statement) ---
+    result['revenue'] = find_row_series(df_income, [
+        'doanh thu thuần', 'doanh thu thuần về bán hàng và cung cấp dịch vụ',
+        'revenue', 'total revenue', 'net revenue'
+    ])
+    result['net_profit'] = find_row_series(df_income, [
+        'lợi nhuận sau thuế', 'lợi nhuận sau thuế thu nhập doanh nghiệp',
+        'lợi nhuận sau thuế của cổ đông công ty mẹ',
+        'net profit', 'profit after tax', 'net income'
+    ])
 
-    for _, row in df_symbols.iterrows():
-        name = row["organ_name"] if row["organ_name"] else ""
-        if name:
-            label = f"{row['symbol']} — {name} ({row['exchange']})"
-        else:
-            label = f"{row['symbol']} ({row['exchange']})"
-        display_list.append(label)
-        display_to_symbol[label] = row["symbol"]
+    # --- Từ Bảng cân đối kế toán (balance sheet) ---
+    result['equity'] = find_row_series(df_balance, [
+        'vốn chủ sở hữu', 'vốn chủ sở hữu tổng cộng', 'equity',
+        'total equity', 'shareholders\' equity'
+    ])
+    result['total_assets'] = find_row_series(df_balance, [
+        'tổng tài sản', 'tổng cộng tài sản', 'total assets'
+    ])
+    # Số cổ phiếu lưu hành (đôi khi có trong balance sheet hoặc ratio)
+    outstanding = find_row_series(df_balance, [
+        'số cổ phiếu lưu hành', 'khối lượng cổ phiếu đang lưu hành',
+        'outstanding shares'
+    ])
+    if outstanding.empty:
+        outstanding = find_row_series(df_ratio, [
+            'số cổ phiếu lưu hành', 'outstanding shares', 'khối lượng lưu hành'
+        ])
+    result['outstanding_shares'] = outstanding
 
-    return display_list, display_to_symbol
+    # --- Từ Bảng chỉ số tài chính (ratio) ---
+    ratio_indicators = {
+        'eps': ['eps', 'earning per share', 'lợi nhuận trên mỗi cổ phiếu'],
+        'bvps': ['bvps', 'book value per share', 'giá trị sổ sách trên mỗi cổ phiếu'],
+        'roe': ['roe', 'return on equity', 'tỷ suất sinh lời trên vốn chủ sở hữu'],
+        'roa': ['roa', 'return on assets', 'tỷ suất sinh lời trên tài sản'],
+        'pe': ['p/e', 'pe', 'price to earning'],
+        'pb': ['p/b', 'pb', 'price to book'],
+        'net_margin': ['biên lợi nhuận ròng', 'net margin'],
+        'asset_turnover': ['vòng quay tài sản', 'asset turnover'],
+        'ev_ebitda': ['ev/ebitda', 'enterprise value/ebitda'],
+        'p_cf': ['p/cf', 'price to cash flow'],
+        'ps': ['p/s', 'price to sales'],
+        'dps': ['dps', 'dividend per share', 'cổ tức trên mỗi cổ phiếu'],
+        'market_cap': ['market cap', 'vốn hóa', 'market capitalization']
+    }
+    for key, kw_list in ratio_indicators.items():
+        series = find_row_series(df_ratio, kw_list)
+        result[key] = series
+
+    return result
+
+
+def build_financial_table(df_income, df_balance, df_ratio, ticker=None, period='quarter'):
+    """
+    Tương tự build_5y_financial_table nhưng dùng cho dữ liệu theo quý.
+    """
+    # Gọi lại hàm xây dựng cho năm (cấu trúc giống hệt, chỉ khác period dữ liệu đầu vào)
+    return build_5y_financial_table(df_income, df_balance, df_ratio, ticker)
+
+
+def get_latest(series, default=0.0):
+    """Trả về giá trị của kỳ gần nhất trong Series (index đã sắp xếp)."""
+    if series is None or series.empty:
+        return default
+    # Index có thể là năm (int) hoặc quarter (str), cần sort được
+    try:
+        sorted_series = series.sort_index()
+        return float(sorted_series.iloc[-1])
+    except Exception:
+        return default
+
+
+def get_latest_n_years(series, n=5):
+    """Lấy tối đa n năm gần nhất từ Series (giả sử index là năm)."""
+    if series is None or series.empty:
+        return series
+    # Lọc các index có dạng số
+    years = [idx for idx in series.index if isinstance(idx, (int, np.integer)) or
+             (isinstance(idx, str) and idx.isdigit())]
+    years = sorted([int(y) for y in years], reverse=True)[:n]
+    return series.loc[[y for y in series.index if int(y) in years]].sort_index()
+
+
+def cagr(series):
+    """
+    Tính CAGR (tăng trưởng kép) từ năm đầu đến năm cuối của Series.
+    Trả về float (0.xx) hoặc None nếu không đủ dữ liệu.
+    """
+    if series is None or series.empty or len(series) < 2:
+        return None
+    s = series.sort_index()
+    first_val = s.iloc[0]
+    last_val = s.iloc[-1]
+    if pd.isna(first_val) or pd.isna(last_val) or first_val == 0:
+        return None
+    years = len(s) - 1
+    if years <= 0:
+        return None
+    if last_val / first_val < 0:
+        # Không áp dụng cho chuỗi chuyển từ âm sang dương
+        return None
+    return (last_val / first_val) ** (1.0 / years) - 1.0
