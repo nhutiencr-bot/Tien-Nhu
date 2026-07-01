@@ -107,6 +107,15 @@ def _fetch_vnstock(ticker):
         out = {}
         for k in ['revenue', 'net_profit', 'equity', 'total_assets', 'eps', 'bvps', 'roe', 'roa']:
             s = fin5.get(k, pd.Series(dtype=float))
+            
+            # [SỬA LỖI] Ép kiểu toàn bộ index (Năm) của vnstock về Số nguyên (int)
+            # để đồng bộ tuyệt đối với dữ liệu từ CafeF và yfinance
+            if not s.empty:
+                try:
+                    s.index = s.index.astype(int)
+                except Exception:
+                    pass
+
             if k in ['revenue', 'net_profit', 'equity', 'total_assets']:
                 out[k] = s.map(_to_ty).dropna() if not s.empty else s
             else:
