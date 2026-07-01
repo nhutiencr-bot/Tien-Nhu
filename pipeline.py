@@ -484,16 +484,40 @@ def execute_equity_research_pipeline(ticker):
 
         df_price['volume_ma20'] = df_price['volume'].rolling(window=20).mean()
         df_price['MA20'] = df_price['close_vnd'].rolling(window=20).mean()
+        df_price['MA50'] = df_price['close_vnd'].rolling(window=50).mean()
+
+        # RSI(14) — chỉ báo động lượng thật, tính từ chuỗi giá đóng cửa
+        delta = df_price['close_vnd'].diff()
+        gain = delta.clip(lower=0)
+        loss = -delta.clip(upper=0)
+        avg_gain = gain.rolling(window=14).mean()
+        avg_loss = loss.rolling(window=14).mean()
+        rs = avg_gain / avg_loss.replace(0, float('nan'))
+        df_price['RSI14'] = 100 - (100 / (1 + rs))
+        df_price['RSI14'] = df_price['RSI14'].fillna(50.0)
 
         latest_vol = float(df_price['volume'].iloc[-1])
         avg_vol_20d = float(df_price['volume_ma20'].iloc[-1]) if not pd.isna(df_price['volume_ma20'].iloc[-1]) else 0.0
         vol_vs_avg_pct = ((latest_vol / avg_vol_20d - 1) * 100) if avg_vol_20d > 0 else 0.0
+
+        rsi_latest = float(df_price['RSI14'].iloc[-1]) if not pd.isna(df_price['RSI14'].iloc[-1]) else 50.0
+        ma50_latest = df_price['MA50'].iloc[-1]
+
+        if rsi_latest >= 70:
+            rsi_signal = "🔴 QUÁ MUA (Overbought)"
+        elif rsi_latest <= 30:
+            rsi_signal = "🟢 QUÁ BÁN (Oversold)"
+        else:
+            rsi_signal = "⚖️ TRUNG TÍNH"
 
         technical_summary = {
             "latest_volume": latest_vol,
             "avg_volume_20d": avg_vol_20d,
             "volume_vs_avg_pct": vol_vs_avg_pct,
             "ma20": df_price['MA20'].iloc[-1],
+            "ma50": ma50_latest,
+            "rsi14": rsi_latest,
+            "rsi_signal": rsi_signal,
             "oil_correlation": 0.74 if ticker in ['BSR', 'OIL', 'PLX', 'PVD', 'PVS', 'GAS'] else 0.0,
             "trend_signal": "KHẢ QUAN (Uptrend)" if current_price > df_price['MA20'].iloc[-1] else "RỦI RO (Downtrend)",
         }
