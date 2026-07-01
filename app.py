@@ -194,6 +194,22 @@ with tab_multiples:
     pe_now = metrics.get('pe', 0) or 0
     pb_now = metrics.get('pb', 0) or 0
 
+    # So sánh với median 5N CỦA CHÍNH MÃ (không dùng ngưỡng cố định chung cho mọi
+    # ngành/mã — trước đây P/B<2 luôn bị gắn "Định giá cao", sai với ngân hàng
+    # thường giao dịch quanh P/B 1.5-2.5x, gây mâu thuẫn với kết luận ở tab 9PP).
+    pe_hist_series = valuation_pkg.get('pe_series')
+    pb_hist_series = valuation_pkg.get('pb_series')
+    pe_median_5y = float(pe_hist_series.dropna().median()) if pe_hist_series is not None and not pe_hist_series.dropna().empty else None
+    pb_median_5y = float(pb_hist_series.dropna().median()) if pb_hist_series is not None and not pb_hist_series.dropna().empty else None
+
+    bvps_mismatch = metrics.get('bvps_mismatch_pct')
+    if bvps_mismatch is not None and bvps_mismatch > 5:
+        st.caption(
+            f"⚠️ BVPS gốc từ nguồn dữ liệu lệch {bvps_mismatch:.1f}% so với BVPS tự tính lại "
+            f"(Vốn CSH / Số CP hiện tại) — có thể do số CP lưu hành trong bảng ratio đã cũ "
+            f"(trước đợt chia cổ tức/tăng vốn gần nhất). Đã dùng số tự tính lại (mới hơn) cho P/B."
+        )
+
     def _card_label(value, avg=None, low_note="Dưới TB 5N", high_note="Trên TB 5N",
                      low_thresh=None, low_msg=None, high_msg=None):
         """Trả về (màu, dòng chú thích nhỏ) theo phong cách dashboard tham chiếu."""
@@ -220,9 +236,11 @@ with tab_multiples:
         )
 
     m1, m2, m3, m4 = st.columns(4)
-    c, n = _card_label(pe_now if pe_now else None, low_thresh=15, low_msg="Định giá hấp dẫn", high_msg="Định giá cao")
+    c, n = _card_label(pe_now if pe_now else None, avg=pe_median_5y,
+                        low_note="Rẻ hơn TB 5N", high_note="Đắt hơn TB 5N")
     _render_card(m1, "P/E", f"{pe_now:.2f}x" if pe_now else "—", c, n)
-    c, n = _card_label(pb_now if pb_now else None, low_thresh=2, low_msg="Định giá hấp dẫn", high_msg="Định giá cao")
+    c, n = _card_label(pb_now if pb_now else None, avg=pb_median_5y,
+                        low_note="Rẻ hơn TB 5N", high_note="Đắt hơn TB 5N")
     _render_card(m2, "P/B", f"{pb_now:.2f}x" if pb_now else "—", c, n)
     m3.metric("EPS", fmt(fundamentals.get('eps_latest', 0), suffix=" đ", decimals=0))
     m4.metric("BVPS", fmt(fundamentals.get('bvps_latest', 0), suffix=" đ", decimals=0))
