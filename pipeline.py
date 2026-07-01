@@ -112,7 +112,7 @@ def _build_engines_with_fallback(ticker):
     """Dùng nguồn đã được cache (hoặc dò mới nếu chưa có) để dựng engines."""
     source_used = _resolve_source(ticker)
     q_engine = Quote(symbol=ticker, source=source_used)
-    f_engine = Finance(symbol=ticker, source=source_used, period='year')
+    f_engine = Finance(symbol=ticker, source=source_used, period='year', get_all=True)
     c_engine = Company(symbol=ticker, source=source_used)
     return q_engine, f_engine, c_engine, source_used
 
@@ -130,7 +130,7 @@ def _fetch_balance_sheet(ticker, period='year'):
     """Thử lần lượt các nguồn để lấy balance sheet."""
     for bs_source in SOURCE_FALLBACK_ORDER:
         try:
-            f_bs = Finance(symbol=ticker, source=bs_source, period=period)
+            f_bs = Finance(symbol=ticker, source=bs_source, period=period, get_all=True)
             df = f_bs.balance_sheet(period=period)
             if df is not None and not df.empty:
                 return df
@@ -155,6 +155,7 @@ def execute_equity_research_pipeline(ticker):
         tasks = {
             "price": lambda: q_engine.history(start=start_date, end=end_date, interval='1D'),
             "overview": lambda: c_engine.overview(),
+            "events": lambda: c_engine.events(),
             "income_y": lambda: f_engine.income_statement(period='year'),
             "cashflow_y": lambda: f_engine.cash_flow(period='year'),
             "ratio_y": lambda: f_engine.ratio(period='year'),
@@ -188,6 +189,37 @@ def execute_equity_research_pipeline(ticker):
 
         df_price = results.get("price", pd.DataFrame())
         df_overview = results.get("overview", pd.DataFrame())
+        df_events = results.get("events", pd.DataFrame())
+
+        # ── Phát hiện split/cổ tức cổ phiếu (Bẫy 5B) ──────────────────────
+        # vnstock Quote.history() trả giá ĐÃ split-adjusted (toàn lịch sử về
+        # cùng base CP hiện tại). EPS/BVPS trong BCTC gốc lại dùng base CP
+        # tại năm đó (TRƯỚC split). Nếu mix 2 chuẩn → PE/PB SAI (VD BSR:
+        # PE sai 6.10x thay vì đúng 9.85x).
+        # → Tính SPLIT_MULT tích lũy cho tất cả sự kiện chia CP sau năm 2021
+        # rồi adjust EPS/BVPS các năm trước split về cùng base post-split.
+        split_mult = 1.0
+        split_year = None
+        if not df_events.empty:
+            try:
+                events_list = df_events.to_dict('records')
+                for ev in events_list:
+                    title = str(ev.get('event_title_vi', '') or ev.get('event_name', '') or '').lower()
+                    if any(kw in title for kw in ['chia cổ phiếu', 'cổ tức cổ phiếu', 'phát hành cổ phiếu',
+                                                   'thưởng cổ phiếu', 'chia tách']):
+                        ratio = float(ev.get('exercise_ratio', 0) or ev.get('ratio', 0) or 0)
+                        if ratio > 0.05:  # > 5% mới tính là split có ý nghĩa
+                            split_mult *= (1 + ratio)
+                            ev_date = str(ev.get('exright_date', '') or ev.get('ex_date', '') or '')
+                            if ev_date:
+                                try:
+                                    yr = int(ev_date[:4])
+                                    split_year = max(split_year, yr) if split_year else yr
+                                except Exception:
+                                    pass
+            except Exception:
+                split_mult = 1.0
+                split_year = None
         df_income = results.get("income_y", pd.DataFrame())
         df_cashflow = results.get("cashflow_y", pd.DataFrame())
         df_ratio = results.get("ratio_y", pd.DataFrame())
@@ -223,7 +255,31 @@ def execute_equity_research_pipeline(ticker):
 
         eps_series = fin5['eps']
         bvps_series = fin5['bvps']
-        roe_series = fin5['roe']
+
+        # ── Áp dụng split adjustment (Bẫy 5B) ──────────────────────────────
+        # Nếu phát hiện split/cổ tức CP, adjust EPS/BVPS năm trước về cùng
+        # base với giá đã split-adjusted từ vnstock → PE/PB cross-year đúng.
+        if split_mult > 1.01 and split_year:
+            if not eps_series.empty:
+                eps_adj = eps_series.copy().astype(float)
+                for yr in eps_adj.index:
+                    try:
+                        if int(yr) < int(split_year):
+                            eps_adj[yr] = eps_adj[yr] / split_mult
+                    except Exception:
+                        pass
+                eps_series = eps_adj
+            if not bvps_series.empty:
+                bvps_adj = bvps_series.copy().astype(float)
+                for yr in bvps_adj.index:
+                    try:
+                        if int(yr) < int(split_year):
+                            bvps_adj[yr] = bvps_adj[yr] / split_mult
+                    except Exception:
+                        pass
+                bvps_series = bvps_adj
+
+
         roa_series = fin5['roa']
         pe_series = fin5['pe']
         pb_series = fin5['pb']
