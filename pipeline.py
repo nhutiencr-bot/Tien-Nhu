@@ -19,6 +19,7 @@ from valuation import (
     graham_number, ddm_gordon, nine_methods_valuation, summarize_valuation,
 )
 from cafef_fallback import fetch_cafef_balance_sheet_5y, fetch_cafef_analysis_reports
+from sector_wacc import estimate_wacc, wacc_scenarios, detect_sector
 
 SOURCE_FALLBACK_ORDER = ['VCI', 'KBS', 'DNSE']
 
@@ -487,12 +488,26 @@ def execute_equity_research_pipeline(ticker):
                 latest_fcff = (cfo_l - abs(capex_l)) * 1e9
 
         dcf_results = reverse_g = None
+        # WACC theo ngành + beta cụ thể (thay vì 10.5% cố định cho mọi mã —
+        # bug cũ khiến Ngân hàng/Bán lẻ/Công nghệ (WACC thật 8-11%) và
+        # BĐS/Hàng không (WACC thật 11-13%) đều bị định giá DCF sai lệch).
+        industry_text = ""
+        if not df_overview.empty:
+            for col in ['industry', 'icb_name3', 'icb_name4', 'company_type']:
+                if col in df_overview.columns and pd.notna(df_overview[col].iloc[0]):
+                    industry_text = str(df_overview[col].iloc[0])
+                    break
+        sector_detected = detect_sector(ticker, industry_text)
+        wacc_base = estimate_wacc(ticker, industry_text)
+        dcf_scenarios = wacc_scenarios(wacc_base)
+
         if latest_fcff and latest_fcff > 0 and issue_share > 0:
             dcf_results = dcf_fcff_scenarios(
-                latest_fcff=latest_fcff, shares_outstanding=issue_share, net_debt=0.0)
+                latest_fcff=latest_fcff, shares_outstanding=issue_share, net_debt=0.0,
+                scenarios=dcf_scenarios)
             reverse_g = reverse_dcf_implied_growth(
                 current_price=current_price, shares_outstanding=issue_share,
-                latest_fcff=latest_fcff, wacc=0.105, net_debt=0.0)
+                latest_fcff=latest_fcff, wacc=wacc_base, net_debt=0.0)
 
         graham_value = graham_number(eps_latest, bvps_latest) if eps_latest > 0 and bvps_latest > 0 else None
         ddm_value = None
@@ -514,6 +529,8 @@ def execute_equity_research_pipeline(ticker):
             "ddm_value": ddm_value,
             "pe_series": pe_series,
             "pb_series": pb_series,
+            "sector_detected": sector_detected,
+            "wacc_base_pct": wacc_base * 100,
         }
 
         # ── 10. Volume + Technical ─────────────────────────────────────────
