@@ -238,6 +238,22 @@ def render_tab_valuation(valuation_pkg, metrics):
 
 def render_tab_dcf(valuation_pkg, metrics):
     st.markdown("### Định Giá Nội Tại · DCF & Graham")
+
+    sector_labels = {
+        'bank': 'Ngân hàng', 'steel': 'Thép / Công nghiệp nặng',
+        'real_estate': 'Bất động sản', 'retail': 'Bán lẻ / Tiêu dùng',
+        'tech': 'Công nghệ / Viễn thông', 'oil_gas': 'Dầu khí / Hoá chất',
+        'aviation': 'Hàng không / Vận tải', 'default': 'Chưa xác định (dùng WACC mặc định)',
+    }
+    sector = valuation_pkg.get('sector_detected', 'default')
+    wacc_base_pct = valuation_pkg.get('wacc_base_pct')
+    if wacc_base_pct is not None:
+        st.caption(
+            f"📌 Ngành nhận diện: **{sector_labels.get(sector, sector)}** · "
+            f"WACC cơ sở theo ngành: **~{wacc_base_pct:.1f}%** "
+            f"(áp dụng cho kịch bản DCF bên dưới — không dùng chung 10.5% cho mọi mã)."
+        )
+
     dcf = valuation_pkg.get('dcf_scenarios')
     if dcf:
         st.markdown("#### DCF — 3 Kịch Bản FCFF")
