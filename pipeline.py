@@ -241,7 +241,8 @@ def execute_equity_research_pipeline(ticker):
         for col in ['close', 'open', 'high', 'low']:
             df_price[f'{col}_vnd'] = df_price[col] * 1000
 
-        is_bank = ticker in ['VCB', 'BID', 'CTG', 'TCB', 'MBB', 'ACB', 'STB']
+        from financial_normalizer import BANK_TICKERS, FINANCIAL_TICKERS
+        is_bank = ticker in BANK_TICKERS or ticker in FINANCIAL_TICKERS
         current_price = float(df_price['close_vnd'].iloc[-1])
 
         # ── 4. Chuẩn hoá BCTC ─────────────────────────────────────────────
@@ -250,8 +251,19 @@ def execute_equity_research_pipeline(ticker):
         revenue_series = normalize_to_billion_vnd(fin5['revenue'])
         equity_series = normalize_to_billion_vnd(fin5['equity'])
         total_assets_series = normalize_to_billion_vnd(fin5['total_assets'])
+
+        # ⚠️ Phải normalize ROE về % TRƯỚC khi dùng làm điểm neo cho net_profit.
+        # vnstock trả ROE dạng thập phân (0.18) với nhiều mã (MWG, FPT...),
+        # nếu truyền thẳng vào anchor (equity * roe / 100) → ra số nhỏ hơn thực 100x
+        # → power = -2 → net_profit bị scale sai → mọi chỉ số phụ thuộc đều sai.
+        def _normalize_pct_early(s):
+            if s is None or s.empty:
+                return s
+            return s * 100 if s.abs().median() < 1 else s
+
+        roe_for_anchor = _normalize_pct_early(fin5['roe'])
         net_profit_series = normalize_net_profit_with_anchor(
-            fin5['net_profit'], equity_series, fin5['roe'])
+            fin5['net_profit'], equity_series, roe_for_anchor)
 
         eps_series = fin5['eps']
         bvps_series = fin5['bvps']
