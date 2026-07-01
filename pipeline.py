@@ -228,6 +228,10 @@ def execute_equity_research_pipeline(ticker):
         outstanding_shares_series = fin5['outstanding_shares']
         net_margin_series = fin5['net_margin']
         asset_turnover_series = fin5['asset_turnover']
+        ev_ebitda_series = fin5.get('ev_ebitda', pd.Series(dtype=float))
+        p_cf_series = fin5.get('p_cf', pd.Series(dtype=float))
+        ps_series = fin5.get('ps', pd.Series(dtype=float))
+        dps_series = fin5.get('dps', pd.Series(dtype=float))
 
         # Fallback equity
         if equity_series.empty and not total_assets_series.empty:
@@ -510,13 +514,28 @@ def execute_equity_research_pipeline(ticker):
                 latest_fcff=latest_fcff, wacc=wacc_base, net_debt=0.0)
 
         graham_value = graham_number(eps_latest, bvps_latest) if eps_latest > 0 and bvps_latest > 0 else None
-        ddm_value = None
+
+        # ── DDM (Gordon Growth) ─────────────────────────────────────────
+        # Chỉ áp dụng cho công ty trả cổ tức tiền mặt đều (dps_latest > 0).
+        # required_return dùng gần đúng bằng cost of equity ~ wacc_base
+        # (WACC theo ngành đã tính ở trên); g dùng kịch bản "Cơ sở" của
+        # cùng bảng wacc_scenarios để nhất quán với giả định DCF.
+        dps_latest = get_latest(dps_series, default=0.0) if not dps_series.empty else 0.0
+        ddm_required_return = wacc_base + 0.01  # cost of equity thường > WACC (có nợ giá rẻ hơn VCSH)
+        ddm_g = dcf_scenarios.get('Cơ sở', {}).get('g', 0.03) if dcf_scenarios else 0.03
+        ddm_value = (ddm_gordon(dps_latest, required_return=ddm_required_return, g=ddm_g)
+                     if dps_latest > 0 else None)
 
         valuation_methods = nine_methods_valuation(
             eps_latest=eps_latest, bvps_latest=bvps_latest,
             pe_series=pe_series, pb_series=pb_series,
             current_price=current_price,
-            dcf_results=dcf_results, graham_value=graham_value, ddm_value=ddm_value)
+            dcf_results=dcf_results, graham_value=graham_value, ddm_value=ddm_value,
+            ev_ebitda_series=ev_ebitda_series, ebitda_latest=ebitda_latest,
+            net_debt_latest=net_debt_latest,
+            p_cf_series=p_cf_series, cfo_latest=cfo_latest,
+            ps_series=ps_series, revenue_latest=revenue_latest,
+            shares_outstanding=issue_share)
 
         valuation_summary = summarize_valuation(valuation_methods, current_price) if valuation_methods else None
 
