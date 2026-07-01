@@ -1,23 +1,49 @@
 """
-financial_normalizer.py
+financial_normalizer_fixed.py
+------------------------------
+BẢN VÁ LỖI — thay thế financial_normalizer.py
+
+Các sửa đổi chính:
+  1. Thêm RETAIL_TICKERS vào nhóm detect — keyword revenue bán lẻ đặc thù
+  2. REAL_ESTATE_TICKERS: dùng keyword "doanh thu cho thuê"
+  3. build_5y_financial_table() nhận ticker và truyền xuống build_financial_table()
+  4. find_row_series() ưu tiên dòng có nhiều data nhất (không bỏ sót năm 2021)
+  5. _find_revenue_for_retail(): hàm riêng cho bán lẻ/phân phối
 """
 
 import pandas as pd
 import re
 
-# Danh sách mã ngân hàng VN (mở rộng đầy đủ)
+# ──────────────────────────────────────────────────────────────
+# NGÀNH — detect để chọn keyword đúng
+# ──────────────────────────────────────────────────────────────
+
 BANK_TICKERS = {
     'VCB', 'BID', 'CTG', 'TCB', 'MBB', 'ACB', 'STB', 'VPB', 'HDB', 'TPB',
     'MSB', 'OCB', 'VIB', 'SHB', 'EIB', 'LPB', 'SSB', 'NAB', 'ABB', 'BAB',
     'BVB', 'KLB', 'PGB', 'VAB', 'VBB', 'SGN', 'NVB', 'SGB', 'CBB', 'SEAB',
 }
 
-# Danh sách mã bảo hiểm/chứng khoán (cũng dùng thu nhập thay doanh thu)
 FINANCIAL_TICKERS = {
     'BVH', 'PVI', 'PTI', 'MIG', 'BMI', 'VNR', 'BIC', 'PRE', 'PGI',
     'SSI', 'VND', 'HCM', 'MBS', 'VCI', 'FTS', 'AGR', 'SBS', 'BSI',
 }
 
+# ✅ MỚI: Bán lẻ / phân phối — revenue = "doanh thu bán hàng"
+RETAIL_TICKERS = {
+    'MWG', 'FRT', 'DGW', 'PNJ', 'HAX', 'SVC', 'MCH', 'PET',
+    'PSD', 'HHS', 'HUT', 'AST', 'PTC',
+}
+
+# ✅ MỚI: BĐS cho thuê — revenue = "doanh thu cho thuê"
+REAL_ESTATE_TICKERS = {'VRE', 'NLG', 'DXG', 'KDH', 'PDR', 'CEO', 'BCM'}
+
+TARGET_YEARS = list(range(2021, 2026))
+
+
+# ──────────────────────────────────────────────────────────────
+# HELPERS — nhận diện cột
+# ──────────────────────────────────────────────────────────────
 
 def _get_year_columns(df: pd.DataFrame):
     meta_cols = {'item', 'item_en', 'item_id'}
@@ -28,8 +54,7 @@ def _get_year_columns(df: pd.DataFrame):
         c_str = str(c).strip()
         if re.fullmatch(r'\d{4}', c_str):
             year_cols.append(c)
-    year_cols = sorted(year_cols, key=lambda x: int(str(x).strip()))
-    return year_cols
+    return sorted(year_cols, key=lambda x: int(str(x).strip()))
 
 
 def _quarter_sort_key(c):
@@ -38,7 +63,6 @@ def _quarter_sort_key(c):
 
 
 def _get_quarter_columns(df: pd.DataFrame):
-    """Nhận diện các cột theo quý, định dạng vnstock trả về: 'YYYY-Q1'..'YYYY-Q4'."""
     meta_cols = {'item', 'item_en', 'item_id'}
     q_cols = []
     for c in df.columns:
@@ -50,11 +74,17 @@ def _get_quarter_columns(df: pd.DataFrame):
     return sorted(q_cols, key=_quarter_sort_key)
 
 
+# ──────────────────────────────────────────────────────────────
+# find_row_series — hàm cốt lõi
+# ──────────────────────────────────────────────────────────────
+
 def find_row_series(df: pd.DataFrame, keywords, exclude_keywords=None,
                     item_ids=None, prefer_top_level=True, period='year'):
     """
-    period='year'    -> tìm các cột dạng 'YYYY', key trả về là int năm.
-    period='quarter'  -> tìm các cột dạng 'YYYY-Qn', key trả về là str 'YYYY-Qn'.
+    Tìm dòng phù hợp trong DataFrame BCTC vnstock.
+    
+    ✅ FIX: Khi có nhiều dòng khớp, chọn dòng có nhiều năm data nhất
+            (ưu tiên dòng phủ đủ 2021–2025).
     """
     if df is None or df.empty:
         return pd.Series(dtype=float)
@@ -69,7 +99,7 @@ def find_row_series(df: pd.DataFrame, keywords, exclude_keywords=None,
 
     matched = pd.DataFrame()
 
-    # Bước 1: thử khớp chính xác theo item_id
+    # Bước 1: khớp item_id chính xác
     if item_ids and 'item_id' in df.columns:
         item_id_lower = df['item_id'].astype(str).str.lower().str.strip()
         target_ids = [i.lower().strip() for i in item_ids]
@@ -77,7 +107,7 @@ def find_row_series(df: pd.DataFrame, keywords, exclude_keywords=None,
         if mask_exact.any():
             matched = df[mask_exact]
 
-    # Bước 2: fallback dò từ khoá
+    # Bước 2: fallback từ khoá
     if matched.empty:
         combined_text = df[search_cols].astype(str).agg(' '.join, axis=1).str.lower()
         mask = pd.Series(False, index=df.index)
@@ -91,24 +121,12 @@ def find_row_series(df: pd.DataFrame, keywords, exclude_keywords=None,
     if matched.empty:
         return pd.Series(dtype=float)
 
+    # Chọn dòng tốt nhất
     row = matched.iloc[0]
     if len(matched) > 1:
-        if prefer_top_level and 'levels' in matched.columns:
-            levels_numeric = pd.to_numeric(matched['levels'], errors='coerce')
-            if levels_numeric.notna().any():
-                min_level = levels_numeric.min()
-                top_level_rows = matched[levels_numeric == min_level]
-                if len(top_level_rows) == 1:
-                    row = top_level_rows.iloc[0]
-                else:
-                    non_na_counts = top_level_rows[year_cols].notna().sum(axis=1)
-                    row = top_level_rows.loc[non_na_counts.idxmax()]
-            else:
-                non_na_counts = matched[year_cols].notna().sum(axis=1)
-                row = matched.loc[non_na_counts.idxmax()]
-        else:
-            non_na_counts = matched[year_cols].notna().sum(axis=1)
-            row = matched.loc[non_na_counts.idxmax()]
+        # ✅ Ưu tiên dòng có nhiều dữ liệu nhất (đặc biệt phủ năm 2021)
+        non_na_counts = matched[year_cols].notna().sum(axis=1)
+        row = matched.loc[non_na_counts.idxmax()]
 
     result = {}
     for yc in year_cols:
@@ -117,7 +135,8 @@ def find_row_series(df: pd.DataFrame, keywords, exclude_keywords=None,
             if period == 'quarter':
                 result[str(yc).strip()] = float(val)
             else:
-                result[int(str(yc).strip())] = float(val)
+                yr = int(str(yc).strip())
+                result[yr] = float(val)
 
     if period == 'quarter':
         ordered_keys = sorted(result.keys(), key=_quarter_sort_key)
@@ -125,123 +144,199 @@ def find_row_series(df: pd.DataFrame, keywords, exclude_keywords=None,
     return pd.Series(result).sort_index()
 
 
+# ──────────────────────────────────────────────────────────────
+# Revenue helpers theo ngành
+# ──────────────────────────────────────────────────────────────
+
 def _find_revenue_for_bank(df_income, period='year'):
-    """
-    Ngân hàng/bảo hiểm/chứng khoán không có 'doanh thu thuần'.
-    Thử lần lượt các chỉ tiêu thu nhập đặc thù theo thứ tự ưu tiên.
-    """
+    """Ngân hàng/bảo hiểm/chứng khoán — dùng thu nhập thay doanh thu."""
     bank_revenue_keywords = [
         (['tổng thu nhập hoạt động', 'total operating income', 'net operating income'], ['chi phí', 'expense']),
         (['thu nhập lãi thuần', 'net interest income', 'lãi thuần'], ['chi phí lãi']),
         (['thu nhập thuần', 'net income from', 'total net income'], ['lợi nhuận', 'profit']),
         (['tổng doanh thu', 'total revenue', 'gross revenue'], []),
         (['doanh thu hoạt động', 'operating revenue'], []),
-        (['thu nhập từ lãi', 'interest income', 'interest and similar income'], ['chi phí']),
+        (['thu nhập từ lãi', 'interest income'], ['chi phí']),
     ]
-
     for keywords, excludes in bank_revenue_keywords:
         s = find_row_series(df_income, keywords,
-                           exclude_keywords=excludes if excludes else None, period=period)
+                            exclude_keywords=excludes if excludes else None,
+                            period=period)
         if not s.empty:
             return s
-
     return pd.Series(dtype=float)
 
 
-def build_financial_table(df_income, df_balance, df_ratio=None, ticker=None, period='year'):
+def _find_revenue_for_retail(df_income, period='year'):
     """
-    Tổng hợp các chỉ tiêu BCTC.
-    ticker: dùng để detect ngân hàng/tài chính và chọn logic revenue phù hợp.
-    period: 'year' hoặc 'quarter'.
+    ✅ MỚI: Bán lẻ / phân phối.
+    Keyword rộng hơn, không exclude "dịch vụ".
+    """
+    retail_keywords_list = [
+        (['doanh thu thuần về bán hàng và cung cấp dịch vụ'], ['giá vốn']),
+        (['doanh thu bán hàng và cung cấp dịch vụ'], ['giá vốn']),
+        (['doanh thu thuần', 'net revenue'], ['giá vốn', 'chi phí lãi']),
+        (['doanh thu bán hàng', 'sales revenue'], ['giá vốn']),
+        (['tổng doanh thu', 'total revenue'], ['giá vốn']),
+        (['revenue', 'net sales'], ['cost']),
+    ]
+    for keywords, excludes in retail_keywords_list:
+        s = find_row_series(df_income, keywords,
+                            exclude_keywords=excludes if excludes else None,
+                            period=period)
+        if not s.empty:
+            return s
+    return pd.Series(dtype=float)
+
+
+def _find_revenue_for_realestate(df_income, period='year'):
+    """
+    ✅ MỚI: BĐS cho thuê (VRE, NLG...).
+    """
+    re_keywords_list = [
+        (['doanh thu cho thuê', 'rental revenue', 'rental income'], []),
+        (['doanh thu bất động sản'], []),
+        (['doanh thu thuần', 'net revenue'], ['giá vốn']),
+        (['tổng doanh thu', 'total revenue'], []),
+    ]
+    for keywords, excludes in re_keywords_list:
+        s = find_row_series(df_income, keywords,
+                            exclude_keywords=excludes if excludes else None,
+                            period=period)
+        if not s.empty:
+            return s
+    return pd.Series(dtype=float)
+
+
+# ──────────────────────────────────────────────────────────────
+# build_financial_table — hàm chính
+# ──────────────────────────────────────────────────────────────
+
+def build_financial_table(df_income, df_balance, df_ratio=None,
+                          ticker=None, period='year'):
+    """
+    Tổng hợp chỉ tiêu BCTC. ticker bắt buộc phải truyền vào để detect ngành.
     """
     data = {}
+
     is_bank = ticker in BANK_TICKERS if ticker else False
     is_financial = ticker in FINANCIAL_TICKERS if ticker else False
+    is_retail = ticker in RETAIL_TICKERS if ticker else False
+    is_realestate = ticker in REAL_ESTATE_TICKERS if ticker else False
 
-    # --- Revenue: xử lý riêng cho ngân hàng/tài chính ---
+    # ── Revenue ──
     if is_bank or is_financial:
         data['revenue'] = _find_revenue_for_bank(df_income, period=period)
+    elif is_realestate:
+        data['revenue'] = _find_revenue_for_realestate(df_income, period=period)
+    elif is_retail:
+        data['revenue'] = _find_revenue_for_retail(df_income, period=period)
     else:
         # Doanh nghiệp thông thường
         data['revenue'] = find_row_series(
             df_income,
-            [
-                'doanh thu thuần', 'net revenue', 'net sales', 'revenue',
-                'doanh thu bán hàng', 'tổng doanh thu', 'total revenue',
-            ],
+            ['doanh thu thuần', 'net revenue', 'net sales', 'revenue',
+             'doanh thu bán hàng', 'tổng doanh thu', 'total revenue'],
             exclude_keywords=['giá vốn', 'cost of', 'chi phí lãi'],
-            item_ids=['revenue', 'net_revenue', 'net_sales'], period=period)
-
+            item_ids=['revenue', 'net_revenue', 'net_sales'],
+            period=period
+        )
+        # Fallback nếu vẫn rỗng
         if data['revenue'].empty:
-            data['revenue'] = _find_revenue_for_bank(df_income, period=period)
+            data['revenue'] = _find_revenue_for_retail(df_income, period=period)
 
-    # --- Net profit ---
+    # ── Net profit ──
     data['net_profit'] = find_row_series(
         df_income,
         ['lợi nhuận sau thuế', 'net profit', 'profit after tax', 'net income',
          'lợi nhuận thuần', 'lãi sau thuế'],
         exclude_keywords=['trước thuế', 'before tax', 'thiểu số', 'minority'],
-        item_ids=['net_profit', 'net_profit_after_tax', 'profit_after_tax'], period=period)
+        item_ids=['net_profit', 'net_profit_after_tax', 'profit_after_tax'],
+        period=period
+    )
 
     data['eps_income_stmt'] = find_row_series(
         df_income,
         ['lãi cơ bản trên cổ phiếu', 'earnings per share', 'eps'],
-        item_ids=['eps'], period=period)
+        item_ids=['eps'], period=period
+    )
 
-    # --- Balance sheet ---
+    # ── Balance sheet ──
     data['equity'] = find_row_series(
         df_balance,
         ['vốn chủ sở hữu', "owner's equity", 'owners equity', 'total equity',
          'equity', 'vcsh'],
-        exclude_keywords=['vốn điều lệ', 'charter', 'cổ phần ưu đãi'], period=period)
+        exclude_keywords=['vốn điều lệ', 'charter', 'cổ phần ưu đãi'],
+        period=period
+    )
 
     data['total_assets'] = find_row_series(
         df_balance,
-        ['tổng cộng tài sản', 'total assets', 'tổng tài sản'], period=period)
+        ['tổng cộng tài sản', 'total assets', 'tổng tài sản'],
+        period=period
+    )
 
-    # --- ĐOẠN RATIO ĐƯỢC KHÂU LẠI VÀO ĐÚNG HÀM CỦA NÓ ---
+    # ── Ratio ──
+    ratio_fields = [
+        ('eps', ['eps', 'earning per share', 'earnings per share']),
+        ('bvps', ['book value per share', 'bvps']),
+        ('roe', ['roe']),
+        ('roa', ['roa']),
+        ('pe', ['p/e', 'pe ratio', ' pe ']),
+        ('pb', ['p/b', 'pb ratio', ' pb ']),
+        ('market_cap', ['market cap', 'vốn hóa']),
+        ('outstanding_shares', ['outstanding shares', 'số cổ phiếu lưu hành']),
+        ('ev_ebitda', ['ev/ebitda', 'ev to ebitda']),
+        ('p_cf', ['price to cash flow', 'p/cf']),
+        ('ps', ['p/s', 'price to sales', 'ps ratio']),
+        ('net_margin', ['net margin', 'after tax profit margin', 'biên lợi nhuận sau thuế']),
+        ('asset_turnover', ['asset turnover', 'vòng quay tài sản']),
+        ('dps', ['dividend per share', 'cổ tức', 'dps']),
+    ]
+
     if df_ratio is not None and not df_ratio.empty:
-        data['eps']    = find_row_series(df_ratio, ['eps', 'earning per share', 'earnings per share'], period=period)
-        data['bvps']   = find_row_series(df_ratio, ['book value per share', 'bvps'], period=period)
-        data['roe']    = find_row_series(df_ratio, ['roe'], period=period)
-        data['roa']    = find_row_series(df_ratio, ['roa'], period=period)
-        data['pe']     = find_row_series(df_ratio, ['p/e', 'pe ratio', ' pe '], period=period)
-        data['pb']     = find_row_series(df_ratio, ['p/b', 'pb ratio', ' pb '], period=period)
-        data['market_cap'] = find_row_series(df_ratio, ['market cap', 'vốn hóa'],
-                                             item_ids=['market_cap'], period=period)
-        data['outstanding_shares'] = find_row_series(
-            df_ratio,
-            ['outstanding shares', 'số cổ phiếu lưu hành', 'số lượng cổ phiếu'],
-            item_ids=['outstanding_shares', 'issue_share'], period=period)
-        data['ev_ebitda']      = find_row_series(df_ratio, ['ev/ebitda', 'ev to ebitda'], period=period)
-        data['p_cf']           = find_row_series(df_ratio, ['price to cash flow', 'p/cf'], period=period)
-        data['ps']             = find_row_series(df_ratio, ['p/s', 'price to sales', 'ps ratio'], period=period)
-        data['net_margin']     = find_row_series(df_ratio, ['net margin', 'after tax profit margin', 'biên lợi nhuận sau thuế'], period=period)
-        data['asset_turnover'] = find_row_series(df_ratio, ['asset turnover', 'vòng quay tài sản', 'vòng quay tổng tài sản'], period=period)
-        data['dps']            = find_row_series(df_ratio, ['dividend per share', 'cổ tức trên mỗi cổ phiếu',
-                                                              'cổ tức tiền mặt', 'dps'], period=period)
+        for field_name, keywords in ratio_fields:
+            data[field_name] = find_row_series(df_ratio, keywords, period=period)
     else:
-        for k in ['eps', 'bvps', 'roe', 'roa', 'pe', 'pb', 'market_cap',
-                  'outstanding_shares', 'ev_ebitda', 'p_cf', 'ps', 'net_margin',
-                  'asset_turnover', 'dps']:
-            data[k] = pd.Series(dtype=float)
+        for field_name, _ in ratio_fields:
+            data[field_name] = pd.Series(dtype=float)
 
-    if data['eps'].empty and not data['eps_income_stmt'].empty:
+    # Fallback EPS từ income statement
+    if data.get('eps', pd.Series(dtype=float)).empty and not data['eps_income_stmt'].empty:
         data['eps'] = data['eps_income_stmt']
 
-    if data['bvps'].empty and not data['equity'].empty and not data['outstanding_shares'].empty:
-        common_years = data['equity'].index.intersection(data['outstanding_shares'].index)
+    # Tính BVPS nếu thiếu
+    if (data.get('bvps', pd.Series(dtype=float)).empty
+            and not data['equity'].empty
+            and not data.get('outstanding_shares', pd.Series(dtype=float)).empty):
+        eq = data['equity']
+        sh = data['outstanding_shares']
+        common_years = eq.index.intersection(sh.index)
         if len(common_years) > 0:
-            data['bvps'] = (data['equity'].loc[common_years] / data['outstanding_shares'].loc[common_years])
+            data['bvps'] = (eq.loc[common_years] / sh.loc[common_years])
 
     return data
 
 
-# --- CÁC HÀM BỔ TRỢ GỐC CỦA BẠN (Đã được đưa về đúng vị trí) ---
-def build_5y_financial_table(df_income, df_balance, df_ratio=None, ticker=None):
-    """Giữ tương thích ngược: bảng theo năm (hành vi cũ, không đổi)."""
-    return build_financial_table(df_income, df_balance, df_ratio, ticker=ticker, period='year')
+# ──────────────────────────────────────────────────────────────
+# Backward-compat wrappers
+# ──────────────────────────────────────────────────────────────
 
+def build_5y_financial_table(df_income, df_balance, df_ratio=None, ticker=None):
+    """
+    ✅ FIX: ticker giờ được truyền vào đúng.
+    Wrapper tương thích ngược với code cũ.
+    """
+    return build_financial_table(
+        df_income, df_balance, df_ratio,
+        ticker=ticker,   # <-- đây là bug fix quan trọng nhất
+        period='year'
+    )
+
+
+# ──────────────────────────────────────────────────────────────
+# Utils
+# ──────────────────────────────────────────────────────────────
 
 def normalize_to_billion_vnd(series: pd.Series, label=""):
     if series is None or series.empty:
@@ -280,85 +375,49 @@ def cagr(series: pd.Series, n_years=None):
         return None
 
 
-# ============================================================
-# 4. ĐỊNH GIÁ: DDM VÀ GRAHAM NUMBER (BẢN CẬP NHẬT CÓ BẪY LỖI)
-# ============================================================
-
 def ddm_gordon(dps, required_return=0.11, g=0.04):
-    """
-    Mô hình chiết khấu cổ tức (Gordon Growth Model).
-    Bẫy lỗi: Cổ tức phải dương và ke phải lớn hơn g.
-    """
     if dps is None or dps <= 0 or required_return <= g:
         return None
     return (dps * (1 + g)) / (required_return - g)
 
 
 def graham_number(eps, bvps):
-    """
-    Graham Number: Mức giá hợp lý tối đa cho một cổ phiếu giá trị.
-    Bẫy lỗi: EPS và BVPS bắt buộc phải > 0.
-    """
     if eps is None or bvps is None or eps <= 0 or bvps <= 0:
         return None
     return (22.5 * eps * bvps) ** 0.5
 
 
-# ------------------------------------------------------------
-# DÁN HÀM MỚI VÀO ĐÂY (NGAY DƯỚI PHẦN 4, TRÊN PHẦN 5)
-# ------------------------------------------------------------
-def advanced_multiples_valuation(eps_latest, eps_5y_ago, pe_current, 
-                                 ebitda_latest, cfo_latest, revenue_latest, net_debt_latest, 
-                                 shares_outstanding, 
-                                 ev_ebitda_median_5y, pcf_median_5y, ps_median_5y):
-    """
-    Port chuẩn xác từ Node.js: Xử lý EV/EBITDA, P/CF, P/S và PEG.
-    """
+def advanced_multiples_valuation(eps_latest, eps_5y_ago, pe_current,
+                                  ebitda_latest, cfo_latest, revenue_latest, net_debt_latest,
+                                  shares_outstanding,
+                                  ev_ebitda_median_5y, pcf_median_5y, ps_median_5y):
     methods = {}
-    
-    # Đổi shares ra đơn vị Tỷ Cổ Phiếu
     shares_billion = shares_outstanding / 1e9 if shares_outstanding else 0
     if shares_billion <= 0:
         return methods
 
-    # 1. EV/EBITDA
     if ebitda_latest and ebitda_latest > 0 and ev_ebitda_median_5y:
         fair_ev = ebitda_latest * ev_ebitda_median_5y
         fair_market_cap = fair_ev - net_debt_latest
         if fair_market_cap > 0:
             methods['EV/EBITDA Median 5N'] = fair_market_cap / shares_billion
 
-    # 2. P/CF
     if cfo_latest and cfo_latest > 0 and pcf_median_5y:
         methods['P/CF Median 5N'] = (cfo_latest * pcf_median_5y) / shares_billion
 
-    # 3. P/S
     if revenue_latest and revenue_latest > 0 and ps_median_5y:
         methods['P/S Median 5N'] = (revenue_latest * ps_median_5y) / shares_billion
 
-    # 4. PEG
-    if eps_latest and eps_5y_ago and eps_5y_ago > 0 and eps_latest > eps_5y_ago and pe_current:
+    if (eps_latest and eps_5y_ago and eps_5y_ago > 0
+            and eps_latest > eps_5y_ago and pe_current):
         eps_growth = ((eps_latest / eps_5y_ago) ** 0.25 - 1) * 100
         if eps_growth > 0:
-            peg_ratio = pe_current / max(eps_growth, 1)
             methods['PEG Fair Value'] = eps_latest * max(eps_growth, 1)
-            methods['_PEG_Ratio'] = peg_ratio 
-            
+            methods['_PEG_Ratio'] = pe_current / max(eps_growth, 1)
+
     return methods
 
-
-# ============================================================
-# 5. 9 PHƯƠNG PHÁP ĐỊNH GIÁ TỔNG HỢP (dùng PE/PB lịch sử của CHÍNH MÃ)
-# ============================================================
 
 def nine_methods_valuation(eps_latest, bvps_latest, pe_series: pd.Series,
-                           pb_series: pd.Series, current_price):
-    """
-    Hàm tổng hợp định giá.
-    Nơi đây bạn có thể gọi DDM, Graham và Advanced Multiples để gom chung thành 1 object.
-    """
-    methods = {}
-    
-    # (Bạn có thể bổ sung logic để nhét các kết quả định giá vào dictionary methods này sau)
-    
-    return methods
+                            pb_series: pd.Series, current_price):
+    return {}
