@@ -360,7 +360,56 @@ def execute_equity_research_pipeline(ticker):
                 for yr, val in cafef_yearly['total_assets'].items():
                     if yr not in total_assets_series.index:
                         total_assets_series[yr] = val
-                total_assets_series = total_assets_series.sort_index()
+                total_assets_series = total_assets_series.sort_index() 
+        
+        # ── Tính ngược EPS / BVPS / ROE / ROA cho các năm thiếu ──────────
+        # vnstock chỉ trả về từ 2022 trong df_ratio → eps/bvps/roe/roa 2021
+        # bị rỗng. Sau khi cafef_yearly đã fill net_profit + equity +
+        # total_assets cho 2021, ta tính lại 3 chỉ tiêu còn thiếu.
+        #
+        # Công thức:
+        #   ROE = net_profit / equity * 100
+        #   ROA = net_profit / total_assets * 100
+        #   EPS = net_profit(tỷ) * 1e9 / issue_share(cp thô)
+        #   BVPS = equity(tỷ) * 1e9 / issue_share(cp thô)
+        #
+        # ⚠️ issue_share lúc này có thể chưa được gán (xử lý ở step 5 bên
+        # dưới). Dùng giá trị tạm từ fin5 hoặc df_overview nếu có.
+        _shares_tmp = get_latest(outstanding_shares_series, default=0.0)
+        if _shares_tmp == 0.0 and not df_overview.empty:
+            for _col in ['issue_share', 'outstanding_shares', 'listed_volume']:
+                if _col in df_overview.columns and pd.notna(df_overview[_col].iloc[0]):
+                    _shares_tmp = float(df_overview[_col].iloc[0])
+                    break
+
+        for _yr in years_missing:
+            _np = net_profit_series.get(_yr)
+            _eq = equity_series.get(_yr)
+            _ta = total_assets_series.get(_yr)
+
+            # ROE
+            if _yr not in roe_series.index and _np is not None and _eq and _eq != 0:
+                roe_series[_yr] = round(_np / _eq * 100, 2)
+
+            # ROA
+            if _yr not in roa_series.index and _np is not None and _ta and _ta != 0:
+                roa_series[_yr] = round(_np / _ta * 100, 2)
+
+            # EPS (đồng/cp) — chỉ tính nếu shares hợp lý
+            if (_yr not in eps_series.index and _np is not None
+                    and _shares_tmp > 1_000_000):
+                eps_series[_yr] = round(_np * 1e9 / _shares_tmp, 0)
+
+            # BVPS (đồng/cp)
+            if (_yr not in bvps_series.index and _eq is not None
+                    and _shares_tmp > 1_000_000):
+                bvps_series[_yr] = round(_eq * 1e9 / _shares_tmp, 0)
+
+        roe_series = roe_series.sort_index()
+        roa_series = roa_series.sort_index()
+        eps_series = eps_series.sort_index()
+        bvps_series = bvps_series.sort_index()
+        # ── Hết bổ sung ───────────────────────────────────────────────────
 
         elif revenue_series.empty and not is_bank:
             cafef_yearly = fetch_cafef_yearly_full(ticker, years=TARGET_YEARS)
