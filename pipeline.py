@@ -289,6 +289,20 @@ def execute_equity_research_pipeline(ticker):
         if bvps_latest == 0.0 and issue_share > 0 and not equity_series.empty:
             bvps_latest = get_latest(equity_series, default=0.0) / issue_share
 
+        # ── Kiểm tra chéo BVPS (bẫy split/dividend-stock) ──────────────────
+        # BVPS thường lấy trực tiếp từ bảng ratio của nguồn dữ liệu (vnstock).
+        # Nếu số CP lưu hành trong bảng ratio đã cũ (trước 1 đợt chia CP/tăng
+        # vốn), BVPS sẽ bị lệch. Tự tính lại BVPS = Vốn CSH / Số CP hiện tại
+        # và so sánh — lệch > 5% thì ưu tiên số tự tính (mới hơn, nhất quán
+        # với current_price và market cap hiện tại).
+        bvps_mismatch_pct = None
+        if bvps_latest > 0 and issue_share > 0 and not equity_series.empty:
+            bvps_recalc = get_latest(equity_series, default=0.0) / issue_share
+            if bvps_recalc > 0:
+                bvps_mismatch_pct = abs(bvps_latest - bvps_recalc) / bvps_latest * 100
+                if bvps_mismatch_pct > 5:
+                    bvps_latest = bvps_recalc
+
         def _normalize_pct(s):
             if s is None or s.empty:
                 return s
@@ -303,6 +317,7 @@ def execute_equity_research_pipeline(ticker):
         clean_metrics = {
             "is_bank": is_bank,
             "current_price": current_price,
+            "bvps_mismatch_pct": bvps_mismatch_pct,
             "market_cap_billion": market_cap / 1e9,
             "pe": (current_price / eps_latest) if eps_latest > 0 else 0.0,
             "pb": (current_price / bvps_latest) if bvps_latest > 0 else 0.0,
