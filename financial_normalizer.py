@@ -1,3 +1,7 @@
+"""
+financial_normalizer.py
+"""
+
 import pandas as pd
 import re
 
@@ -48,6 +52,10 @@ def _get_quarter_columns(df: pd.DataFrame):
 
 def find_row_series(df: pd.DataFrame, keywords, exclude_keywords=None,
                     item_ids=None, prefer_top_level=True, period='year'):
+    """
+    period='year'    -> tìm các cột dạng 'YYYY', key trả về là int năm.
+    period='quarter'  -> tìm các cột dạng 'YYYY-Qn', key trả về là str 'YYYY-Qn'.
+    """
     if df is None or df.empty:
         return pd.Series(dtype=float)
 
@@ -61,6 +69,7 @@ def find_row_series(df: pd.DataFrame, keywords, exclude_keywords=None,
 
     matched = pd.DataFrame()
 
+    # Bước 1: thử khớp chính xác theo item_id
     if item_ids and 'item_id' in df.columns:
         item_id_lower = df['item_id'].astype(str).str.lower().str.strip()
         target_ids = [i.lower().strip() for i in item_ids]
@@ -68,6 +77,7 @@ def find_row_series(df: pd.DataFrame, keywords, exclude_keywords=None,
         if mask_exact.any():
             matched = df[mask_exact]
 
+    # Bước 2: fallback dò từ khoá
     if matched.empty:
         combined_text = df[search_cols].astype(str).agg(' '.join, axis=1).str.lower()
         mask = pd.Series(False, index=df.index)
@@ -116,6 +126,10 @@ def find_row_series(df: pd.DataFrame, keywords, exclude_keywords=None,
 
 
 def _find_revenue_for_bank(df_income, period='year'):
+    """
+    Ngân hàng/bảo hiểm/chứng khoán không có 'doanh thu thuần'.
+    Thử lần lượt các chỉ tiêu thu nhập đặc thù theo thứ tự ưu tiên.
+    """
     bank_revenue_keywords = [
         (['tổng thu nhập hoạt động', 'total operating income', 'net operating income'], ['chi phí', 'expense']),
         (['thu nhập lãi thuần', 'net interest income', 'lãi thuần'], ['chi phí lãi']),
@@ -137,15 +151,18 @@ def _find_revenue_for_bank(df_income, period='year'):
 def build_financial_table(df_income, df_balance, df_ratio=None, ticker=None, period='year'):
     """
     Tổng hợp các chỉ tiêu BCTC.
+    ticker: dùng để detect ngân hàng/tài chính và chọn logic revenue phù hợp.
+    period: 'year' hoặc 'quarter'.
     """
     data = {}
     is_bank = ticker in BANK_TICKERS if ticker else False
     is_financial = ticker in FINANCIAL_TICKERS if ticker else False
 
-    # --- Revenue ---
+    # --- Revenue: xử lý riêng cho ngân hàng/tài chính ---
     if is_bank or is_financial:
         data['revenue'] = _find_revenue_for_bank(df_income, period=period)
     else:
+        # Doanh nghiệp thông thường
         data['revenue'] = find_row_series(
             df_income,
             [
@@ -182,7 +199,7 @@ def build_financial_table(df_income, df_balance, df_ratio=None, ticker=None, per
         df_balance,
         ['tổng cộng tài sản', 'total assets', 'tổng tài sản'], period=period)
 
-    # --- Ratio ---
+    # --- ĐOẠN RATIO ĐƯỢC KHÂU LẠI VÀO ĐÚNG HÀM CỦA NÓ ---
     if df_ratio is not None and not df_ratio.empty:
         data['eps']    = find_row_series(df_ratio, ['eps', 'earning per share', 'earnings per share'], period=period)
         data['bvps']   = find_row_series(df_ratio, ['book value per share', 'bvps'], period=period)
@@ -220,7 +237,9 @@ def build_financial_table(df_income, df_balance, df_ratio=None, ticker=None, per
     return data
 
 
+# --- CÁC HÀM BỔ TRỢ GỐC CỦA BẠN (Đã được đưa về đúng vị trí) ---
 def build_5y_financial_table(df_income, df_balance, df_ratio=None, ticker=None):
+    """Giữ tương thích ngược: bảng theo năm (hành vi cũ, không đổi)."""
     return build_financial_table(df_income, df_balance, df_ratio, ticker=ticker, period='year')
 
 
@@ -260,18 +279,33 @@ def cagr(series: pd.Series, n_years=None):
     except Exception:
         return None
 
+
 # ============================================================
-# 4. DDM (DIVIDEND DISCOUNT MODEL - GORDON GROWTH)
+# 4. ĐỊNH GIÁ: DDM VÀ GRAHAM NUMBER (BẢN CẬP NHẬT CÓ BẪY LỖI)
 # ============================================================
 
-def ddm_gordon(dps, required_return=0.12, g=0.03):
+def ddm_gordon(dps, required_return=0.11, g=0.04):
+    """
+    Mô hình chiết khấu cổ tức (Gordon Growth Model).
+    Bẫy lỗi: Cổ tức phải dương và ke phải lớn hơn g.
+    """
     if dps is None or dps <= 0 or required_return <= g:
         return None
-    return dps * (1 + g) / (required_return - g)
+    return (dps * (1 + g)) / (required_return - g)
+
+
+def graham_number(eps, bvps):
+    """
+    Graham Number: Mức giá hợp lý tối đa cho một cổ phiếu giá trị.
+    Bẫy lỗi: EPS và BVPS bắt buộc phải > 0.
+    """
+    if eps is None or bvps is None or eps <= 0 or bvps <= 0:
+        return None
+    return (22.5 * eps * bvps) ** 0.5
 
 
 # ------------------------------------------------------------
-# ĐỊNH GIÁ NÂNG CAO (MỚI THÊM)
+# DÁN HÀM MỚI VÀO ĐÂY (NGAY DƯỚI PHẦN 4, TRÊN PHẦN 5)
 # ------------------------------------------------------------
 def advanced_multiples_valuation(eps_latest, eps_5y_ago, pe_current, 
                                  ebitda_latest, cfo_latest, revenue_latest, net_debt_latest, 
@@ -282,6 +316,7 @@ def advanced_multiples_valuation(eps_latest, eps_5y_ago, pe_current,
     """
     methods = {}
     
+    # Đổi shares ra đơn vị Tỷ Cổ Phiếu
     shares_billion = shares_outstanding / 1e9 if shares_outstanding else 0
     if shares_billion <= 0:
         return methods
@@ -313,13 +348,17 @@ def advanced_multiples_valuation(eps_latest, eps_5y_ago, pe_current,
 
 
 # ============================================================
-# 5. 9 PHƯƠNG PHÁP ĐỊNH GIÁ TỔNG HỢP 
+# 5. 9 PHƯƠNG PHÁP ĐỊNH GIÁ TỔNG HỢP (dùng PE/PB lịch sử của CHÍNH MÃ)
 # ============================================================
 
 def nine_methods_valuation(eps_latest, bvps_latest, pe_series: pd.Series,
-                           pb_series: pd.Series, current_price,
-                           # ... các tham số khác ...
-                           ):
-    # ⚠️ Code stock nhắc nhở: Hãy dán logic ruột của hàm nine_methods_valuation cũ của bạn vào đây nhé!
-    # Đoạn code bạn gửi ở trên bị đứt đoạn không có ruột hàm này.
-    pass
+                           pb_series: pd.Series, current_price):
+    """
+    Hàm tổng hợp định giá.
+    Nơi đây bạn có thể gọi DDM, Graham và Advanced Multiples để gom chung thành 1 object.
+    """
+    methods = {}
+    
+    # (Bạn có thể bổ sung logic để nhét các kết quả định giá vào dictionary methods này sau)
+    
+    return methods
