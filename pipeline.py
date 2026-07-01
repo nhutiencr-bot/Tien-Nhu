@@ -289,10 +289,19 @@ def execute_equity_research_pipeline(ticker):
             else:
                 issue_share = implied_from_cap
 
+        # ⚠️ LƯU Ý ĐƠN VỊ (Bẫy 2 / 2B): equity_series đang ở đơn vị TỶ ĐỒNG
+        # (xem normalize_to_billion_vnd ở trên), còn issue_share là SỐ CP
+        # THÔ (raw count, ví dụ 7,690,000,000 CP — không phải "tỷ CP").
+        # BVPS[đồng/cp] = VCSH[tỷ đồng] × 1e9 / issue_share[cp thô].
+        # Thiếu ×1e9 sẽ khiến BVPS lệch ~1e-9 lần → hiển thị 0đ và P/B
+        # nổ lên hàng tỷ lần (bug đã xảy ra trong bản trước — xem
+        # equity-research-vn/data_pitfalls.md Bẫy 2B để biết case tương tự).
+        BVPS_SANE_MIN, BVPS_SANE_MAX = 500.0, 1_000_000.0  # đồng/cp hợp lý cho CP VN
+
         eps_latest = get_latest(eps_series, default=0.0)
         bvps_latest = get_latest(bvps_series, default=0.0)
         if bvps_latest == 0.0 and issue_share > 0 and not equity_series.empty:
-            bvps_latest = get_latest(equity_series, default=0.0) / issue_share
+            bvps_latest = get_latest(equity_series, default=0.0) * 1e9 / issue_share
 
         # ── Kiểm tra chéo BVPS (bẫy split/dividend-stock) ──────────────────
         # BVPS thường lấy trực tiếp từ bảng ratio của nguồn dữ liệu (vnstock).
@@ -300,13 +309,30 @@ def execute_equity_research_pipeline(ticker):
         # vốn), BVPS sẽ bị lệch. Tự tính lại BVPS = Vốn CSH / Số CP hiện tại
         # và so sánh — lệch > 5% thì ưu tiên số tự tính (mới hơn, nhất quán
         # với current_price và market cap hiện tại).
+        #
+        # ⚠️ QUAN TRỌNG: chỉ chấp nhận bvps_recalc nếu bản thân nó nằm trong
+        # dải hợp lý (500 - 1,000,000 đ/cp). Nếu recalc ra một con số vô lý
+        # (ví dụ do issue_share bị lệch đơn vị/field sai) thì KHÔNG override
+        # — giữ bvps_latest gốc để tránh lặp lại bug BVPS≈0 → P/B nổ hàng
+        # tỷ lần đã từng xảy ra.
         bvps_mismatch_pct = None
         if bvps_latest > 0 and issue_share > 0 and not equity_series.empty:
-            bvps_recalc = get_latest(equity_series, default=0.0) / issue_share
+            bvps_recalc = get_latest(equity_series, default=0.0) * 1e9 / issue_share
             if bvps_recalc > 0:
                 bvps_mismatch_pct = abs(bvps_latest - bvps_recalc) / bvps_latest * 100
                 if bvps_mismatch_pct > 5:
-                    bvps_latest = bvps_recalc
+                    if BVPS_SANE_MIN <= bvps_recalc <= BVPS_SANE_MAX:
+                        bvps_latest = bvps_recalc
+                    else:
+                        # bvps_recalc bất thường — không dùng, giữ bvps_latest
+                        # gốc và hạ cờ mismatch (không còn ý nghĩa để hiển thị).
+                        bvps_mismatch_pct = None
+
+        # Sanity clamp cuối cùng: nếu bvps_latest (dù từ nguồn gốc hay recalc)
+        # vẫn nằm ngoài dải hợp lý, coi như thiếu dữ liệu (0.0) thay vì hiển
+        # thị BVPS/P-B vô lý ra dashboard.
+        if bvps_latest > 0 and not (BVPS_SANE_MIN <= bvps_latest <= BVPS_SANE_MAX):
+            bvps_latest = 0.0
 
         def _normalize_pct(s):
             if s is None or s.empty:
@@ -319,13 +345,20 @@ def execute_equity_research_pipeline(ticker):
         market_cap = market_cap_direct if market_cap_direct > 0 else (
             current_price * issue_share if issue_share > 0 else 0.0)
 
+        # Sanity clamp P/B (phòng ngừa cuối, Bẫy 2B): P/B thực tế của CP VN
+        # hầu như luôn nằm trong 0-50x. Ngoài dải này gần chắc chắn là lỗi
+        # tính toán (đơn vị/field sai), không phải insight — hiện "—" trên
+        # UI (giá trị 0.0) thay vì một con số vô lý gây hiểu nhầm nghiêm trọng.
+        pb_raw = (current_price / bvps_latest) if bvps_latest > 0 else 0.0
+        pb_final = pb_raw if 0.0 < pb_raw <= 50.0 else 0.0
+
         clean_metrics = {
             "is_bank": is_bank,
             "current_price": current_price,
             "bvps_mismatch_pct": bvps_mismatch_pct,
             "market_cap_billion": market_cap / 1e9,
             "pe": (current_price / eps_latest) if eps_latest > 0 else 0.0,
-            "pb": (current_price / bvps_latest) if bvps_latest > 0 else 0.0,
+            "pb": pb_final,
             "issue_share_million": issue_share / 1e6 if issue_share > 0 else 0,
             "source_used": source_used,
         }
