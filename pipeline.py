@@ -18,7 +18,9 @@ from valuation import (
     dupont_decomposition, dcf_fcff_scenarios, reverse_dcf_implied_growth,
     graham_number, ddm_gordon, nine_methods_valuation, summarize_valuation,
 )
-from cafef_fallback import fetch_cafef_balance_sheet_5y, fetch_cafef_analysis_reports
+from cafef_fallback import (
+    fetch_cafef_balance_sheet_5y, fetch_cafef_analysis_reports, fetch_cafef_yearly_full,
+)
 from sector_wacc import estimate_wacc, wacc_scenarios, detect_sector
 
 SOURCE_FALLBACK_ORDER = ['VCI', 'KBS', 'DNSE']
@@ -255,6 +257,16 @@ def execute_equity_research_pipeline(ticker):
                 total_assets_series = cafef_data['total_assets']
                 st.info(f"ℹ️ Đã lấy 'Tổng tài sản' cho {ticker} từ CafeF.")
 
+        # Fallback CafeF cho Doanh thu (khắc phục "P/S: Thiếu dữ liệu" khi nguồn
+        # chính (VCI/KBS/DNSE) không trả về dòng doanh thu — thường gặp với
+        # mã mới niêm yết hoặc mã có report format khác chuẩn).
+        if revenue_series.empty and not is_bank:
+            cafef_yearly = fetch_cafef_yearly_full(
+                ticker, years=list(range(datetime.today().year - 5, datetime.today().year + 1)))
+            if not cafef_yearly['revenue'].empty:
+                revenue_series = cafef_yearly['revenue']
+                st.info(f"ℹ️ Đã lấy 'Doanh thu thuần' cho {ticker} từ CafeF.")
+
         if equity_series.empty:
             st.warning(f"⚠️ Không dò được 'Vốn chủ sở hữu' cho {ticker}.")
         if total_assets_series.empty:
@@ -437,36 +449,65 @@ def execute_equity_research_pipeline(ticker):
             revenue_series, net_profit_series, total_assets_series, equity_series)
 
         # ── 9. DCF / Graham / DDM ──────────────────────────────────────────
+        # Mở rộng từ khóa CFO: nguồn dữ liệu (VCI/TCBS/KBS/MBS) đặt tên dòng
+        # này khác nhau — thiếu 1 biến thể là CFO=0 → "P/CF: Thiếu dữ liệu"
+        # dù công ty hoàn toàn có dữ liệu dòng tiền.
         cfo_series = normalize_to_billion_vnd(find_row_series(
             df_cashflow,
             ['lưu chuyển tiền thuần từ hoạt động kinh doanh',
-             'net cash flow from operating', 'cash flow from operating activities']))
+             'lưu chuyển tiền thuần từ hđkd',
+             'i. lưu chuyển tiền từ hoạt động kinh doanh',
+             'net cash flow from operating', 'net cash provided by operating',
+             'net cash from operating', 'cash flow from operating activities',
+             'cash flows from operating activities']))
 
         capex_series = normalize_to_billion_vnd(find_row_series(
             df_cashflow,
             ['tiền chi để mua sắm', 'purchase of fixed assets',
-             'capital expenditure', 'mua sắm tài sản cố định']))
+             'capital expenditure', 'mua sắm tài sản cố định',
+             'mua sắm xây dựng tài sản cố định', 'tiền chi mua sắm tscđ']))
 
         # ── 9b. Bổ sung Multiples Mở Rộng: P/S, P/CF, EV/EBITDA ────────────
         cfo_latest = get_latest(cfo_series, default=0.0) if not cfo_series.empty else 0.0
 
         # EBITDA ≈ EBIT + Khấu hao & phân bổ, với EBIT = Lợi nhuận trước thuế + Chi phí lãi vay
         # (theo đúng công thức chuẩn: ebitda = ebit + D&A, ebit = pretax + lãi vay)
-        # Lấy từ dòng đầu + các khoản điều chỉnh của báo cáo LCTT gián tiếp.
-        # Mở rộng từ khóa để khớp nhiều nguồn dữ liệu (VCI/TCBS/KBS/MBS) khác nhau.
-        pretax_profit_series = normalize_to_billion_vnd(find_row_series(
-            df_cashflow,
-            ['lợi nhuận trước thuế', 'tổng lợi nhuận kế toán trước thuế',
-             'lợi nhuận trước thuế tndn', 'profit before tax', 'income before tax']))
-        interest_expense_series = normalize_to_billion_vnd(find_row_series(
-            df_cashflow,
-            ['chi phí lãi vay', 'lãi vay đã trả', 'chi phí lãi vay đã trả',
-             'interest expense', 'interest paid']))
-        da_series_2 = normalize_to_billion_vnd(find_row_series(
-            df_cashflow,
-            ['khấu hao tài sản cố định', 'khấu hao và phân bổ', 'khấu hao tscđ',
-             'khấu hao và hao mòn tài sản cố định', 'hao mòn tài sản cố định bđs',
-             'depreciation and amortization', 'depreciation & amortisation']))
+        #
+        # ⚠️ "Lợi nhuận trước thuế" và "Chi phí lãi vay" LUÔN có trong KQKD
+        # (df_income) theo chuẩn mực kế toán VN ("Tổng lợi nhuận kế toán
+        # trước thuế" là dòng bắt buộc), nhưng KHÔNG PHẢI lúc nào cũng được
+        # lặp lại như dòng điều chỉnh trong LCTT gián tiếp (df_cashflow) tùy
+        # nguồn dữ liệu. Trước đây chỉ tìm trong df_cashflow → nhiều mã ra
+        # ebitda_latest=0 dù dữ liệu đầy đủ trong KQKD. Nay tìm cả 2 nguồn,
+        # ưu tiên df_income cho pretax/lãi vay (đáng tin cậy hơn vì là dòng
+        # gốc, không phải dòng điều chỉnh phi tiền mặt).
+        def _first_nonempty(*series_list):
+            for s in series_list:
+                if s is not None and not s.empty:
+                    return s
+            return pd.Series(dtype=float)
+
+        pretax_keywords = ['lợi nhuận trước thuế', 'tổng lợi nhuận kế toán trước thuế',
+                            'lợi nhuận trước thuế tndn', 'profit before tax', 'income before tax']
+        interest_keywords = ['chi phí lãi vay', 'lãi vay đã trả', 'chi phí lãi vay đã trả',
+                              'trong đó: chi phí lãi vay', 'interest expense', 'interest paid']
+        da_keywords = ['khấu hao tài sản cố định', 'khấu hao và phân bổ', 'khấu hao tscđ',
+                        'khấu hao và hao mòn tài sản cố định', 'hao mòn tài sản cố định bđs',
+                        'chi phí khấu hao', 'depreciation and amortization',
+                        'depreciation & amortisation', 'depreciation']
+
+        pretax_profit_series = normalize_to_billion_vnd(_first_nonempty(
+            find_row_series(df_income, pretax_keywords),
+            find_row_series(df_cashflow, pretax_keywords),
+        ))
+        interest_expense_series = normalize_to_billion_vnd(_first_nonempty(
+            find_row_series(df_income, interest_keywords),
+            find_row_series(df_cashflow, interest_keywords),
+        ))
+        da_series_2 = normalize_to_billion_vnd(_first_nonempty(
+            find_row_series(df_cashflow, da_keywords),
+            find_row_series(df_income, da_keywords),
+        ))
         # Ưu tiên da_series đã tính trước đó (mục 5); nếu rỗng thì dùng biến thể mở rộng
         da_latest_ebitda = da_latest if da_latest else (
             get_latest(da_series_2, default=0.0) if not da_series_2.empty else 0.0)
