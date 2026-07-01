@@ -360,7 +360,7 @@ def execute_equity_research_pipeline(ticker):
                 for yr, val in cafef_yearly['total_assets'].items():
                     if yr not in total_assets_series.index:
                         total_assets_series[yr] = val
-                total_assets_series = total_assets_series.sort_index() 
+                        total_assets_series = total_assets_series.sort_index() 
         
         # ── Tính ngược EPS / BVPS / ROE / ROA cho các năm thiếu ──────────
         # vnstock chỉ trả về từ 2022 trong df_ratio → eps/bvps/roe/roa 2021
