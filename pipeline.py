@@ -305,8 +305,14 @@ def execute_equity_research_pipeline(ticker):
                                       - total_liab_series.loc[common_years])
 
         # Fallback CafeF
+        # ⚠️ end_year phải là năm CÓ DỮ LIỆU gần nhất (2025), không phải
+        # năm hiện tại (2026) — tránh fetch_cafef_balance_sheet_5y tính
+        # range(2026-4, 2027) = 2022..2026 → mất 2021, thừa 2026.
+        LAST_DATA_YEAR = 2025
+        TARGET_YEARS = list(range(LAST_DATA_YEAR - 4, LAST_DATA_YEAR + 1))  # [2021..2025]
+
         if equity_series.empty or total_assets_series.empty:
-            cafef_data = fetch_cafef_balance_sheet_5y(ticker, end_year=datetime.today().year)
+            cafef_data = fetch_cafef_balance_sheet_5y(ticker, end_year=LAST_DATA_YEAR)
             if equity_series.empty and not cafef_data['equity'].empty:
                 equity_series = cafef_data['equity']
                 st.info(f"ℹ️ Đã lấy 'Vốn chủ sở hữu' cho {ticker} từ CafeF.")
@@ -314,12 +320,38 @@ def execute_equity_research_pipeline(ticker):
                 total_assets_series = cafef_data['total_assets']
                 st.info(f"ℹ️ Đã lấy 'Tổng tài sản' cho {ticker} từ CafeF.")
 
-        # Fallback CafeF cho Doanh thu (khắc phục "P/S: Thiếu dữ liệu" khi nguồn
-        # chính (VCI/KBS/DNSE) không trả về dòng doanh thu — thường gặp với
-        # mã mới niêm yết hoặc mã có report format khác chuẩn).
-        if revenue_series.empty and not is_bank:
-            cafef_yearly = fetch_cafef_yearly_full(
-                ticker, years=list(range(datetime.today().year - 5, datetime.today().year + 1)))
+        # Bổ sung năm còn thiếu từ CafeF (không chỉ khi empty — vnstock với
+        # get_all=True có thể vẫn trả về từ 2022 nếu nguồn không có 2021).
+        # → Chủ động merge CafeF cho các năm thiếu trong TARGET_YEARS.
+        years_missing = [y for y in TARGET_YEARS
+                         if y not in revenue_series.index
+                         or y not in net_profit_series.index]
+        if years_missing and not is_bank:
+            cafef_yearly = fetch_cafef_yearly_full(ticker, years=TARGET_YEARS)
+            if not cafef_yearly['revenue'].empty:
+                # Chỉ điền vào năm thiếu (không ghi đè năm vnstock đã có)
+                for yr, val in cafef_yearly['revenue'].items():
+                    if yr not in revenue_series.index:
+                        revenue_series[yr] = val
+                revenue_series = revenue_series.sort_index()
+            if not cafef_yearly['net_profit'].empty:
+                for yr, val in cafef_yearly['net_profit'].items():
+                    if yr not in net_profit_series.index:
+                        net_profit_series[yr] = val
+                net_profit_series = net_profit_series.sort_index()
+            if not cafef_yearly.get('equity', pd.Series(dtype=float)).empty:
+                for yr, val in cafef_yearly['equity'].items():
+                    if yr not in equity_series.index:
+                        equity_series[yr] = val
+                equity_series = equity_series.sort_index()
+            if not cafef_yearly.get('total_assets', pd.Series(dtype=float)).empty:
+                for yr, val in cafef_yearly['total_assets'].items():
+                    if yr not in total_assets_series.index:
+                        total_assets_series[yr] = val
+                total_assets_series = total_assets_series.sort_index()
+
+        elif revenue_series.empty and not is_bank:
+            cafef_yearly = fetch_cafef_yearly_full(ticker, years=TARGET_YEARS)
             if not cafef_yearly['revenue'].empty:
                 revenue_series = cafef_yearly['revenue']
                 st.info(f"ℹ️ Đã lấy 'Doanh thu thuần' cho {ticker} từ CafeF.")
