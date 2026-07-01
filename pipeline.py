@@ -132,7 +132,7 @@ def execute_equity_research_pipeline(ticker):
         q_engine, f_engine, c_engine, source_used = _build_engines_with_fallback(ticker)
 
         end_date = datetime.today().strftime('%Y-%m-%d')
-        start_date = (datetime.today() - timedelta(days=365 * 3)).strftime('%Y-%m-%d')
+        start_date = (datetime.today() - timedelta(days=365 * 5)).strftime('%Y-%m-%d')
 
         tasks = {
             "price": lambda: q_engine.history(start=start_date, end=end_date, interval='1D'),
@@ -282,11 +282,11 @@ def execute_equity_research_pipeline(ticker):
                     equity_series = (total_assets_series.loc[common_years]
                                       - total_liab_series.loc[common_years])
 
-        # ── Fallback CafeF ─────────────────────────────────────────────────
         # end_year = 2025 (năm có dữ liệu gần nhất), không dùng năm hiện tại
         # (2026) để tránh tính sai range → mất 2021, thừa 2026.
         LAST_DATA_YEAR = 2025
-        TARGET_YEARS = list(range(LAST_DATA_YEAR - 4, LAST_DATA_YEAR + 1))  # [2021..2025]
+        # [SỬA LỖI] Ép kiểu danh sách năm về dạng Chuỗi (String) để khớp với vnstock
+        TARGET_YEARS = [str(y) for y in range(LAST_DATA_YEAR - 4, LAST_DATA_YEAR + 1)] 
 
         if equity_series.empty or total_assets_series.empty:
             cafef_data = fetch_cafef_balance_sheet_5y(ticker, end_year=LAST_DATA_YEAR)
@@ -297,9 +297,13 @@ def execute_equity_research_pipeline(ticker):
                 total_assets_series = cafef_data['total_assets']
                 st.info(f"ℹ️ Đã lấy 'Tổng tài sản' cho {ticker} từ CafeF.")
 
+        # [SỬA LỖI] Ép kiểu index hiện tại của vnstock về Chuỗi (String)
+        revenue_series.index = revenue_series.index.astype(str)
+        net_profit_series.index = net_profit_series.index.astype(str)
+        equity_series.index = equity_series.index.astype(str)
+        total_assets_series.index = total_assets_series.index.astype(str)
+
         # ── Bổ sung năm thiếu từ CafeF (revenue, net_profit, equity, total_assets) ──
-        # vnstock get_all=True vẫn có thể chỉ trả 2022-2025; chủ động merge
-        # CafeF cho bất kỳ năm nào trong TARGET_YEARS bị thiếu.
         years_missing = [y for y in TARGET_YEARS
                          if y not in revenue_series.index
                          or y not in net_profit_series.index]
