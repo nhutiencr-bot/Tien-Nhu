@@ -1,189 +1,573 @@
+"""
+
+financial_normalizer.py
+
+"""
+
+
+
 import pandas as pd
+
 import re
 
-# ════════════════════════════════════════════════════════════════
-# HÀM CÒN THIẾU (được thêm vào để fix lỗi import)
-# ════════════════════════════════════════════════════════════════
 
-def find_row_series(df, keywords, exclude_keywords=None, item_ids=None, period='year'):
+
+# Danh sách mã ngân hàng VN (mở rộng đầy đủ)
+
+BANK_TICKERS = {
+
+    'VCB', 'BID', 'CTG', 'TCB', 'MBB', 'ACB', 'STB', 'VPB', 'HDB', 'TPB',
+
+    'MSB', 'OCB', 'VIB', 'SHB', 'EIB', 'LPB', 'SSB', 'NAB', 'ABB', 'BAB',
+
+    'BVB', 'KLB', 'PGB', 'VAB', 'VBB', 'SGN', 'NVB', 'SGB', 'CBB', 'SEAB',
+
+}
+
+
+
+# Danh sách mã bảo hiểm/chứng khoán (cũng dùng thu nhập thay doanh thu)
+
+FINANCIAL_TICKERS = {
+
+    'BVH', 'PVI', 'PTI', 'MIG', 'BMI', 'VNR', 'BIC', 'PRE', 'PGI',
+
+    'SSI', 'VND', 'HCM', 'MBS', 'VCI', 'FTS', 'AGR', 'SBS', 'BSI',
+
+}
+
+
+
+
+
+def _get_year_columns(df: pd.DataFrame):
+
+    meta_cols = {'item', 'item_en', 'item_id'}
+
+    year_cols = []
+
+    for c in df.columns:
+
+        if c in meta_cols:
+
+            continue
+
+        c_str = str(c).strip()
+
+        if re.fullmatch(r'\d{4}', c_str):
+
+            year_cols.append(c)
+
+    year_cols = sorted(year_cols, key=lambda x: int(str(x).strip()))
+
+    return year_cols
+
+
+
+
+
+def _quarter_sort_key(c):
+
+    y, q = str(c).strip().split('-Q')
+
+    return (int(y), int(q))
+
+
+
+
+
+def _get_quarter_columns(df: pd.DataFrame):
+
+    """Nhận diện các cột theo quý, định dạng vnstock trả về: 'YYYY-Q1'..'YYYY-Q4'."""
+
+    meta_cols = {'item', 'item_en', 'item_id'}
+
+    q_cols = []
+
+    for c in df.columns:
+
+        if c in meta_cols:
+
+            continue
+
+        c_str = str(c).strip()
+
+        if re.fullmatch(r'\d{4}-Q[1-4]', c_str):
+
+            q_cols.append(c)
+
+    return sorted(q_cols, key=_quarter_sort_key)
+
+
+
+
+
+def find_row_series(df: pd.DataFrame, keywords, exclude_keywords=None,
+
+                    item_ids=None, prefer_top_level=True, period='year'):
+
     """
-    Tìm dòng dữ liệu trong DataFrame dựa trên từ khóa (không phân biệt hoa thường).
-    Trả về Series các giá trị số (bỏ cột tên chỉ tiêu), hoặc Series rỗng nếu không tìm thấy.
+
+    period='year'    -> tìm các cột dạng 'YYYY', key trả về là int năm.
+
+    period='quarter'  -> tìm các cột dạng 'YYYY-Qn', key trả về là str 'YYYY-Qn'.
+
     """
+
     if df is None or df.empty:
+
         return pd.Series(dtype=float)
-    
-    # Xác định cột chứa tên chỉ tiêu
-    col = 'Chỉ tiêu' if 'Chỉ tiêu' in df.columns else df.columns[0]
-    
-    if isinstance(keywords, str):
-        keywords = [keywords]
-    
-    # Tạo mask tìm kiếm (OR các từ khóa)
-    mask = pd.Series(False, index=df.index)
-    for kw in keywords:
-        mask |= df[col].str.contains(kw, case=False, na=False, regex=False)
-    
-    # Loại trừ nếu có
-    if exclude_keywords:
-        if isinstance(exclude_keywords, str):
-            exclude_keywords = [exclude_keywords]
-        for ek in exclude_keywords:
-            mask &= ~df[col].str.contains(ek, case=False, na=False, regex=False)
-    
-    matched = df[mask]
+
+
+
+    year_cols = _get_quarter_columns(df) if period == 'quarter' else _get_year_columns(df)
+
+    if not year_cols:
+
+        return pd.Series(dtype=float)
+
+
+
+    search_cols = [c for c in ['item', 'item_en', 'item_id'] if c in df.columns]
+
+    if not search_cols:
+
+        return pd.Series(dtype=float)
+
+
+
+    matched = pd.DataFrame()
+
+
+
+    # Bước 1: thử khớp chính xác theo item_id
+
+    if item_ids and 'item_id' in df.columns:
+
+        item_id_lower = df['item_id'].astype(str).str.lower().str.strip()
+
+        target_ids = [i.lower().strip() for i in item_ids]
+
+        mask_exact = item_id_lower.isin(target_ids)
+
+        if mask_exact.any():
+
+            matched = df[mask_exact]
+
+
+
+    # Bước 2: fallback dò từ khoá
+
     if matched.empty:
+
+        combined_text = df[search_cols].astype(str).agg(' '.join, axis=1).str.lower()
+
+        mask = pd.Series(False, index=df.index)
+
+        for kw in keywords:
+
+            mask = mask | combined_text.str.contains(kw.lower(), na=False, regex=False)
+
+        if exclude_keywords:
+
+            for kw in exclude_keywords:
+
+                mask = mask & ~combined_text.str.contains(kw.lower(), na=False, regex=False)
+
+        matched = df[mask]
+
+
+
+    if matched.empty:
+
         return pd.Series(dtype=float)
-    
-    # Lấy dòng đầu tiên khớp, bỏ cột tên, giữ lại các cột số (năm/quý)
+
+
+
     row = matched.iloc[0]
-    # Giả định các cột sau cột đầu tiên là dữ liệu số
-    numeric_cols = df.columns[1:]  # hoặc có thể dùng row.drop(col) nhưng cẩn thận
-    return row.drop(col).dropna()
 
-def get_latest(series: pd.Series):
-    """Lấy giá trị mới nhất (cuối cùng) của Series, bỏ qua NaN."""
-    if series is None or series.empty:
-        return None
-    clean = series.dropna()
-    return clean.iloc[-1] if not clean.empty else None
+    if len(matched) > 1:
 
-def get_latest_n_years(series: pd.Series, n: int):
-    """Lấy n giá trị mới nhất (cuối cùng) của Series, bỏ qua NaN, trả về Series."""
-    if series is None or series.empty:
-        return pd.Series(dtype=float)
-    clean = series.dropna()
-    return clean.tail(n)
+        if prefer_top_level and 'levels' in matched.columns:
 
-# ════════════════════════════════════════════════════════════════
-# PATCH A — Sử dụng registry động thay cho các set hardcode cũ
-# ════════════════════════════════════════════════════════════════
-from ticker_registry import get_sector
-from ticker_registry import (
-    BANK_TICKERS, FINANCIAL_TICKERS, INSURANCE_TICKERS,
-    RETAIL_TICKERS, REAL_ESTATE_TICKERS,
-)
+            levels_numeric = pd.to_numeric(matched['levels'], errors='coerce')
+
+            if levels_numeric.notna().any():
+
+                min_level = levels_numeric.min()
+
+                top_level_rows = matched[levels_numeric == min_level]
+
+                if len(top_level_rows) == 1:
+
+                    row = top_level_rows.iloc[0]
+
+                else:
+
+                    non_na_counts = top_level_rows[year_cols].notna().sum(axis=1)
+
+                    row = top_level_rows.loc[non_na_counts.idxmax()]
+
+            else:
+
+                non_na_counts = matched[year_cols].notna().sum(axis=1)
+
+                row = matched.loc[non_na_counts.idxmax()]
+
+        else:
+
+            non_na_counts = matched[year_cols].notna().sum(axis=1)
+
+            row = matched.loc[non_na_counts.idxmax()]
+
+
+
+    result = {}
+
+    for yc in year_cols:
+
+        val = pd.to_numeric(pd.Series([row[yc]]), errors='coerce').iloc[0]
+
+        if pd.notna(val):
+
+            if period == 'quarter':
+
+                result[str(yc).strip()] = float(val)
+
+            else:
+
+                result[int(str(yc).strip())] = float(val)
+
+
+
+    if period == 'quarter':
+
+        ordered_keys = sorted(result.keys(), key=_quarter_sort_key)
+
+        return pd.Series({k: result[k] for k in ordered_keys})
+
+    return pd.Series(result).sort_index()
+
+
+
+
 
 def _find_revenue_for_bank(df_income, period='year'):
-    """Hàm bổ trợ tìm doanh thu ngân hàng (được khôi phục cú pháp chuẩn)"""
-    if 'bank_revenue_keywords' in globals() or 'bank_revenue_keywords' in locals():
-        for keywords, excludes in bank_revenue_keywords: 
-            s = find_row_series(df_income, keywords, exclude_keywords=excludes if excludes else None, period=period)
-            if not s.empty:
-                return s 
+
+    """
+
+    Ngân hàng/bảo hiểm/chứng khoán không có 'doanh thu thuần'.
+
+    Thử lần lượt các chỉ tiêu thu nhập đặc thù theo thứ tự ưu tiên.
+
+    """
+
+    # Thứ tự ưu tiên cho ngân hàng
+
+    bank_revenue_keywords = [
+
+        # Tổng thu nhập hoạt động (phổ biến nhất)
+
+        (['tổng thu nhập hoạt động', 'total operating income', 'net operating income'], ['chi phí', 'expense']),
+
+        # Thu nhập lãi thuần
+
+        (['thu nhập lãi thuần', 'net interest income', 'lãi thuần'], ['chi phí lãi']),
+
+        # Thu nhập thuần
+
+        (['thu nhập thuần', 'net income from', 'total net income'], ['lợi nhuận', 'profit']),
+
+        # Tổng doanh thu
+
+        (['tổng doanh thu', 'total revenue', 'gross revenue'], []),
+
+        # Doanh thu hoạt động
+
+        (['doanh thu hoạt động', 'operating revenue'], []),
+
+        # Thu nhập từ lãi
+
+        (['thu nhập từ lãi', 'interest income', 'interest and similar income'], ['chi phí']),
+
+    ]
+
+
+
+    for keywords, excludes in bank_revenue_keywords:
+
+        s = find_row_series(df_income, keywords,
+
+                           exclude_keywords=excludes if excludes else None, period=period)
+
+        if not s.empty:
+
+            return s
+
+
+
     return pd.Series(dtype=float)
 
-def _find_revenue_for_realestate(df_income, period='year'):
-    return find_row_series(df_income, ['doanh thu', 'revenue'], period=period)
 
-def _find_revenue_for_retail(df_income, period='year'):
-    return find_row_series(df_income, ['doanh thu', 'revenue'], period=period)
 
-# ════════════════════════════════════════════════════════════════
-# PATCH B — Hàm build_financial_table xử lý phân loại ngành tự động
-# ════════════════════════════════════════════════════════════════
+
+
 def build_financial_table(df_income, df_balance, df_ratio=None, ticker=None, period='year'):
-    """
-    Tổng hợp các chỉ tiêu BCTC.
-    ticker: dùng để detect ngân hàng/tài chính và chọn logic revenue phù hợp.
-    period: 'year' hoặc 'quarter'.
-    """
-    data = {}
-    
-    # ── Phân loại ngành TỰ ĐỘNG từ registry 1500+ mã ──
-    if ticker:
-        _s = get_sector(ticker)        # gọi 1 lần, O(1) lookup
-        is_bank       = _s == "bank"
-        is_financial  = _s in ("insurance", "securities")
-        is_retail     = _s == "retail"
-        is_realestate = _s == "realestate"
-    else:
-        is_bank = is_financial = is_retail = is_realestate = False
 
-    # ── Revenue theo ngành ──────────────────────────────────────
+    """
+
+    Tổng hợp các chỉ tiêu BCTC.
+
+    ticker: dùng để detect ngân hàng/tài chính và chọn logic revenue phù hợp.
+
+    period: 'year' hoặc 'quarter'.
+
+    """
+
+    data = {}
+
+    is_bank = ticker in BANK_TICKERS if ticker else False
+
+    is_financial = ticker in FINANCIAL_TICKERS if ticker else False
+
+
+
+    # --- Revenue: xử lý riêng cho ngân hàng/tài chính ---
+
     if is_bank or is_financial:
-        data["revenue"] = _find_revenue_for_bank(df_income, period=period)
-    elif is_realestate:
-        data["revenue"] = _find_revenue_for_realestate(df_income, period=period)
-    elif is_retail:
-        data["revenue"] = _find_revenue_for_retail(df_income, period=period)
+
+        data['revenue'] = _find_revenue_for_bank(df_income, period=period)
+
     else:
-        data["revenue"] = find_row_series(df_income, ['doanh thu thuần', 'net revenue', 'doanh thu hoạt động kinh doanh'], period=period)
-        if data["revenue"].empty:
-            # Nếu vẫn không có (mã không xác định được ngành) -> thử bank keywords làm fallback
-            data["revenue"] = _find_revenue_for_bank(df_income, period=period)
+
+        # Doanh nghiệp thông thường
+
+        data['revenue'] = find_row_series(
+
+            df_income,
+
+            [
+
+                'doanh thu thuần', 'net revenue', 'net sales', 'revenue',
+
+                'doanh thu bán hàng', 'tổng doanh thu', 'total revenue',
+
+            ],
+
+            exclude_keywords=['giá vốn', 'cost of', 'chi phí lãi'],
+
+            item_ids=['revenue', 'net_revenue', 'net_sales'], period=period)
+
+
+
+        # Nếu vẫn không có (mã không xác định được ngành) -> thử bank keywords
+
+        if data['revenue'].empty:
+
+            data['revenue'] = _find_revenue_for_bank(df_income, period=period)
+
+
 
     # --- Net profit ---
+
     data['net_profit'] = find_row_series(
+
         df_income,
-        ['lợi nhuận sau thuế', 'net profit', 'profit after tax', 'net income', 'lợi nhuận thuần', 'lãi sau thuế'],
+
+        ['lợi nhuận sau thuế', 'net profit', 'profit after tax', 'net income',
+
+         'lợi nhuận thuần', 'lãi sau thuế'],
+
         exclude_keywords=['trước thuế', 'before tax', 'thiểu số', 'minority'],
-        item_ids=['net_profit', 'net_profit_after_tax', 'profit_after_tax'], 
-        period=period
-    )
+
+        item_ids=['net_profit', 'net_profit_after_tax', 'profit_after_tax'], period=period)
+
+
+
+    data['eps_income_stmt'] = find_row_series(
+
+        df_income,
+
+        ['lãi cơ bản trên cổ phiếu', 'earnings per share', 'eps'],
+
+        item_ids=['eps'], period=period)
+
+
+
+    # --- Balance sheet ---
+
+    data['equity'] = find_row_series(
+
+        df_balance,
+
+        ['vốn chủ sở hữu', "owner's equity", 'owners equity', 'total equity',
+
+         'equity', 'vcsh'],
+
+        exclude_keywords=['vốn điều lệ', 'charter', 'cổ phần ưu đãi'], period=period)
+
+
+
+    data['total_assets'] = find_row_series(
+
+        df_balance,
+
+        ['tổng cộng tài sản', 'total assets', 'tổng tài sản'], period=period)
+
+
 
     # --- Ratio ---
+
     if df_ratio is not None and not df_ratio.empty:
+
         data['eps']    = find_row_series(df_ratio, ['eps', 'earning per share', 'earnings per share'], period=period)
+
         data['bvps']   = find_row_series(df_ratio, ['book value per share', 'bvps'], period=period)
+
         data['roe']    = find_row_series(df_ratio, ['roe'], period=period)
-        data['roa']    = find_row_series(df_ratio, ['roa'], period=period)   
+
+        data['roa']    = find_row_series(df_ratio, ['roa'], period=period)
+
         data['pe']     = find_row_series(df_ratio, ['p/e', 'pe ratio', ' pe '], period=period)
+
         data['pb']     = find_row_series(df_ratio, ['p/b', 'pb ratio', ' pb '], period=period)
-        data['market_cap'] = find_row_series(df_ratio, ['market cap', 'vốn hóa'], item_ids=['market_cap'], period=period)
-        
+
+        data['market_cap'] = find_row_series(df_ratio, ['market cap', 'vốn hóa'],
+
+                                             item_ids=['market_cap'], period=period)
+
         data['outstanding_shares'] = find_row_series(
-            df_ratio, 
+
+            df_ratio,
+
             ['outstanding shares', 'số cổ phiếu lưu hành', 'số lượng cổ phiếu'],
-            item_ids=['outstanding_shares', 'issue_share'], 
-            period=period
-        )
-        
+
+            item_ids=['outstanding_shares', 'issue_share'], period=period)
+
         data['ev_ebitda']      = find_row_series(df_ratio, ['ev/ebitda', 'ev to ebitda'], period=period)
+
         data['p_cf']           = find_row_series(df_ratio, ['price to cash flow', 'p/cf'], period=period)
+
         data['ps']             = find_row_series(df_ratio, ['p/s', 'price to sales', 'ps ratio'], period=period)
+
         data['net_margin']     = find_row_series(df_ratio, ['net margin', 'after tax profit margin', 'biên lợi nhuận sau thuế'], period=period)
+
         data['asset_turnover'] = find_row_series(df_ratio, ['asset turnover', 'vòng quay tài sản', 'vòng quay tổng tài sản'], period=period)
-        data['dps']            = find_row_series(df_ratio, ['dividend per share', 'cổ tức trên mỗi cổ phiếu', 'cổ tức tiền mặt', 'dps'], period=period)
+
+        data['dps']            = find_row_series(df_ratio, ['dividend per share', 'cổ tức trên mỗi cổ phiếu',
+
+                                                              'cổ tức tiền mặt', 'dps'], period=period)
+
     else:
+
         for k in ['eps', 'bvps', 'roe', 'roa', 'pe', 'pb', 'market_cap',
+
                   'outstanding_shares', 'ev_ebitda', 'p_cf', 'ps', 'net_margin',
+
                   'asset_turnover', 'dps']:
+
             data[k] = pd.Series(dtype=float)
 
-    if data['eps'].empty and 'eps_income_stmt' in data and not data['eps_income_stmt'].empty:
+
+
+    if data['eps'].empty and not data['eps_income_stmt'].empty:
+
         data['eps'] = data['eps_income_stmt']
-        
-    if data['bvps'].empty and 'equity' in data and not data['equity'].empty and 'outstanding_shares' in data and not data['outstanding_shares'].empty:
+
+
+
+    if data['bvps'].empty and not data['equity'].empty and not data['outstanding_shares'].empty:
+
         common_years = data['equity'].index.intersection(data['outstanding_shares'].index)
+
         if len(common_years) > 0:
+
             data['bvps'] = (data['equity'].loc[common_years] / data['outstanding_shares'].loc[common_years])
-            
+
+
+
     return data
 
-# ════════════════════════════════════════════════════════════════
-# PATCH C — Hàm tương thích ngược truyền ticker chuẩn chỉ
-# ════════════════════════════════════════════════════════════════
+
+
+
+
 def build_5y_financial_table(df_income, df_balance, df_ratio=None, ticker=None):
+
     """Giữ tương thích ngược: bảng theo năm (hành vi cũ, không đổi)."""
+
     return build_financial_table(df_income, df_balance, df_ratio, ticker=ticker, period='year')
 
+
+
+
+
+def normalize_to_billion_vnd(series: pd.Series, label=""):
+
+    if series is None or series.empty:
+
+        return series
+
+    median_abs = series.abs().median()
+
+    if median_abs > 10_000_000:
+
+        return series / 1e9
+
+    return series
+
+
+
+
+
+def get_latest(series: pd.Series, default=0.0):
+
+    if series is None or series.empty:
+
+        return default
+
+    return float(series.iloc[-1])
+
+
+
+
+
+def get_latest_n_years(series: pd.Series, n=5):
+
+    if series is None or series.empty:
+
+        return series
+
+    return series.iloc[-n:]
+
+
+
+
+
 def cagr(series: pd.Series, n_years=None):
+
     if series is None or len(series.dropna()) < 2:
-        return None
-    s = series.dropna()
-    start_val, end_val = float(s.iloc[0]), float(s.iloc[-1])
-    if start_val <= 0:
-        return None
-    periods = n_years if n_years else (len(s) - 1)
-    if periods <= 0:
-        return None
-    try:
-        return (end_val / start_val) ** (1 / periods) - 1
-    except Exception:
+
         return None
 
-# Đẩy hàm định giá ra hẳn rìa ngoài cùng cấp file để không phá vỡ cấu trúc hàm khác
-def nine_methods_valuation(eps_latest, bvps_latest, pe_series: pd.Series, pb_series: pd.Series, current_price):
-    # Bạn chỉ cần điền phần xử lý tính toán định giá cũ của bạn vào đây
-    pass
+    s = series.dropna()
+
+    start_val, end_val = float(s.iloc[0]), float(s.iloc[-1])
+
+    if start_val <= 0:
+
+        return None
+
+    periods = n_years if n_years else (len(s) - 1)
+
+    if periods <= 0:
+
+        return None
+
+    try:
+
+        return (end_val / start_val) ** (1 / periods) - 1
+
+    except Exception:
+
+        return None
