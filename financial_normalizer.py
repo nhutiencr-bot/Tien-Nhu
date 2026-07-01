@@ -206,7 +206,67 @@ def build_financial_table(df_income, df_balance, df_ratio=None, ticker=None, per
     data['total_assets'] = find_row_series(
         df_balance,
         ['tổng cộng tài sản', 'total assets', 'tổng tài sản'], period=period)
+    # ============================================================
+# 4. DDM (DIVIDEND DISCOUNT MODEL - GORDON GROWTH)
+# ============================================================
 
+def ddm_gordon(dps, required_return=0.12, g=0.03):
+    # ... (code hiện tại của bạn) ...
+    if dps is None or dps <= 0 or required_return <= g:
+        return None
+    return dps * (1 + g) / (required_return - g)
+
+
+# ------------------------------------------------------------
+# DÁN HÀM MỚI VÀO ĐÂY (NGAY DƯỚI PHẦN 4, TRÊN PHẦN 5)
+# ------------------------------------------------------------
+def advanced_multiples_valuation(eps_latest, eps_5y_ago, pe_current, 
+                                 ebitda_latest, cfo_latest, revenue_latest, net_debt_latest, 
+                                 shares_outstanding, 
+                                 ev_ebitda_median_5y, pcf_median_5y, ps_median_5y):
+    """
+    Port chuẩn xác từ Node.js: Xử lý EV/EBITDA, P/CF, P/S và PEG.
+    """
+    methods = {}
+    
+    # Đổi shares ra đơn vị Tỷ Cổ Phiếu
+    shares_billion = shares_outstanding / 1e9 if shares_outstanding else 0
+    if shares_billion <= 0:
+        return methods
+
+    # 1. EV/EBITDA
+    if ebitda_latest and ebitda_latest > 0 and ev_ebitda_median_5y:
+        fair_ev = ebitda_latest * ev_ebitda_median_5y
+        fair_market_cap = fair_ev - net_debt_latest
+        if fair_market_cap > 0:
+            methods['EV/EBITDA Median 5N'] = fair_market_cap / shares_billion
+
+    # 2. P/CF
+    if cfo_latest and cfo_latest > 0 and pcf_median_5y:
+        methods['P/CF Median 5N'] = (cfo_latest * pcf_median_5y) / shares_billion
+
+    # 3. P/S
+    if revenue_latest and revenue_latest > 0 and ps_median_5y:
+        methods['P/S Median 5N'] = (revenue_latest * ps_median_5y) / shares_billion
+
+    # 4. PEG
+    if eps_latest and eps_5y_ago and eps_5y_ago > 0 and eps_latest > eps_5y_ago and pe_current:
+        eps_growth = ((eps_latest / eps_5y_ago) ** 0.25 - 1) * 100
+        if eps_growth > 0:
+            peg_ratio = pe_current / max(eps_growth, 1)
+            methods['PEG Fair Value'] = eps_latest * max(eps_growth, 1)
+            methods['_PEG_Ratio'] = peg_ratio 
+            
+    return methods
+
+
+# ============================================================
+# 5. 9 PHƯƠNG PHÁP ĐỊNH GIÁ TỔNG HỢP (dùng PE/PB lịch sử của CHÍNH MÃ)
+# ============================================================
+
+def nine_methods_valuation(eps_latest, bvps_latest, pe_series: pd.Series,
+                           pb_series: pd.Series, current_price,
+                           # ... (code hiện tại của bạn) ...
     # --- Ratio ---
     if df_ratio is not None and not df_ratio.empty:
         data['eps']    = find_row_series(df_ratio, ['eps', 'earning per share', 'earnings per share'], period=period)
