@@ -223,11 +223,15 @@ def build_financial_table(df_income, df_balance, df_ratio=None, ticker=None, per
             item_ids=['outstanding_shares', 'issue_share'], period=period)
         data['ev_ebitda']      = find_row_series(df_ratio, ['ev/ebitda', 'ev to ebitda'], period=period)
         data['p_cf']           = find_row_series(df_ratio, ['price to cash flow', 'p/cf'], period=period)
+        data['ps']             = find_row_series(df_ratio, ['p/s', 'price to sales', 'ps ratio'], period=period)
         data['net_margin']     = find_row_series(df_ratio, ['net margin', 'after tax profit margin', 'biên lợi nhuận sau thuế'], period=period)
         data['asset_turnover'] = find_row_series(df_ratio, ['asset turnover', 'vòng quay tài sản', 'vòng quay tổng tài sản'], period=period)
+        data['dps']            = find_row_series(df_ratio, ['dividend per share', 'cổ tức trên mỗi cổ phiếu',
+                                                              'cổ tức tiền mặt', 'dps'], period=period)
     else:
         for k in ['eps', 'bvps', 'roe', 'roa', 'pe', 'pb', 'market_cap',
-                  'outstanding_shares', 'ev_ebitda', 'p_cf', 'net_margin', 'asset_turnover']:
+                  'outstanding_shares', 'ev_ebitda', 'p_cf', 'ps', 'net_margin',
+                  'asset_turnover', 'dps']:
             data[k] = pd.Series(dtype=float)
 
     if data['eps'].empty and not data['eps_income_stmt'].empty:
