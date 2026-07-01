@@ -131,12 +131,18 @@ def fetch_cafef_balance_sheet_5y(ticker: str, end_year: int):
     if not _cafef_is_reachable():
         return {"equity": pd.Series(dtype=float), "total_assets": pd.Series(dtype=float)}
 
+    # ⚠️ end_year phải là năm CÓ BÁO CÁO (không phải năm hiện tại nếu đang là
+    # Q1/Q2 của năm mới — VD năm 2026 chưa có BCTC 2026 → end_year nên là 2025).
+    # Caller nên truyền LAST_DATA_YEAR thay vì datetime.today().year.
+    start_year = end_year - 4
+    target_years = list(range(start_year, end_year + 1))
+
     def fetch_task(year):
         return year, _fetch_one_period(ticker, year, 4, slug)
 
     # ĐA LUỒNG: Cào 5 năm cùng 1 lúc
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-        future_to_y = {executor.submit(fetch_task, y): y for y in range(end_year - 4, end_year + 1)}
+        future_to_y = {executor.submit(fetch_task, y): y for y in target_years}
         for future in concurrent.futures.as_completed(future_to_y):
             try:
                 year, data = future.result()
