@@ -505,3 +505,44 @@ def render_tab_forecast(df_5y_table, fundamentals, metrics, tech, valuation_pkg,
         "ℹ️ Điểm đánh giá tổng hợp được suy ra tự động từ ROE, P/E, CAGR doanh thu và xu hướng giá hiện có — "
         "không thay thế cho báo cáo phân tích chuyên sâu của công ty chứng khoán."
     )
+
+    # ── Khuyến nghị (9 PP hội tụ) — kéo từ valuation_pkg đã tính sẵn ────────
+    st.markdown("---")
+    summary = valuation_pkg.get('summary') if valuation_pkg else None
+    if summary:
+        verdict = summary.get('verdict', '')
+        p25, p75 = summary.get('p25'), summary.get('p75')
+        upside_median = summary.get('upside_median_pct')
+
+        if 'UNDERVALUED' in verdict:
+            rec_text, rec_color = "↑ ACCUMULATE · TÍCH LŨY", "#22c55e"
+        elif 'OVERVALUED' in verdict:
+            rec_text, rec_color = "↓ REDUCE · GIẢM TỈ TRỌNG", "#ef4444"
+        else:
+            rec_text, rec_color = "→ HOLD · NẮM GIỮ", "#fbbf24"
+
+        target_low = min(p25, p75) if (p25 is not None and p75 is not None) else None
+        target_high = max(p25, p75) if (p25 is not None and p75 is not None) else None
+
+        target_str = (
+            f"₫{target_low:,.0f} – {target_high:,.0f}"
+            if target_low is not None and target_high is not None else "—"
+        )
+        upside_str = f"({upside_median:+.0f}%)" if upside_median is not None else ""
+
+        st.markdown(
+            f"""<div style="padding:1.2rem 1.4rem;border-radius:16px;
+                background:linear-gradient(135deg, rgba(168,85,247,0.12), rgba(236,72,153,0.08));
+                border:1px solid rgba(168,85,247,0.25);">
+                <div style="opacity:0.7;font-size:0.85rem;letter-spacing:1px;">KHUYẾN NGHỊ (9 PP HỘI TỤ)</div>
+                <div style="font-size:1.6rem;font-weight:800;color:{rec_color};margin:0.3rem 0;">{rec_text}</div>
+                <div style="opacity:0.85;">Dải mục tiêu: <strong>{target_str}</strong> {upside_str}</div>
+            </div>""",
+            unsafe_allow_html=True,
+        )
+        st.caption(
+            "ℹ️ Tổng hợp từ các phương pháp PE/PB Median-TB-Sàn 5N, DCF, Graham (xem chi tiết tại tab "
+            "'💰 Định Giá PE/PB · 9PP'). Không phải lời khuyên đầu tư."
+        )
+    else:
+        st.info("Chưa đủ dữ liệu để tổng hợp khuyến nghị 9 phương pháp cho mã này.")
