@@ -6,6 +6,14 @@ Lấy tin tức liên quan đến mã cổ phiếu từ Google News RSS.
 - Google News tự tổng hợp từ: CafeF, VnExpress, NDH, Vietstock, Nhịp Cầu Đầu Tư...
 - Lọc chỉ giữ tin trong 6 tháng gần nhất.
 - Fallback: nếu RSS lỗi, trả về list rỗng để pipeline xử lý.
+
+⚠️ LƯU Ý TƯƠNG THÍCH PYTHON: dùng typing.List / typing.Optional thay vì
+cú pháp list[dict] (PEP 585, cần Python >= 3.9) và list | None (PEP 604,
+cần Python >= 3.10). Streamlit Cloud có thể chạy Python 3.8/3.9 tùy cấu
+hình, và cú pháp `list | None` sẽ ném TypeError ngay tại import-time nếu
+chạy dưới Python 3.9, kéo sập toàn bộ app (ImportError chuỗi từ app.py ->
+pipeline.py -> news_fetcher.py). typing.List/Optional an toàn ở MỌI bản
+Python 3.x, nên dùng thay thế.
 """
 
 import re
@@ -14,6 +22,7 @@ import urllib.parse
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
+from typing import List, Optional, Dict
 
 
 # Bảng tên công ty đầy đủ để tăng chất lượng tìm kiếm
@@ -79,7 +88,7 @@ def _is_within_months(pub_date_str: str, months: int = LOOKBACK_MONTHS) -> bool:
         return True  # Nếu không parse được ngày, giữ lại bài (an toàn hơn là bỏ)
 
 
-def fetch_news_google_rss(ticker: str, max_results: int = MAX_NEWS) -> list[dict]:
+def fetch_news_google_rss(ticker: str, max_results: int = MAX_NEWS) -> List[Dict]:
     """
     Lấy tin tức từ Google News RSS cho mã cổ phiếu ticker.
 
@@ -182,7 +191,8 @@ def fetch_news_google_rss(ticker: str, max_results: int = MAX_NEWS) -> list[dict
         return []
 
 
-def fetch_news_with_fallback(ticker: str, vnstock_news_cards: list, rss_news: list | None = None) -> list[dict]:
+def fetch_news_with_fallback(ticker: str, vnstock_news_cards: list,
+                              rss_news: Optional[List[Dict]] = None) -> List[Dict]:
     """
     Hàm wrapper: ưu tiên dùng kết quả RSS đã có sẵn (nếu được truyền vào từ
     pipeline, ví dụ khi đã fetch song song trong ThreadPoolExecutor), nếu
