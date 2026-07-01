@@ -185,11 +185,32 @@ with tab_multiples:
     cfo_b = metrics.get('cfo_latest_billion', 0) or 0
     ebitda_b = metrics.get('ebitda_latest_billion', 0) or 0
     net_debt_b = metrics.get('net_debt_billion', 0) or 0
+
+    # ⚠️ Sanity guard: không có công ty niêm yết thực nào có vốn hóa < 100 tỷ
+    # VNĐ. Nếu market_cap_billion về gần 0 (lỗi tính toán/đơn vị ở pipeline),
+    # MỌI multiple tính từ nó (P/S, P/CF, EV/EBITDA) sẽ ra một tỷ số cực nhỏ
+    # (VD 0.0003x) — số này truthy (không phải chính xác 0.0) nên vẫn lọt qua
+    # điều kiện "if value" và hiển thị "0.00x" kèm nhãn "hấp dẫn" (SAI, vì đây
+    # là lỗi dữ liệu chứ không phải định giá rẻ thật). Chặn tại nguồn: coi
+    # market_cap_b là "thiếu dữ liệu" nếu dưới ngưỡng hợp lý.
+    MIN_SANE_MARKET_CAP_B = 100.0  # tỷ VNĐ
+    if market_cap_b < MIN_SANE_MARKET_CAP_B:
+        market_cap_b = 0.0
     ev_b = market_cap_b + net_debt_b
 
-    ps = (market_cap_b / revenue_b) if revenue_b > 0 else None
-    pcf = (market_cap_b / cfo_b) if cfo_b > 0 else None
-    ev_ebitda = (ev_b / ebitda_b) if ebitda_b > 0 else None
+    def _sane_ratio(value, min_sane=0.05, max_sane=200.0):
+        """Trả về None nếu tỷ số nằm ngoài dải hợp lý cho CP VN — tỷ số gần 0
+        hoặc cực lớn gần như chắc chắn là lỗi dữ liệu/đơn vị, không phải một
+        định giá thật. Tránh lặp lại lỗi BVPS≈0 → nhãn sai đã xảy ra trước đó."""
+        if value is None:
+            return None
+        if not (min_sane <= value <= max_sane):
+            return None
+        return value
+
+    ps = _sane_ratio((market_cap_b / revenue_b) if revenue_b > 0 else None)
+    pcf = _sane_ratio((market_cap_b / cfo_b) if cfo_b > 0 else None)
+    ev_ebitda = _sane_ratio((ev_b / ebitda_b) if ebitda_b > 0 else None)
 
     pe_now = metrics.get('pe', 0) or 0
     pb_now = metrics.get('pb', 0) or 0
