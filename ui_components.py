@@ -333,3 +333,124 @@ def render_tab_news(news_cards):
             <strong style='font-size:15px;color:#f1f1f6;'>{item['title']}</strong>
         </div>
         """, unsafe_allow_html=True)
+
+
+def render_tab_forecast(df_5y_table, fundamentals, metrics, tech, valuation_pkg, period_col='Năm'):
+    """
+    Dự phóng 2026-2027 + Đánh giá tổng hợp.
+    Ngoại suy đơn giản dựa trên CAGR 5 năm (Doanh thu, LNST) đã có sẵn trong
+    `fundamentals`. Đây là ước tính cơ học (mechanical extrapolation), KHÔNG phải
+    dự báo của công ty chứng khoán — luôn hiển thị disclaimer rõ ràng.
+    """
+    st.markdown("### 🔮 Dự Phóng 2026 – 2027 (Ngoại Suy Từ CAGR 5 Năm)")
+
+    if df_5y_table.empty or period_col != 'Năm':
+        st.info("Chỉ hỗ trợ dự phóng theo Năm — vui lòng xem tab KQKD 5 Năm ở chế độ 'Theo Năm'.")
+        return
+
+    df_years = df_5y_table.dropna(subset=['Năm']).sort_values('Năm')
+    if df_years.empty:
+        st.warning("Không đủ dữ liệu để dự phóng.")
+        return
+
+    last_year = int(df_years['Năm'].iloc[-1])
+    last_revenue = df_years['Doanh thu thuần (tỷ)'].iloc[-1]
+    last_profit = df_years['LNST (tỷ)'].iloc[-1]
+
+    rev_cagr = fundamentals.get('revenue_cagr_pct')
+    np_cagr = fundamentals.get('net_profit_cagr_pct')
+
+    if last_revenue is None or last_revenue != last_revenue or rev_cagr is None:
+        st.warning("⚠️ Thiếu Doanh thu/CAGR để dự phóng — hiển thị các phần khác của tab.")
+        forecast_years, revenue_fc, profit_fc = [], [], []
+    else:
+        g_rev = rev_cagr / 100
+        g_np = (np_cagr / 100) if (np_cagr is not None and np_cagr == np_cagr) else g_rev
+        forecast_years = [last_year + 1, last_year + 2]
+        revenue_fc = [last_revenue * (1 + g_rev) ** i for i in (1, 2)]
+        profit_fc = [
+            (last_profit * (1 + g_np) ** i) if (last_profit is not None and last_profit == last_profit) else None
+            for i in (1, 2)
+        ]
+
+    if forecast_years:
+        st.caption(
+            f"Ngoại suy cơ học: Doanh thu CAGR 5N ≈ {fmt(rev_cagr, suffix='%')}, "
+            f"LNST CAGR 5N ≈ {fmt(np_cagr, suffix='%')}. "
+            f"⚠️ KHÔNG phải dự báo từ công ty chứng khoán — chỉ mang tính tham khảo kỹ thuật."
+        )
+
+        chart_years = [str(last_year)] + [str(y) for y in forecast_years]
+        chart_revenue = [last_revenue] + revenue_fc
+        chart_profit = [last_profit] + profit_fc
+
+        fig_fc = go.Figure()
+        fig_fc.add_trace(go.Bar(
+            x=chart_years, y=chart_revenue,
+            name='Doanh thu (tỷ) — dự phóng từ năm sau',
+            marker_color=['#a855f7'] + ['#c084fc'] * len(forecast_years),
+        ))
+        fig_fc.add_trace(go.Scatter(
+            x=chart_years, y=chart_profit,
+            name='LNST dự phóng (tỷ)',
+            line=dict(color='#10d98a', width=3), yaxis='y2',
+        ))
+        fig_fc.update_layout(
+            template='plotly_dark',
+            paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+            xaxis=dict(type='category'),
+            yaxis=dict(title='Doanh thu (tỷ)'),
+            yaxis2=dict(title='LNST (tỷ)', overlaying='y', side='right'),
+            legend=dict(orientation='h', y=1.1),
+            margin=dict(t=40, b=20),
+        )
+        st.plotly_chart(fig_fc, use_container_width=True)
+
+        cols = st.columns(len(forecast_years))
+        for col, y, rev, np_ in zip(cols, forecast_years, revenue_fc, profit_fc):
+            col.metric(f"Doanh thu {y}", fmt(rev, suffix=" tỷ", decimals=0))
+            col.metric(f"LNST {y}", fmt(np_, suffix=" tỷ", decimals=0))
+
+    st.markdown("---")
+
+    # ── Đánh giá tổng hợp (rating dots, phong cách dashboard tham chiếu) ──
+    st.markdown("### Đánh Giá Tổng Hợp")
+
+    def _score_to_dots(score, max_dots=5):
+        score = max(0, min(max_dots, round(score)))
+        filled = "●" * score
+        empty = "○" * (max_dots - score)
+        color = "#ec4899" if score >= 4 else ("#fbbf24" if score >= 2 else "#8b8ba7")
+        return f"<span style='color:{color};letter-spacing:3px;font-size:1.1rem;'>{filled}</span>" \
+               f"<span style='color:#3a3a52;letter-spacing:3px;font-size:1.1rem;'>{empty}</span>"
+
+    roe_latest = fundamentals.get('roe_latest') or 0
+    score_financial = 5 if roe_latest >= 20 else 4 if roe_latest >= 15 else 3 if roe_latest >= 10 else 2 if roe_latest >= 5 else 1
+
+    pe_now = metrics.get('pe', 0) or 0
+    score_valuation = 5 if 0 < pe_now < 8 else 4 if pe_now < 12 else 3 if pe_now < 18 else 2 if pe_now < 25 else 1
+
+    score_competitive = 4  # mặc định trung bình-khá, không có dữ liệu thị phần định lượng
+
+    growth_ref = rev_cagr if (rev_cagr is not None and rev_cagr == rev_cagr) else 0
+    score_outlook = 5 if growth_ref >= 20 else 4 if growth_ref >= 10 else 3 if growth_ref >= 0 else 2 if growth_ref >= -10 else 1
+
+    trend = str(tech.get('trend_signal', '')) if tech else ''
+    score_catalyst = 4 if ('tăng' in trend.lower() or 'up' in trend.lower()) else 3
+
+    ratings = [
+        ("Tài chính (5 năm)", score_financial),
+        (f"Định giá {last_year}", score_valuation),
+        ("Vị thế cạnh tranh", score_competitive),
+        ("Triển vọng tăng trưởng", score_outlook),
+        ("Catalyst / Xu hướng giá", score_catalyst),
+    ]
+    for label, score in ratings:
+        c1, c2 = st.columns([2, 1])
+        c1.markdown(f"<div style='padding-top:0.3rem;'>{label}</div>", unsafe_allow_html=True)
+        c2.markdown(_score_to_dots(score), unsafe_allow_html=True)
+
+    st.caption(
+        "ℹ️ Điểm đánh giá tổng hợp được suy ra tự động từ ROE, P/E, CAGR doanh thu và xu hướng giá hiện có — "
+        "không thay thế cho báo cáo phân tích chuyên sâu của công ty chứng khoán."
+    )
