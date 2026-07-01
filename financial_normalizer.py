@@ -1,89 +1,42 @@
-"""
-financial_normalizer_patched.py
-════════════════════════════════════════════════════════════════════
-DIFF PATCH: thay thế hardcode sector sets → ticker_registry động
-
-Chỉ cần áp 3 thay đổi vào financial_normalizer_fixed.py:
-  PATCH A: import
-  PATCH B: hàm build_financial_table() — phần detect sector
-  PATCH C: hàm build_5y_financial_table() — truyền ticker
-
-════════════════════════════════════════════════════════════════════
-"""
+import pandas as pd
+import re
 
 # ════════════════════════════════════════════════════════════════
-# PATCH A — Thêm vào ĐẦU FILE (thay toàn bộ các dict hardcode)
+# PATCH A — Sử dụng registry động thay cho các set hardcode cũ
 # ════════════════════════════════════════════════════════════════
-PATCH_A_REMOVE = """
-BANK_TICKERS = {
-    'VCB', 'BID', 'CTG', 'TCB', 'MBB', ...
-}
-FINANCIAL_TICKERS = {...}
-RETAIL_TICKERS = {...}
-REAL_ESTATE_TICKERS = {...}
-"""
-
-PATCH_A_ADD = """
-# ── Import registry động — tự động cập nhật 1500+ mã 3 sàn ──
 from ticker_registry import get_sector
-
-# Backward-compat: các set ảo vẫn hoạt động với `ticker in BANK_TICKERS`
 from ticker_registry import (
     BANK_TICKERS, FINANCIAL_TICKERS, INSURANCE_TICKERS,
     RETAIL_TICKERS, REAL_ESTATE_TICKERS,
 )
-"""
+
+def _find_revenue_for_bank(df_income, period='year'):
+    """Hàm bổ trợ tìm doanh thu ngân hàng (được khôi phục cú pháp chuẩn)"""
+    if 'bank_revenue_keywords' in globals() or 'bank_revenue_keywords' in locals():
+        for keywords, excludes in bank_revenue_keywords: 
+            s = find_row_series(df_income, keywords, exclude_keywords=excludes if excludes else None, period=period)
+            if not s.empty:
+                return s 
+    return pd.Series(dtype=float)
+
+def _find_revenue_for_realestate(df_income, period='year'):
+    return find_row_series(df_income, ['doanh thu', 'revenue'], period=period)
+
+def _find_revenue_for_retail(df_income, period='year'):
+    return find_row_series(df_income, ['doanh thu', 'revenue'], period=period)
 
 # ════════════════════════════════════════════════════════════════
-# PATCH B — Thay nội dung detect ngành trong build_financial_table()
+# PATCH B — Hàm build_financial_table xử lý phân loại ngành tự động
 # ════════════════════════════════════════════════════════════════
-PATCH_B_REMOVE = """
-    is_bank = ticker in BANK_TICKERS if ticker else False
-    is_financial = ticker in FINANCIAL_TICKERS if ticker else False
-    is_retail = ticker in RETAIL_TICKERS if ticker else False
-    is_realestate = ticker in REAL_ESTATE_TICKERS if ticker else False
-"""
-
-PATCH_B_ADD = """
+def build_financial_table(df_income, df_balance, df_ratio=None, ticker=None, period='year'):
+    """
+    Tổng hợp các chỉ tiêu BCTC.
+    ticker: dùng để detect ngân hàng/tài chính và chọn logic revenue phù hợp.
+    period: 'year' hoặc 'quarter'.
+    """
+    data = {}
+    
     # ── Phân loại ngành TỰ ĐỘNG từ registry 1500+ mã ──
-    if ticker:
-        _sector = get_sector(ticker)
-        is_bank      = _sector == 'bank'
-        is_financial = _sector in ('insurance', 'securities')
-        is_retail    = _sector == 'retail'
-        is_realestate = _sector == 'realestate'
-    else:
-        is_bank = is_financial = is_retail = is_realestate = False
-"""
-
-# ════════════════════════════════════════════════════════════════
-# PATCH C — build_5y_financial_table() đảm bảo ticker truyền qua
-# ════════════════════════════════════════════════════════════════
-PATCH_C_REMOVE = """
-def build_5y_financial_table(df_income, df_balance, df_ratio=None, ticker=None):
-    return build_financial_table(
-        df_income, df_balance, df_ratio,
-        ticker=ticker,
-        period='year'
-    )
-"""
-
-# Giống hệt → không cần đổi nếu đã áp patch lần trước.
-# Chỉ cần đảm bảo build_financial_table nhận ticker và gọi get_sector().
-
-# ════════════════════════════════════════════════════════════════
-# MINH HỌA: đoạn code cuối cùng sau khi patch
-# ════════════════════════════════════════════════════════════════
-
-FINAL_EXAMPLE = '''
-# financial_normalizer.py — AFTER PATCH (chỉ phần detect ngành)
-
-from ticker_registry import get_sector   # <- thêm dòng này ở đầu file
-
-def build_financial_table(df_income, df_balance, df_ratio=None,
-                          ticker=None, period="year"):
-
-    # ── Detect ngành từ registry động ──────────────────────────
     if ticker:
         _s = get_sector(ticker)        # gọi 1 lần, O(1) lookup
         is_bank       = _s == "bank"
@@ -101,17 +54,82 @@ def build_financial_table(df_income, df_balance, df_ratio=None,
     elif is_retail:
         data["revenue"] = _find_revenue_for_retail(df_income, period=period)
     else:
-        data["revenue"] = find_row_series(df_income, [...], period=period)
+        data["revenue"] = find_row_series(df_income, ['doanh thu thuần', 'net revenue', 'doanh thu hoạt động kinh doanh'], period=period)
         if data["revenue"].empty:
-            data["revenue"] = _find_revenue_for_retail(df_income, period=period)
+            # Nếu vẫn không có (mã không xác định được ngành) -> thử bank keywords làm fallback
+            data["revenue"] = _find_revenue_for_bank(df_income, period=period)
 
-    # ... phần còn lại giữ nguyên
-'''
+    # --- Net profit ---
+    data['net_profit'] = find_row_series(
+        df_income,
+        ['lợi nhuận sau thuế', 'net profit', 'profit after tax', 'net income', 'lợi nhuận thuần', 'lãi sau thuế'],
+        exclude_keywords=['trước thuế', 'before tax', 'thiểu số', 'minority'],
+        item_ids=['net_profit', 'net_profit_after_tax', 'profit_after_tax'], 
+        period=period
+    )
 
-if __name__ == '__main__':
-    print("PATCH A — Xóa hardcode, thêm import:")
-    print(PATCH_A_ADD)
-    print("\nPATCH B — Thay detect sector:")
-    print(PATCH_B_ADD)
-    print("\nFinal example:")
-    print(FINAL_EXAMPLE)
+    # --- Ratio ---
+    if df_ratio is not None and not df_ratio.empty:
+        data['eps']    = find_row_series(df_ratio, ['eps', 'earning per share', 'earnings per share'], period=period)
+        data['bvps']   = find_row_series(df_ratio, ['book value per share', 'bvps'], period=period)
+        data['roe']    = find_row_series(df_ratio, ['roe'], period=period)
+        data['roa']    = find_row_series(df_ratio, ['roa'], period=period)   
+        data['pe']     = find_row_series(df_ratio, ['p/e', 'pe ratio', ' pe '], period=period)
+        data['pb']     = find_row_series(df_ratio, ['p/b', 'pb ratio', ' pb '], period=period)
+        data['market_cap'] = find_row_series(df_ratio, ['market cap', 'vốn hóa'], item_ids=['market_cap'], period=period)
+        
+        data['outstanding_shares'] = find_row_series(
+            df_ratio, 
+            ['outstanding shares', 'số cổ phiếu lưu hành', 'số lượng cổ phiếu'],
+            item_ids=['outstanding_shares', 'issue_share'], 
+            period=period
+        )
+        
+        data['ev_ebitda']      = find_row_series(df_ratio, ['ev/ebitda', 'ev to ebitda'], period=period)
+        data['p_cf']           = find_row_series(df_ratio, ['price to cash flow', 'p/cf'], period=period)
+        data['ps']             = find_row_series(df_ratio, ['p/s', 'price to sales', 'ps ratio'], period=period)
+        data['net_margin']     = find_row_series(df_ratio, ['net margin', 'after tax profit margin', 'biên lợi nhuận sau thuế'], period=period)
+        data['asset_turnover'] = find_row_series(df_ratio, ['asset turnover', 'vòng quay tài sản', 'vòng quay tổng tài sản'], period=period)
+        data['dps']            = find_row_series(df_ratio, ['dividend per share', 'cổ tức trên mỗi cổ phiếu', 'cổ tức tiền mặt', 'dps'], period=period)
+    else:
+        for k in ['eps', 'bvps', 'roe', 'roa', 'pe', 'pb', 'market_cap',
+                  'outstanding_shares', 'ev_ebitda', 'p_cf', 'ps', 'net_margin',
+                  'asset_turnover', 'dps']:
+            data[k] = pd.Series(dtype=float)
+
+    if data['eps'].empty and 'eps_income_stmt' in data and not data['eps_income_stmt'].empty:
+        data['eps'] = data['eps_income_stmt']
+        
+    if data['bvps'].empty and 'equity' in data and not data['equity'].empty and 'outstanding_shares' in data and not data['outstanding_shares'].empty:
+        common_years = data['equity'].index.intersection(data['outstanding_shares'].index)
+        if len(common_years) > 0:
+            data['bvps'] = (data['equity'].loc[common_years] / data['outstanding_shares'].loc[common_years])
+            
+    return data
+
+# ════════════════════════════════════════════════════════════════
+# PATCH C — Hàm tương thích ngược truyền ticker chuẩn chỉ
+# ════════════════════════════════════════════════════════════════
+def build_5y_financial_table(df_income, df_balance, df_ratio=None, ticker=None):
+    """Giữ tương thích ngược: bảng theo năm (hành vi cũ, không đổi)."""
+    return build_financial_table(df_income, df_balance, df_ratio, ticker=ticker, period='year')
+
+def cagr(series: pd.Series, n_years=None):
+    if series is None or len(series.dropna()) < 2:
+        return None
+    s = series.dropna()
+    start_val, end_val = float(s.iloc[0]), float(s.iloc[-1])
+    if start_val <= 0:
+        return None
+    periods = n_years if n_years else (len(s) - 1)
+    if periods <= 0:
+        return None
+    try:
+        return (end_val / start_val) ** (1 / periods) - 1
+    except Exception:
+        return None
+
+# Đẩy hàm định giá ra hẳn rìa ngoài cùng cấp file để không phá vỡ cấu trúc hàm khác
+def nine_methods_valuation(eps_latest, bvps_latest, pe_series: pd.Series, pb_series: pd.Series, current_price):
+    # Bạn chỉ cần điền phần xử lý tính toán định giá cũ của bạn vào đây
+    pass
