@@ -96,9 +96,9 @@ def _fetch_one_period(ticker: str, year: int, quarter: int, slug: str):
         assets_vals = (_extract_row_values(text_bs, r'TỔNG CỘNG TÀI SẢN') or
                        _extract_row_values(text_bs, r'TỔNG TÀI SẢN') or
                        _extract_row_values(text_bs, r'Tổng cộng tài sản'))
-        if equity_vals and equity_vals[-1] is not None:
+        if equity_vals and equity_vals[-1] not in (None, 0.0, 0):
             out['equity'] = equity_vals[-1] / 1e9
-        if assets_vals and assets_vals[-1] is not None:
+        if assets_vals and assets_vals[-1] not in (None, 0.0, 0):
             out['total_assets'] = assets_vals[-1] / 1e9
 
     if text_is:
@@ -115,10 +115,23 @@ def _fetch_one_period(ticker: str, year: int, quarter: int, slug: str):
                        _extract_row_values(text_is, r'LỢI NHUẬN SAU THUẾ') or
                        _extract_row_values(text_is, r'Lợi nhuận sau thuế') or
                        _extract_row_values(text_is, r'Lãi/\s*\(lỗ\) thuần sau thuế') or
-                       _extract_row_values(text_is, r'Lợi nhuận thuần sau thuế'))
-        if revenue_vals and revenue_vals[-1] is not None:
+                       _extract_row_values(text_is, r'Lợi nhuận thuần sau thuế') or
+                       _extract_row_values(text_is, r'Lợi nhuận kế toán sau thuế') or
+                       _extract_row_values(text_is, r'Lợi nhuận sau thuế TNDN') or
+                       _extract_row_values(text_is, r'LNST') or
+                       _extract_row_values(text_is, r'Lãi sau thuế') or
+                       _extract_row_values(text_is, r'20\.\s*Lợi nhuận sau thuế') or
+                       _extract_row_values(text_is, r'Lợi nhuận thuần từ hoạt động kinh doanh'))
+        # ⚠️ Sanity guard: doanh thu/LNST đúng bằng 0.0 gần như KHÔNG BAO GIỜ
+        # là số thật cho 1 công ty niêm yết đang hoạt động cả năm — nhiều khả
+        # năng regex khớp nhầm 1 dòng/cột trống (VD do layout báo cáo năm cũ
+        # khác cấu trúc bảng của các năm gần đây). Coi giá trị 0.0 là TRÍCH
+        # XUẤT THẤT BẠI, không phải dữ liệu thật — bỏ qua thay vì lưu số 0
+        # sai lệch vào bảng (đã từng gây hiển thị "Doanh thu thuần = 0.00"
+        # sai cho năm 2021 dù công ty chắc chắn có doanh thu).
+        if revenue_vals and revenue_vals[-1] not in (None, 0.0, 0):
             out['revenue'] = revenue_vals[-1] / 1e9
-        if profit_vals and profit_vals[-1] is not None:
+        if profit_vals and profit_vals[-1] not in (None, 0.0, 0):
             out['net_profit'] = profit_vals[-1] / 1e9
 
     return out
