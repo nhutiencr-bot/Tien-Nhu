@@ -320,6 +320,73 @@ def execute_equity_research_pipeline(ticker):
             "source_used":         source_used,
         }
 
+        # ── 5b. Dữ liệu cho Multiples Mở Rộng: P/S, P/CF, EV/EBITDA ────────
+        # EBITDA VN không có sẵn trong BCTC — phải tự tính:
+        #   EBIT   = Lợi nhuận trước thuế + Chi phí lãi vay
+        #   EBITDA = EBIT + Khấu hao & phân bổ
+        # Net Debt = (Vay ngắn hạn + Vay dài hạn) - Tiền và tương đương tiền
+        revenue_latest = get_latest(revenue_series, default=0.0) if not revenue_series.empty else 0.0
+
+        cfo_series_for_multiples = normalize_to_billion_vnd(find_row_series(
+            df_cashflow,
+            ['lưu chuyển tiền thuần từ hoạt động kinh doanh',
+             'lưu chuyển tiền thuần từ hđkd',
+             'net cash flow from operating', 'net cash provided by operating',
+             'cash flow from operating activities', 'cash flows from operating activities']))
+        cfo_latest = get_latest(cfo_series_for_multiples, default=0.0) if not cfo_series_for_multiples.empty else 0.0
+
+        pretax_series = normalize_to_billion_vnd(find_row_series(
+            df_income,
+            ['lợi nhuận trước thuế', 'tổng lợi nhuận kế toán trước thuế',
+             'lợi nhuận trước thuế tndn', 'profit before tax', 'income before tax']))
+        interest_series = normalize_to_billion_vnd(find_row_series(
+            df_income,
+            ['chi phí lãi vay', 'lãi vay đã trả', 'trong đó: chi phí lãi vay',
+             'interest expense', 'interest paid']))
+        da_series = normalize_to_billion_vnd(find_row_series(
+            df_cashflow,
+            ['khấu hao tài sản cố định', 'khấu hao và phân bổ', 'khấu hao tscđ',
+             'depreciation and amortization', 'depreciation']))
+
+        pretax_latest = get_latest(pretax_series, default=0.0) if not pretax_series.empty else 0.0
+        interest_latest = get_latest(interest_series, default=0.0) if not interest_series.empty else 0.0
+        da_latest = get_latest(da_series, default=0.0) if not da_series.empty else 0.0
+
+        if is_bank:
+            ebitda_latest = 0.0
+            revenue_latest = 0.0
+        elif pretax_latest:
+            ebitda_latest = abs(pretax_latest) + abs(interest_latest) + abs(da_latest)
+        elif da_latest and not net_profit_series.empty:
+            # Fallback thô: LNST + D&A (thiếu lãi vay/thuế)
+            ebitda_latest = abs(get_latest(net_profit_series, default=0.0)) + abs(da_latest)
+        else:
+            ebitda_latest = 0.0
+
+        short_debt_series = normalize_to_billion_vnd(find_row_series(
+            df_balance,
+            ['vay và nợ thuê tài chính ngắn hạn', 'vay ngắn hạn', 'short-term borrowings']))
+        long_debt_series = normalize_to_billion_vnd(find_row_series(
+            df_balance,
+            ['vay và nợ thuê tài chính dài hạn', 'vay dài hạn', 'long-term borrowings']))
+        cash_series = normalize_to_billion_vnd(find_row_series(
+            df_balance,
+            ['tiền và các khoản tương đương tiền', 'tiền và tương đương tiền',
+             'cash and cash equivalents']))
+
+        short_debt_latest = get_latest(short_debt_series, default=0.0) if not short_debt_series.empty else 0.0
+        long_debt_latest = get_latest(long_debt_series, default=0.0) if not long_debt_series.empty else 0.0
+        cash_latest = get_latest(cash_series, default=0.0) if not cash_series.empty else 0.0
+        net_debt_latest = (short_debt_latest + long_debt_latest) - cash_latest
+
+        clean_metrics.update({
+            "revenue_latest_billion": revenue_latest,
+            "cfo_latest_billion": cfo_latest,
+            "ebitda_latest_billion": ebitda_latest,
+            "net_debt_billion": net_debt_latest,
+            "excl_extended_multiples": is_bank,
+        })
+
         current_year_for_table = datetime.today().year
         allowed_years = set(range(current_year_for_table - DEFAULT_YEAR_LIMIT, current_year_for_table))
 
