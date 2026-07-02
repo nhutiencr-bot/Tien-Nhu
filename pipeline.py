@@ -341,57 +341,30 @@ def execute_equity_research_pipeline(ticker):
                     equity_series = (total_assets_series.loc[common_years]
                                       - total_liab_series.loc[common_years])
 
-        # Fallback CafeF
-        # ⚠️ end_year phải là năm CÓ DỮ LIỆU gần nhất (2025), không phải
-        # năm hiện tại (2026) — tránh fetch_cafef_balance_sheet_5y tính
-        # range(2026-4, 2027) = 2022..2026 → mất 2021, thừa 2026.
         LAST_DATA_YEAR = 2025
         TARGET_YEARS = list(range(LAST_DATA_YEAR - 4, LAST_DATA_YEAR + 1))  # [2021..2025]
 
-        if equity_series.empty or total_assets_series.empty:
-            cafef_data = fetch_cafef_balance_sheet_5y(ticker, end_year=LAST_DATA_YEAR)
-            if equity_series.empty and not cafef_data['equity'].empty:
-                equity_series = cafef_data['equity']
-                st.info(f"ℹ️ Đã lấy 'Vốn chủ sở hữu' cho {ticker} từ CafeF.")
-            if total_assets_series.empty and not cafef_data['total_assets'].empty:
-                total_assets_series = cafef_data['total_assets']
-                st.info(f"ℹ️ Đã lấy 'Tổng tài sản' cho {ticker} từ CafeF.")
+        # Một lần fetch CafeF lấy ĐỦ 4 chỉ tiêu cho 2021-2025.
+        # Luôn gọi (không chỉ khi empty) để fill các năm còn thiếu (VD: 2021).
+        cafef_data = fetch_cafef_balance_sheet_5y(ticker, end_year=LAST_DATA_YEAR)
 
-        # Bổ sung năm còn thiếu từ CafeF (không chỉ khi empty — vnstock với
-        # get_all=True có thể vẫn trả về từ 2022 nếu nguồn không có 2021).
-        # → Chủ động merge CafeF cho các năm thiếu trong TARGET_YEARS.
-        years_missing = [y for y in TARGET_YEARS
-                         if y not in revenue_series.index
-                         or y not in net_profit_series.index]
-        if years_missing and not is_bank:
-            cafef_yearly = fetch_cafef_yearly_full(ticker, years=TARGET_YEARS)
-            if not cafef_yearly['revenue'].empty:
-                # Chỉ điền vào năm thiếu (không ghi đè năm vnstock đã có)
-                for yr, val in cafef_yearly['revenue'].items():
-                    if yr not in revenue_series.index:
-                        revenue_series[yr] = val
-                revenue_series = revenue_series.sort_index()
-            if not cafef_yearly['net_profit'].empty:
-                for yr, val in cafef_yearly['net_profit'].items():
-                    if yr not in net_profit_series.index:
-                        net_profit_series[yr] = val
-                net_profit_series = net_profit_series.sort_index()
-            if not cafef_yearly.get('equity', pd.Series(dtype=float)).empty:
-                for yr, val in cafef_yearly['equity'].items():
-                    if yr not in equity_series.index:
-                        equity_series[yr] = val
-                equity_series = equity_series.sort_index()
-            if not cafef_yearly.get('total_assets', pd.Series(dtype=float)).empty:
-                for yr, val in cafef_yearly['total_assets'].items():
-                    if yr not in total_assets_series.index:
-                        total_assets_series[yr] = val
-                total_assets_series = total_assets_series.sort_index()
+        def _merge_series(target: pd.Series, source: pd.Series) -> pd.Series:
+            """Chỉ fill năm còn thiếu từ source, không ghi đè năm đã có."""
+            if source.empty:
+                return target
+            merged = target.copy() if not target.empty else pd.Series(dtype=float)
+            for yr, val in source.items():
+                if val and val == val and yr not in merged.index:
+                    merged[yr] = val
+            return merged.sort_index() if not merged.empty else merged
 
-        elif revenue_series.empty and not is_bank:
-            cafef_yearly = fetch_cafef_yearly_full(ticker, years=TARGET_YEARS)
-            if not cafef_yearly['revenue'].empty:
-                revenue_series = cafef_yearly['revenue']
-                st.info(f"ℹ️ Đã lấy 'Doanh thu thuần' cho {ticker} từ CafeF.")
+        equity_series = _merge_series(equity_series, cafef_data.get('equity', pd.Series(dtype=float)))
+        total_assets_series = _merge_series(total_assets_series, cafef_data.get('total_assets', pd.Series(dtype=float)))
+
+        if not is_bank:
+            revenue_series = _merge_series(revenue_series, cafef_data.get('revenue', pd.Series(dtype=float)))
+
+        net_profit_series = _merge_series(net_profit_series, cafef_data.get('net_profit', pd.Series(dtype=float)))
 
         if equity_series.empty:
             st.warning(f"⚠️ Không dò được 'Vốn chủ sở hữu' cho {ticker}.")
@@ -479,6 +452,43 @@ def execute_equity_research_pipeline(ticker):
 
         roe_series = _normalize_pct(roe_series)
         roa_series = _normalize_pct(roa_series)
+
+        # ── Back-fill EPS/BVPS/ROE/ROA cho năm thiếu từ ratio vnstock ──────
+        # vnstock ratio() thường chỉ trả về 2022-2025 dù đã set limit=10.
+        # Tính lại từ net_profit/equity/total_assets/shares đã merge từ CafeF.
+        if issue_share > 0:
+            shares_billion = issue_share / 1e9  # shares raw → tỷ CP
+            for yr in TARGET_YEARS:
+                has_np = yr in net_profit_series.index and not pd.isna(net_profit_series.get(yr, float('nan')))
+                has_eq = yr in equity_series.index and not pd.isna(equity_series.get(yr, float('nan')))
+                has_ta = yr in total_assets_series.index and not pd.isna(total_assets_series.get(yr, float('nan')))
+
+                if has_np and yr not in eps_series.index:
+                    np_b = net_profit_series[yr]   # tỷ đồng
+                    eps_calc = np_b * 1e9 / issue_share  # đồng/cp
+                    eps_series[yr] = eps_calc
+
+                if has_eq and yr not in bvps_series.index:
+                    eq_b = equity_series[yr]        # tỷ đồng
+                    bvps_calc = eq_b * 1e9 / issue_share
+                    bvps_series[yr] = bvps_calc
+
+                if has_np and has_eq and yr not in roe_series.index:
+                    eq_b = equity_series[yr]
+                    if eq_b and eq_b > 0:
+                        roe_calc = net_profit_series[yr] / eq_b * 100
+                        roe_series[yr] = roe_calc
+
+                if has_np and has_ta and yr not in roa_series.index:
+                    ta_b = total_assets_series[yr]
+                    if ta_b and ta_b > 0:
+                        roa_calc = net_profit_series[yr] / ta_b * 100
+                        roa_series[yr] = roa_calc
+
+            eps_series = eps_series.sort_index()
+            bvps_series = bvps_series.sort_index()
+            roe_series = roe_series.sort_index()
+            roa_series = roa_series.sort_index()
 
         market_cap = market_cap_direct if market_cap_direct > 0 else (
             current_price * issue_share if issue_share > 0 else 0.0)
