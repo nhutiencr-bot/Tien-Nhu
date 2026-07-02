@@ -25,11 +25,29 @@ from split_adjustment import audit_and_adjust_split, recompute_pe_pb_series
 from sector_wacc import estimate_wacc, wacc_scenarios, detect_sector
 
 SOURCE_FALLBACK_ORDER = ['VCI', 'KBS', 'DNSE']
-
-# Timeout (giây) cho mỗi future trong thread pool — tránh 1 API bị treo
-# kéo chậm toàn bộ pipeline. Nếu quá hạn, coi như fetch thất bại và dùng
-# giá trị default (DataFrame rỗng).
 TASK_TIMEOUT_SECONDS = 10
+
+# ─── TARGET_YEARS: Luôn tính động theo năm hiện tại ────────────────────────
+# Chỉ lấy 2021–2025 (bỏ 2018/2019/2020 khỏi bảng hiển thị)
+_THIS_YEAR = datetime.today().year
+TARGET_YEARS = set(range(2021, _THIS_YEAR))   # {2021, 2022, 2023, 2024, 2025}
+
+# ─── Ngân hàng — mở rộng (không hardcode chỉ 7 mã) ────────────────────────
+# Thêm đầy đủ các ngân hàng HOSE + HNX để is_bank detect đúng
+BANK_TICKERS = {
+    'VCB', 'BID', 'CTG', 'TCB', 'MBB', 'ACB', 'STB', 'VPB', 'HDB', 'TPB',
+    'MSB', 'OCB', 'VIB', 'SHB', 'EIB', 'LPB', 'SSB', 'NAB', 'ABB', 'BAB',
+    'BVB', 'KLB', 'PGB', 'VAB', 'NVB', 'SGB', 'NCB', 'VBB',
+}
+
+# ─── Bán lẻ / phân phối — keyword revenue riêng ────────────────────────────
+RETAIL_TICKERS = {
+    'MWG', 'FRT', 'DGW', 'PNJ', 'HAX', 'SVC', 'MCH', 'PET',
+    'PSD', 'HHS', 'HUT', 'AST', 'PTC',
+}
+
+# ─── BĐS cho thuê — doanh thu cho thuê ─────────────────────────────────────
+REALESTATE_TICKERS = {'VRE', 'NLG', 'DXG', 'KDH', 'PDR', 'CEO', 'BCM'}
 
 
 def normalize_to_billion_vnd(series):
@@ -83,13 +101,9 @@ def normalize_net_profit_with_anchor(net_profit_raw, equity_series, roe_series):
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def _resolve_source(ticker):
-    """
-    Dò nguồn dữ liệu khả dụng cho ticker (VCI -> KBS -> DNSE) và CACHE kết quả
-    trong 1 giờ. Lần fetch sau cho cùng ticker sẽ không phải probe lại từ đầu,
-    giúp tiết kiệm vài giây mỗi lần load.
-    """
+    """Dò nguồn dữ liệu khả dụng (VCI → KBS → DNSE), cache 1h."""
     last_error = None
-    test_end = datetime.today().strftime('%Y-%m-%d')
+    test_end   = datetime.today().strftime('%Y-%m-%d')
     test_start = (datetime.today() - timedelta(days=10)).strftime('%Y-%m-%d')
 
     for source in SOURCE_FALLBACK_ORDER:
@@ -110,7 +124,6 @@ def _resolve_source(ticker):
 
 
 def _build_engines_with_fallback(ticker):
-    """Dùng nguồn đã được cache (hoặc dò mới nếu chưa có) để dựng engines."""
     source_used = _resolve_source(ticker)
     q_engine = Quote(symbol=ticker, source=source_used)
     f_engine = Finance(symbol=ticker, source=source_used, period='year')
@@ -119,7 +132,6 @@ def _build_engines_with_fallback(ticker):
 
 
 def _safe_fetch(fn, default=None):
-    """Gọi 1 API call, trả về default nếu lỗi — dùng trong thread pool."""
     try:
         result = fn()
         return result if result is not None else (default if default is not None else pd.DataFrame())
@@ -128,7 +140,6 @@ def _safe_fetch(fn, default=None):
 
 
 def _fetch_balance_sheet(ticker, period='year'):
-    """Thử lần lượt các nguồn để lấy balance sheet."""
     for bs_source in SOURCE_FALLBACK_ORDER:
         try:
             f_bs = Finance(symbol=ticker, source=bs_source, period=period)
@@ -140,32 +151,167 @@ def _fetch_balance_sheet(ticker, period='year'):
     return pd.DataFrame()
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  TCBS FALLBACK — lấy dữ liệu 2021 bị thiếu từ TCBS public API
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _tcbs_fetch_year(ticker: str, year: int) -> dict:
+    """
+    Gọi TCBS public API lấy income + ratio cho 1 năm cụ thể.
+    Trả về dict: {revenue, net_profit, eps, bvps, roe, roa} — giá trị tỷ VNĐ / đ/cp.
+    Không raise — trả về {} nếu fail.
+    """
+    import requests, time as _time
+    headers = {'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json'}
+    base = f"https://apipubaws.tcbs.com.vn/tcanalysis/v1/finance/{ticker}"
+    result = {}
+
+    # ── Income statement ────────────────────────────────────────────────────
+    try:
+        r = requests.get(f"{base}/income-statement?yearly=1&page=0&size=10",
+                         headers=headers, timeout=10)
+        r.raise_for_status()
+        rows = r.json() if isinstance(r.json(), list) else r.json().get('data', [])
+        for row in rows:
+            if str(row.get('year') or row.get('fiscalYear') or '')[:4] != str(year):
+                continue
+            # Ngân hàng → netInterestIncome; thường → netRevenue/revenue
+            rev = (row.get('netInterestIncome') or row.get('netRevenue')
+                   or row.get('revenue') or row.get('salesRevenue'))
+            np_ = (row.get('postTaxProfit') or row.get('netProfit') or row.get('netIncome'))
+            eps = row.get('eps') or row.get('earningPerShare')
+            if rev  is not None: result['revenue']    = round(float(rev),  2)
+            if np_  is not None: result['net_profit'] = round(float(np_),  2)
+            if eps  is not None: result['eps']        = round(float(eps),  2)
+            break
+    except Exception:
+        pass
+
+    _time.sleep(0.15)
+
+    # ── Financial ratio ─────────────────────────────────────────────────────
+    try:
+        r = requests.get(f"{base}/financialratio?yearly=1&page=0&size=10",
+                         headers=headers, timeout=10)
+        r.raise_for_status()
+        rows = r.json() if isinstance(r.json(), list) else r.json().get('data', [])
+        for row in rows:
+            if str(row.get('year') or row.get('fiscalYear') or '')[:4] != str(year):
+                continue
+            bvps = row.get('bvps')
+            roe  = row.get('roe')
+            roa  = row.get('roa')
+            eps2 = row.get('eps')
+            if bvps is not None: result['bvps'] = round(float(bvps), 2)
+            if roe  is not None: result['roe']  = round(float(roe),  4)
+            if roa  is not None: result['roa']  = round(float(roa),  4)
+            if eps2 is not None and 'eps' not in result:
+                result['eps'] = round(float(eps2), 2)
+            break
+    except Exception:
+        pass
+
+    return result
+
+
+def _fill_missing_years(
+    ticker: str,
+    target_years: set,
+    revenue_s: pd.Series,
+    net_profit_s: pd.Series,
+    eps_s: pd.Series,
+    bvps_s: pd.Series,
+    roe_s: pd.Series,
+    roa_s: pd.Series,
+    equity_s: pd.Series,
+    total_assets_s: pd.Series,
+) -> tuple:
+    """
+    Với mỗi năm còn thiếu bất kỳ trường nào → gọi TCBS API để bù.
+    Sau đó tính ROE/ROA từ LNST / Vốn CSH / Tổng TS nếu vẫn thiếu.
+
+    Trả về: (revenue_s, net_profit_s, eps_s, bvps_s, roe_s, roa_s) đã fill.
+    """
+
+    def _missing(s: pd.Series, year: int) -> bool:
+        if s is None or s.empty: return True
+        val = s.get(year)
+        return val is None or (isinstance(val, float) and (pd.isna(val) or val == 0.0))
+
+    def _set(s: pd.Series, year: int, val) -> pd.Series:
+        if val is None: return s
+        if s is None or (hasattr(s, 'empty') and s.empty):
+            return pd.Series({year: val}, dtype=float)
+        s = s.copy()
+        s[year] = val
+        return s.sort_index()
+
+    for year in sorted(target_years):
+        needs = any(_missing(s, year) for s in
+                    [revenue_s, net_profit_s, eps_s, bvps_s, roe_s, roa_s])
+        if not needs:
+            continue
+
+        fetched = _tcbs_fetch_year(ticker, year)
+
+        if _missing(revenue_s,    year): revenue_s    = _set(revenue_s,    year, fetched.get('revenue'))
+        if _missing(net_profit_s, year): net_profit_s = _set(net_profit_s, year, fetched.get('net_profit'))
+        if _missing(eps_s,        year): eps_s        = _set(eps_s,        year, fetched.get('eps'))
+        if _missing(bvps_s,       year): bvps_s       = _set(bvps_s,       year, fetched.get('bvps'))
+        if _missing(roe_s,        year): roe_s        = _set(roe_s,        year, fetched.get('roe'))
+        if _missing(roa_s,        year): roa_s        = _set(roa_s,        year, fetched.get('roa'))
+
+        # Tính ROE/ROA từ dữ liệu hiện có nếu TCBS vẫn thiếu
+        np_val  = net_profit_s.get(year)  if not _missing(net_profit_s, year) else None
+        eq_val  = equity_s.get(year)      if (equity_s is not None and not equity_s.empty and equity_s.get(year)) else None
+        ta_val  = total_assets_s.get(year) if (total_assets_s is not None and not total_assets_s.empty and total_assets_s.get(year)) else None
+
+        if np_val and eq_val and eq_val > 0 and _missing(roe_s, year):
+            roe_calc = round(np_val / eq_val * 100, 2)
+            roe_s = _set(roe_s, year, roe_calc)
+
+        if np_val and ta_val and ta_val > 0 and _missing(roa_s, year):
+            roa_calc = round(np_val / ta_val * 100, 2)
+            roa_s = _set(roa_s, year, roa_calc)
+
+    return revenue_s, net_profit_s, eps_s, bvps_s, roe_s, roa_s
+
+
+def _filter_to_target_years(s: pd.Series, years: set) -> pd.Series:
+    """Lọc Series chỉ giữ các năm trong target (2021–2025, bỏ 2018/19/20)."""
+    if s is None or s.empty:
+        return s
+    keep = [y for y in s.index if y in years]
+    return s.loc[keep].sort_index() if keep else pd.Series(dtype=float)
+
+
 @st.cache_data(ttl=1800)
 def execute_equity_research_pipeline(ticker):
     try:
-        # ── 1. Chọn nguồn dữ liệu (đã cache theo ticker, xem _resolve_source) ──
+        # ── 1. Chọn nguồn dữ liệu ─────────────────────────────────────────
         q_engine, f_engine, c_engine, source_used = _build_engines_with_fallback(ticker)
 
-        end_date = datetime.today().strftime('%Y-%m-%d')
+        end_date   = datetime.today().strftime('%Y-%m-%d')
         start_date = (datetime.today() - timedelta(days=365 * 3)).strftime('%Y-%m-%d')
 
-        # ── 2. Tất cả API calls chạy SONG SONG (concurrent) ───────────────
-        # Bao gồm cả tin tức RSS (trước đây bị gọi tuần tự SAU thread pool,
-        # cộng dồn thêm 5-15s do urlopen timeout 15s đồng bộ). Giờ chạy
-        # chung 1 lượt với mọi API call khác.
+        is_bank       = ticker in BANK_TICKERS
+        is_retail     = ticker in RETAIL_TICKERS
+        is_realestate = ticker in REALESTATE_TICKERS
+
+        # ── 2. Tất cả API calls chạy SONG SONG ────────────────────────────
         tasks = {
-            "price": lambda: q_engine.history(start=start_date, end=end_date, interval='1D'),
-            "overview": lambda: c_engine.overview(),
-            "income_y": lambda: f_engine.income_statement(period='year'),
-            "cashflow_y": lambda: f_engine.cash_flow(period='year'),
-            "ratio_y": lambda: f_engine.ratio(period='year'),
-            "income_q": lambda: f_engine.income_statement(period='quarter'),
-            "ratio_q": lambda: f_engine.ratio(period='quarter'),
-            "balance_y": lambda: _fetch_balance_sheet(ticker, period='year'),
-            "balance_q": lambda: _fetch_balance_sheet(ticker, period='quarter'),
+            "price":        lambda: q_engine.history(start=start_date, end=end_date, interval='1D'),
+            "overview":     lambda: c_engine.overview(),
+            "income_y":     lambda: f_engine.income_statement(period='year'),
+            "cashflow_y":   lambda: f_engine.cash_flow(period='year'),
+            "ratio_y":      lambda: f_engine.ratio(period='year'),
+            "income_q":     lambda: f_engine.income_statement(period='quarter'),
+            "ratio_q":      lambda: f_engine.ratio(period='quarter'),
+            "balance_y":    lambda: _fetch_balance_sheet(ticker, period='year'),
+            "balance_q":    lambda: _fetch_balance_sheet(ticker, period='quarter'),
             "news_vnstock": lambda: c_engine.news(),
-            "news_rss": lambda: fetch_news_google_rss(ticker),
-            "reports": lambda: fetch_cafef_analysis_reports(ticker),
+            "news_rss":     lambda: fetch_news_google_rss(ticker),
+            "reports":      lambda: fetch_cafef_analysis_reports(ticker),
         }
 
         results = {}
@@ -183,23 +329,24 @@ def execute_equity_research_pipeline(ticker):
                         results[key] = []
                     elif key == "reports":
                         results[key] = {"reports": [], "is_ticker_specific": False,
-                                         "sources_used": ["CafeF"], "debug_log": ["Timeout/lỗi khi fetch."]}
+                                        "sources_used": ["CafeF"], "debug_log": ["Timeout/lỗi."]}
                     else:
                         results[key] = pd.DataFrame()
 
-        df_price = results.get("price", pd.DataFrame())
-        df_overview = results.get("overview", pd.DataFrame())
-        df_income = results.get("income_y", pd.DataFrame())
-        df_cashflow = results.get("cashflow_y", pd.DataFrame())
-        df_ratio = results.get("ratio_y", pd.DataFrame())
-        df_income_q = results.get("income_q", pd.DataFrame())
-        df_ratio_q = results.get("ratio_q", pd.DataFrame())
-        df_balance = results.get("balance_y", pd.DataFrame())
-        df_balance_q = results.get("balance_q", pd.DataFrame())
-        df_news_raw = results.get("news_vnstock", pd.DataFrame())
-        rss_news_raw = results.get("news_rss", [])
-        reports_pkg = results.get("reports", {"reports": [], "is_ticker_specific": False,
-                                               "sources_used": ["CafeF"], "debug_log": []})
+        df_price      = results.get("price",        pd.DataFrame())
+        df_overview   = results.get("overview",     pd.DataFrame())
+        df_income     = results.get("income_y",     pd.DataFrame())
+        df_cashflow   = results.get("cashflow_y",   pd.DataFrame())
+        df_ratio      = results.get("ratio_y",      pd.DataFrame())
+        df_income_q   = results.get("income_q",     pd.DataFrame())
+        df_ratio_q    = results.get("ratio_q",      pd.DataFrame())
+        df_balance    = results.get("balance_y",    pd.DataFrame())
+        df_balance_q  = results.get("balance_q",    pd.DataFrame())
+        df_news_raw   = results.get("news_vnstock", pd.DataFrame())
+        rss_news_raw  = results.get("news_rss",     [])
+        reports_pkg   = results.get("reports",      {
+            "reports": [], "is_ticker_specific": False,
+            "sources_used": ["CafeF"], "debug_log": []})
 
         # ── 3. Xử lý giá ──────────────────────────────────────────────────
         if df_price is None or df_price.empty:
@@ -210,39 +357,59 @@ def execute_equity_research_pipeline(ticker):
         for col in ['close', 'open', 'high', 'low']:
             df_price[f'{col}_vnd'] = df_price[col] * 1000
 
-        is_bank = ticker in ['VCB', 'BID', 'CTG', 'TCB', 'MBB', 'ACB', 'STB']
         current_price = float(df_price['close_vnd'].iloc[-1])
 
         # ── 4. Chuẩn hoá BCTC ─────────────────────────────────────────────
         fin5 = build_5y_financial_table(df_income, df_balance, df_ratio, ticker=ticker)
 
-        revenue_series = normalize_to_billion_vnd(fin5['revenue'])
-        equity_series = normalize_to_billion_vnd(fin5['equity'])
+        revenue_series      = normalize_to_billion_vnd(fin5['revenue'])
+        equity_series       = normalize_to_billion_vnd(fin5['equity'])
         total_assets_series = normalize_to_billion_vnd(fin5['total_assets'])
-        net_profit_series = normalize_net_profit_with_anchor(
+        net_profit_series   = normalize_net_profit_with_anchor(
             fin5['net_profit'], equity_series, fin5['roe'])
 
-        eps_series = fin5['eps']
-        bvps_series = fin5['bvps']
-        roe_series = fin5['roe']
-        roa_series = fin5['roa']
-        pe_series = fin5['pe']
-        pb_series = fin5['pb']
+        eps_series              = fin5['eps']
+        bvps_series             = fin5['bvps']
+        roe_series              = fin5['roe']
+        roa_series              = fin5['roa']
+        pe_series               = fin5['pe']
+        pb_series               = fin5['pb']
         outstanding_shares_series = fin5['outstanding_shares']
-        net_margin_series = fin5['net_margin']
-        asset_turnover_series = fin5['asset_turnover']
-        ev_ebitda_series = fin5.get('ev_ebitda', pd.Series(dtype=float))
-        p_cf_series = fin5.get('p_cf', pd.Series(dtype=float))
-        ps_series = fin5.get('ps', pd.Series(dtype=float))
-        dps_series = fin5.get('dps', pd.Series(dtype=float))
+        net_margin_series       = fin5['net_margin']
+        asset_turnover_series   = fin5['asset_turnover']
+        ev_ebitda_series        = fin5.get('ev_ebitda', pd.Series(dtype=float))
+        p_cf_series             = fin5.get('p_cf',      pd.Series(dtype=float))
+        ps_series               = fin5.get('ps',        pd.Series(dtype=float))
+        dps_series              = fin5.get('dps',       pd.Series(dtype=float))
 
-        # ── Bẫy 5B: Audit & khắc phục split-adjustment consistency ─────────
-        # Giá từ df_price (Quote.history()) đã được vnstock split-adjusted
-        # tự động cho TOÀN BỘ lịch sử, nhưng eps_series/bvps_series lấy từ
-        # BCTC gốc dùng số CP tại thời điểm công bố — nếu công ty có chia
-        # cổ phiếu/cổ tức CP trong giai đoạn phân tích, PE/PB history sẽ bị
-        # tính sai (mix 2 chuẩn số CP khác nhau). Audit + adjust TRƯỚC khi
-        # dùng eps_series/bvps_series cho bất kỳ so sánh cross-year nào.
+        # ── 4A. Lọc bỏ năm < 2021 (bỏ 2018/2019/2020 khỏi bảng hiển thị) ─
+        _all_series_to_filter = {
+            'revenue':      revenue_series,
+            'net_profit':   net_profit_series,
+            'equity':       equity_series,
+            'total_assets': total_assets_series,
+            'eps':          eps_series,
+            'bvps':         bvps_series,
+            'roe':          roe_series,
+            'roa':          roa_series,
+            'pe':           pe_series,
+            'pb':           pb_series,
+        }
+        for _k, _s in _all_series_to_filter.items():
+            _all_series_to_filter[_k] = _filter_to_target_years(_s, TARGET_YEARS)
+
+        revenue_series      = _all_series_to_filter['revenue']
+        net_profit_series   = _all_series_to_filter['net_profit']
+        equity_series       = _all_series_to_filter['equity']
+        total_assets_series = _all_series_to_filter['total_assets']
+        eps_series          = _all_series_to_filter['eps']
+        bvps_series         = _all_series_to_filter['bvps']
+        roe_series          = _all_series_to_filter['roe']
+        roa_series          = _all_series_to_filter['roa']
+        pe_series           = _all_series_to_filter['pe']
+        pb_series           = _all_series_to_filter['pb']
+
+        # ── 4B. Split adjustment ───────────────────────────────────────────
         split_audit = audit_and_adjust_split(
             eps_series=eps_series, bvps_series=bvps_series,
             net_profit_series=net_profit_series,
@@ -250,15 +417,12 @@ def execute_equity_research_pipeline(ticker):
             company_engine=c_engine)
 
         if split_audit['split_detected']:
-            eps_series = split_audit['eps_adjusted']
+            eps_series  = split_audit['eps_adjusted']
             bvps_series = split_audit['bvps_adjusted']
             if split_audit['shares_adjusted'] is not None:
                 outstanding_shares_series = split_audit['shares_adjusted']
             st.warning(f"⚠️ {ticker}: {split_audit['note']}")
 
-            # Tính lại PE/PB history dùng EPS/BVPS đã adjust + giá cuối năm
-            # (từ df_price, vốn đã split-adjusted sẵn) — thay thế pe_series/
-            # pb_series lấy thẳng từ ratio table (có thể vẫn dùng base cũ).
             try:
                 price_by_year = (
                     df_price.assign(_year=pd.to_datetime(df_price['time']).dt.year)
@@ -270,38 +434,27 @@ def execute_equity_research_pipeline(ticker):
                 if not pb_series_adj.empty:
                     pb_series = pb_series_adj
             except Exception:
-                pass  # giữ pe_series/pb_series gốc nếu tính lại thất bại
+                pass
 
-        # ── TARGET_YEARS: 5 năm tài chính đã hoàn tất gần nhất ─────────────
-        # (năm hiện tại thường chưa có BCTC kiểm toán đầy đủ nên không tính).
-        _this_year = datetime.today().year
-        TARGET_YEARS = set(range(_this_year - 5, _this_year))  # VD 2026 -> {2021..2025}
-
-        def _gapfill_series(series: pd.Series, patch: pd.Series, label: str):
-            """
-            ⚠️ TRƯỚC ĐÂY: fallback chỉ chạy khi CẢ series rỗng (`if s.empty`).
-            Đây chính là lý do 2021 luôn bị thiếu dù các năm khác đủ: vnstock
-            trả về 2022-2025 (series KHÔNG rỗng) nên fallback CafeF không bao
-            giờ được kích hoạt để bù riêng năm 2021.
-
-            Hàm này thay bằng backfill TỪNG NĂM còn thiếu trong TARGET_YEARS,
-            bất kể series đã có sẵn bao nhiêu năm khác. Dữ liệu gốc (vnstock)
-            luôn được ưu tiên giữ nguyên cho các năm đã có — chỉ điền phần
-            còn trống.
-            """
+        # ── 4C. GapFill từng năm còn thiếu (kể cả năm 2021) ─────────────
+        # CORE FIX: _gapfill_series thay thế logic cũ (chỉ fallback khi cả
+        # series rỗng). Giờ bù từng năm lẻ còn thiếu trong TARGET_YEARS,
+        # bất kể các năm khác đã có hay chưa.
+        def _gapfill_series(series: pd.Series, patch: pd.Series, label: str) -> pd.Series:
             if patch is None or patch.empty:
                 return series
-            missing_years = TARGET_YEARS - set(series.index)
+            missing_years = TARGET_YEARS - set(series.index if series is not None else [])
             patch_for_missing = patch[patch.index.isin(missing_years)]
             if patch_for_missing.empty:
                 return series
-            merged = pd.concat([series, patch_for_missing]).sort_index()
-            merged = merged[~merged.index.duplicated(keep='first')]  # ưu tiên dữ liệu gốc
-            st.info(f"ℹ️ Đã bù dữ liệu '{label}' năm {sorted(patch_for_missing.index)} "
-                    f"cho {ticker} từ CafeF (nguồn chính thiếu năm này).")
+            merged = pd.concat([series if series is not None else pd.Series(dtype=float),
+                                 patch_for_missing]).sort_index()
+            merged = merged[~merged.index.duplicated(keep='first')]
+            st.info(f"ℹ️ Bù '{label}' năm {sorted(patch_for_missing.index)} "
+                    f"cho {ticker} từ CafeF.")
             return merged
 
-        # Fallback equity
+        # Fallback equity từ (Tổng TS - Tổng nợ)
         if equity_series.empty and not total_assets_series.empty:
             total_liab_series = normalize_to_billion_vnd(find_row_series(
                 df_balance,
@@ -311,10 +464,9 @@ def execute_equity_research_pipeline(ticker):
                 common_years = total_assets_series.index.intersection(total_liab_series.index)
                 if len(common_years) > 0:
                     equity_series = (total_assets_series.loc[common_years]
-                                      - total_liab_series.loc[common_years])
+                                     - total_liab_series.loc[common_years])
 
-        # Fallback CafeF — bù CẢ series rỗng LẪN từng năm lẻ còn thiếu
-        # (VD 2021) trong TARGET_YEARS, kể cả khi phần còn lại đã đủ.
+        # CafeF fallback cho balance sheet
         needs_cafef_balance = (
             equity_series.empty or total_assets_series.empty or
             bool(TARGET_YEARS - set(equity_series.index)) or
@@ -322,29 +474,43 @@ def execute_equity_research_pipeline(ticker):
         )
         if needs_cafef_balance:
             cafef_data = fetch_cafef_balance_sheet_5y(ticker, years=sorted(TARGET_YEARS))
-            equity_series = _gapfill_series(equity_series, cafef_data['equity'], "Vốn chủ sở hữu")
+            equity_series       = _gapfill_series(equity_series,       cafef_data['equity'],       "Vốn chủ sở hữu")
             total_assets_series = _gapfill_series(total_assets_series, cafef_data['total_assets'], "Tổng tài sản")
 
-        # Fallback CafeF cho Doanh thu (khắc phục "P/S: Thiếu dữ liệu" khi nguồn
-        # chính (VCI/KBS/DNSE) không trả về dòng doanh thu HOẶC chỉ thiếu 1 vài
-        # năm lẻ — thường gặp với mã mới niêm yết hoặc năm cũ ngoài cửa sổ mặc
-        # định của API).
-        needs_cafef_revenue = (
-            not is_bank and (
+        # CafeF fallback cho revenue + net_profit (không áp cho ngân hàng)
+        if not is_bank:
+            needs_cafef_rev = (
                 revenue_series.empty or bool(TARGET_YEARS - set(revenue_series.index))
             )
-        )
-        if needs_cafef_revenue:
-            cafef_yearly = fetch_cafef_yearly_full(ticker, years=sorted(TARGET_YEARS))
-            revenue_series = _gapfill_series(revenue_series, cafef_yearly['revenue'], "Doanh thu thuần")
+            if needs_cafef_rev:
+                cafef_yearly = fetch_cafef_yearly_full(ticker, years=sorted(TARGET_YEARS))
+                revenue_series    = _gapfill_series(revenue_series,    cafef_yearly['revenue'],    "Doanh thu thuần")
+                net_profit_series = _gapfill_series(net_profit_series, cafef_yearly['net_profit'], "LNST")
+            elif bool(TARGET_YEARS - set(net_profit_series.index)):
+                cafef_yearly = fetch_cafef_yearly_full(ticker, years=sorted(TARGET_YEARS))
+                net_profit_series = _gapfill_series(net_profit_series, cafef_yearly['net_profit'], "LNST")
 
-        # Bù luôn net_profit nếu thiếu năm lẻ (dùng chung nguồn CafeF vừa cào ở trên
-        # nếu có; nếu chưa cào (ví dụ ngân hàng) thì bỏ qua — is_bank không dùng CafeF
-        # income vì cấu trúc BCTC ngân hàng khác, dòng "LNST" trên CafeF có thể lẫn nguồn).
-        if not is_bank and bool(TARGET_YEARS - set(net_profit_series.index)):
-            cafef_np = fetch_cafef_yearly_full(ticker, years=sorted(TARGET_YEARS))
-            net_profit_series = _gapfill_series(net_profit_series, cafef_np['net_profit'], "LNST")
+        # ── 4D. FILL NĂNG LƯỢNG: Dùng TCBS API bù toàn bộ các năm còn thiếu ──
+        # Đây là bước xử lý triệt để: với MỌI năm trong TARGET_YEARS mà vẫn
+        # thiếu bất kỳ trường nào (revenue/LNST/EPS/BVPS/ROE/ROA), gọi TCBS
+        # API để lấy về. TCBS phủ gần như toàn bộ mã 3 sàn từ 2020 trở đi.
+        # Đặc biệt xử lý đúng ngân hàng: TCBS trả về netInterestIncome thay
+        # vì revenue thông thường.
+        revenue_series, net_profit_series, eps_series, bvps_series, roe_series, roa_series = \
+            _fill_missing_years(
+                ticker=ticker,
+                target_years=TARGET_YEARS,
+                revenue_s=revenue_series,
+                net_profit_s=net_profit_series,
+                eps_s=eps_series,
+                bvps_s=bvps_series,
+                roe_s=roe_series,
+                roa_s=roa_series,
+                equity_s=equity_series,
+                total_assets_s=total_assets_series,
+            )
 
+        # Cảnh báo nếu vẫn còn thiếu sau 4 tầng fallback
         if equity_series.empty:
             st.warning(f"⚠️ Không dò được 'Vốn chủ sở hữu' cho {ticker}.")
         if total_assets_series.empty:
@@ -379,32 +545,13 @@ def execute_equity_research_pipeline(ticker):
             else:
                 issue_share = implied_from_cap
 
-        # ⚠️ LƯU Ý ĐƠN VỊ (Bẫy 2 / 2B): equity_series đang ở đơn vị TỶ ĐỒNG
-        # (xem normalize_to_billion_vnd ở trên), còn issue_share là SỐ CP
-        # THÔ (raw count, ví dụ 7,690,000,000 CP — không phải "tỷ CP").
-        # BVPS[đồng/cp] = VCSH[tỷ đồng] × 1e9 / issue_share[cp thô].
-        # Thiếu ×1e9 sẽ khiến BVPS lệch ~1e-9 lần → hiển thị 0đ và P/B
-        # nổ lên hàng tỷ lần (bug đã xảy ra trong bản trước — xem
-        # equity-research-vn/data_pitfalls.md Bẫy 2B để biết case tương tự).
-        BVPS_SANE_MIN, BVPS_SANE_MAX = 500.0, 1_000_000.0  # đồng/cp hợp lý cho CP VN
+        BVPS_SANE_MIN, BVPS_SANE_MAX = 500.0, 1_000_000.0
 
-        eps_latest = get_latest(eps_series, default=0.0)
+        eps_latest  = get_latest(eps_series,  default=0.0)
         bvps_latest = get_latest(bvps_series, default=0.0)
         if bvps_latest == 0.0 and issue_share > 0 and not equity_series.empty:
             bvps_latest = get_latest(equity_series, default=0.0) * 1e9 / issue_share
 
-        # ── Kiểm tra chéo BVPS (bẫy split/dividend-stock) ──────────────────
-        # BVPS thường lấy trực tiếp từ bảng ratio của nguồn dữ liệu (vnstock).
-        # Nếu số CP lưu hành trong bảng ratio đã cũ (trước 1 đợt chia CP/tăng
-        # vốn), BVPS sẽ bị lệch. Tự tính lại BVPS = Vốn CSH / Số CP hiện tại
-        # và so sánh — lệch > 5% thì ưu tiên số tự tính (mới hơn, nhất quán
-        # với current_price và market cap hiện tại).
-        #
-        # ⚠️ QUAN TRỌNG: chỉ chấp nhận bvps_recalc nếu bản thân nó nằm trong
-        # dải hợp lý (500 - 1,000,000 đ/cp). Nếu recalc ra một con số vô lý
-        # (ví dụ do issue_share bị lệch đơn vị/field sai) thì KHÔNG override
-        # — giữ bvps_latest gốc để tránh lặp lại bug BVPS≈0 → P/B nổ hàng
-        # tỷ lần đã từng xảy ra.
         bvps_mismatch_pct = None
         if bvps_latest > 0 and issue_share > 0 and not equity_series.empty:
             bvps_recalc = get_latest(equity_series, default=0.0) * 1e9 / issue_share
@@ -414,13 +561,8 @@ def execute_equity_research_pipeline(ticker):
                     if BVPS_SANE_MIN <= bvps_recalc <= BVPS_SANE_MAX:
                         bvps_latest = bvps_recalc
                     else:
-                        # bvps_recalc bất thường — không dùng, giữ bvps_latest
-                        # gốc và hạ cờ mismatch (không còn ý nghĩa để hiển thị).
                         bvps_mismatch_pct = None
 
-        # Sanity clamp cuối cùng: nếu bvps_latest (dù từ nguồn gốc hay recalc)
-        # vẫn nằm ngoài dải hợp lý, coi như thiếu dữ liệu (0.0) thay vì hiển
-        # thị BVPS/P-B vô lý ra dashboard.
         if bvps_latest > 0 and not (BVPS_SANE_MIN <= bvps_latest <= BVPS_SANE_MAX):
             bvps_latest = 0.0
 
@@ -435,15 +577,13 @@ def execute_equity_research_pipeline(ticker):
         market_cap = market_cap_direct if market_cap_direct > 0 else (
             current_price * issue_share if issue_share > 0 else 0.0)
 
-        # Sanity clamp P/B (phòng ngừa cuối, Bẫy 2B): P/B thực tế của CP VN
-        # hầu như luôn nằm trong 0-50x. Ngoài dải này gần chắc chắn là lỗi
-        # tính toán (đơn vị/field sai), không phải insight — hiện "—" trên
-        # UI (giá trị 0.0) thay vì một con số vô lý gây hiểu nhầm nghiêm trọng.
-        pb_raw = (current_price / bvps_latest) if bvps_latest > 0 else 0.0
+        pb_raw   = (current_price / bvps_latest) if bvps_latest > 0 else 0.0
         pb_final = pb_raw if 0.0 < pb_raw <= 50.0 else 0.0
 
         clean_metrics = {
             "is_bank": is_bank,
+            "is_retail": is_retail,
+            "is_realestate": is_realestate,
             "current_price": current_price,
             "bvps_mismatch_pct": bvps_mismatch_pct,
             "market_cap_billion": market_cap / 1e9,
@@ -453,55 +593,54 @@ def execute_equity_research_pipeline(ticker):
             "source_used": source_used,
         }
 
-        # Bổ sung dữ liệu cho Multiples Mở Rộng (phần không phụ thuộc cfo_series)
-        revenue_latest = get_latest(revenue_series, default=0.0)  # tỷ VNĐ
-
+        revenue_latest = get_latest(revenue_series, default=0.0)
         da_series = normalize_to_billion_vnd(find_row_series(
             df_cashflow,
             ['khấu hao tài sản cố định', 'khấu hao và phân bổ', 'depreciation and amortization']))
         da_latest = get_latest(da_series, default=0.0) if not da_series.empty else 0.0
 
-        # ── 6. Bảng KQKD theo Năm ─────────────────────────────────────────
+        # ── 6. Bảng KQKD theo Năm (chỉ 2021–2025) ────────────────────────
         years_available = sorted(
             set(revenue_series.index) | set(net_profit_series.index) |
-            set(equity_series.index) | set(total_assets_series.index))
+            set(equity_series.index)  | set(total_assets_series.index))
+        # Chỉ giữ năm trong TARGET_YEARS
+        years_available = [y for y in years_available if y in TARGET_YEARS]
 
         df_5y_table = pd.DataFrame({'Năm': years_available})
         df_5y_table['Doanh thu thuần (tỷ)'] = df_5y_table['Năm'].map(revenue_series)
-        df_5y_table['LNST (tỷ)'] = df_5y_table['Năm'].map(net_profit_series)
-        df_5y_table['Vốn CSH (tỷ)'] = df_5y_table['Năm'].map(equity_series)
-        df_5y_table['Tổng tài sản (tỷ)'] = df_5y_table['Năm'].map(total_assets_series)
-        df_5y_table['EPS (đ)'] = df_5y_table['Năm'].map(eps_series)
-        df_5y_table['BVPS (đ)'] = df_5y_table['Năm'].map(bvps_series)
+        df_5y_table['LNST (tỷ)']            = df_5y_table['Năm'].map(net_profit_series)
+        df_5y_table['Vốn CSH (tỷ)']         = df_5y_table['Năm'].map(equity_series)
+        df_5y_table['Tổng tài sản (tỷ)']    = df_5y_table['Năm'].map(total_assets_series)
+        df_5y_table['EPS (đ)']              = df_5y_table['Năm'].map(eps_series)
+        df_5y_table['BVPS (đ)']             = df_5y_table['Năm'].map(bvps_series)
         df_5y_table['ROE (%)'] = df_5y_table['Năm'].map(lambda y: roe_series.get(y, None))
         df_5y_table['ROA (%)'] = df_5y_table['Năm'].map(lambda y: roa_series.get(y, None))
 
-        revenue_cagr = cagr(get_latest_n_years(revenue_series, 5))
+        revenue_cagr    = cagr(get_latest_n_years(revenue_series,    5))
         net_profit_cagr = cagr(get_latest_n_years(net_profit_series, 5))
 
         fundamentals_summary = {
-            "revenue_cagr_pct": revenue_cagr * 100 if revenue_cagr is not None else None,
-            "net_profit_cagr_pct": net_profit_cagr * 100 if net_profit_cagr is not None else None,
-            "eps_latest": eps_latest,
-            "bvps_latest": bvps_latest,
-            "roe_latest": get_latest(roe_series, default=None),
-            "roa_latest": get_latest(roa_series, default=None),
+            "revenue_cagr_pct":     revenue_cagr    * 100 if revenue_cagr    is not None else None,
+            "net_profit_cagr_pct":  net_profit_cagr * 100 if net_profit_cagr is not None else None,
+            "eps_latest":   eps_latest,
+            "bvps_latest":  bvps_latest,
+            "roe_latest":   get_latest(roe_series, default=None),
+            "roa_latest":   get_latest(roa_series, default=None),
         }
 
-        # ── 7. Bảng KQKD theo Quý ─────────────────────────────────────────
+        # ── 7. Bảng theo Quý ──────────────────────────────────────────────
         df_quarter_table = pd.DataFrame()
         try:
             fin_q = build_financial_table(df_income_q, df_balance_q, df_ratio_q,
-                                           ticker=ticker, period='quarter')
-
-            rev_q = normalize_to_billion_vnd(fin_q['revenue'])
-            eq_q = normalize_to_billion_vnd(fin_q['equity'])
-            ta_q = normalize_to_billion_vnd(fin_q['total_assets'])
-            np_q = normalize_net_profit_with_anchor(fin_q['net_profit'], eq_q, fin_q['roe'])
-            eps_q = fin_q['eps']
+                                          ticker=ticker, period='quarter')
+            rev_q  = normalize_to_billion_vnd(fin_q['revenue'])
+            eq_q   = normalize_to_billion_vnd(fin_q['equity'])
+            ta_q   = normalize_to_billion_vnd(fin_q['total_assets'])
+            np_q   = normalize_net_profit_with_anchor(fin_q['net_profit'], eq_q, fin_q['roe'])
+            eps_q  = fin_q['eps']
             bvps_q = fin_q['bvps']
-            roe_q = _normalize_pct(fin_q['roe'])
-            roa_q = _normalize_pct(fin_q['roa'])
+            roe_q  = _normalize_pct(fin_q['roe'])
+            roa_q  = _normalize_pct(fin_q['roa'])
 
             quarters = sorted(
                 set(rev_q.index) | set(np_q.index) | set(eq_q.index) | set(ta_q.index),
@@ -511,13 +650,13 @@ def execute_equity_research_pipeline(ticker):
             df_quarter_table['Quý'] = df_quarter_table['_p'].apply(
                 lambda c: f"Q{str(c).split('-Q')[1]}/{str(c).split('-Q')[0]}")
             df_quarter_table['Doanh thu thuần (tỷ)'] = df_quarter_table['_p'].map(rev_q)
-            df_quarter_table['LNST (tỷ)'] = df_quarter_table['_p'].map(np_q)
-            df_quarter_table['Vốn CSH (tỷ)'] = df_quarter_table['_p'].map(eq_q)
-            df_quarter_table['Tổng tài sản (tỷ)'] = df_quarter_table['_p'].map(ta_q)
-            df_quarter_table['EPS (đ)'] = df_quarter_table['_p'].map(eps_q)
+            df_quarter_table['LNST (tỷ)']            = df_quarter_table['_p'].map(np_q)
+            df_quarter_table['Vốn CSH (tỷ)']         = df_quarter_table['_p'].map(eq_q)
+            df_quarter_table['Tổng tài sản (tỷ)']    = df_quarter_table['_p'].map(ta_q)
+            df_quarter_table['EPS (đ)']  = df_quarter_table['_p'].map(eps_q)
             df_quarter_table['BVPS (đ)'] = df_quarter_table['_p'].map(bvps_q)
-            df_quarter_table['ROE (%)'] = df_quarter_table['_p'].map(lambda y: roe_q.get(y, None))
-            df_quarter_table['ROA (%)'] = df_quarter_table['_p'].map(lambda y: roa_q.get(y, None))
+            df_quarter_table['ROE (%)']  = df_quarter_table['_p'].map(lambda y: roe_q.get(y, None))
+            df_quarter_table['ROA (%)']  = df_quarter_table['_p'].map(lambda y: roa_q.get(y, None))
             df_quarter_table = df_quarter_table.drop(columns=['_p'])
         except Exception as e:
             st.warning(f"Không dựng được bảng theo Quý: {e}")
@@ -527,9 +666,6 @@ def execute_equity_research_pipeline(ticker):
             revenue_series, net_profit_series, total_assets_series, equity_series)
 
         # ── 9. DCF / Graham / DDM ──────────────────────────────────────────
-        # Mở rộng từ khóa CFO: nguồn dữ liệu (VCI/TCBS/KBS/MBS) đặt tên dòng
-        # này khác nhau — thiếu 1 biến thể là CFO=0 → "P/CF: Thiếu dữ liệu"
-        # dù công ty hoàn toàn có dữ liệu dòng tiền.
         cfo_series = normalize_to_billion_vnd(find_row_series(
             df_cashflow,
             ['lưu chuyển tiền thuần từ hoạt động kinh doanh',
@@ -545,117 +681,89 @@ def execute_equity_research_pipeline(ticker):
              'capital expenditure', 'mua sắm tài sản cố định',
              'mua sắm xây dựng tài sản cố định', 'tiền chi mua sắm tscđ']))
 
-        # ── 9b. Bổ sung Multiples Mở Rộng: P/S, P/CF, EV/EBITDA ────────────
         cfo_latest = get_latest(cfo_series, default=0.0) if not cfo_series.empty else 0.0
 
-        # EBITDA ≈ EBIT + Khấu hao & phân bổ, với EBIT = Lợi nhuận trước thuế + Chi phí lãi vay
-        # (theo đúng công thức chuẩn: ebitda = ebit + D&A, ebit = pretax + lãi vay)
-        #
-        # ⚠️ "Lợi nhuận trước thuế" và "Chi phí lãi vay" LUÔN có trong KQKD
-        # (df_income) theo chuẩn mực kế toán VN ("Tổng lợi nhuận kế toán
-        # trước thuế" là dòng bắt buộc), nhưng KHÔNG PHẢI lúc nào cũng được
-        # lặp lại như dòng điều chỉnh trong LCTT gián tiếp (df_cashflow) tùy
-        # nguồn dữ liệu. Trước đây chỉ tìm trong df_cashflow → nhiều mã ra
-        # ebitda_latest=0 dù dữ liệu đầy đủ trong KQKD. Nay tìm cả 2 nguồn,
-        # ưu tiên df_income cho pretax/lãi vay (đáng tin cậy hơn vì là dòng
-        # gốc, không phải dòng điều chỉnh phi tiền mặt).
         def _first_nonempty(*series_list):
             for s in series_list:
                 if s is not None and not s.empty:
                     return s
             return pd.Series(dtype=float)
 
-        pretax_keywords = ['lợi nhuận trước thuế', 'tổng lợi nhuận kế toán trước thuế',
+        pretax_keywords  = ['lợi nhuận trước thuế', 'tổng lợi nhuận kế toán trước thuế',
                             'lợi nhuận trước thuế tndn', 'profit before tax', 'income before tax']
         interest_keywords = ['chi phí lãi vay', 'lãi vay đã trả', 'chi phí lãi vay đã trả',
                               'trong đó: chi phí lãi vay', 'interest expense', 'interest paid']
         da_keywords = ['khấu hao tài sản cố định', 'khấu hao và phân bổ', 'khấu hao tscđ',
-                        'khấu hao và hao mòn tài sản cố định', 'hao mòn tài sản cố định bđs',
-                        'chi phí khấu hao', 'depreciation and amortization',
-                        'depreciation & amortisation', 'depreciation']
+                       'khấu hao và hao mòn tài sản cố định', 'hao mòn tài sản cố định bđs',
+                       'chi phí khấu hao', 'depreciation and amortization',
+                       'depreciation & amortisation', 'depreciation']
 
-        pretax_profit_series = normalize_to_billion_vnd(_first_nonempty(
-            find_row_series(df_income, pretax_keywords),
-            find_row_series(df_cashflow, pretax_keywords),
-        ))
+        pretax_profit_series    = normalize_to_billion_vnd(_first_nonempty(
+            find_row_series(df_income,   pretax_keywords),
+            find_row_series(df_cashflow, pretax_keywords)))
         interest_expense_series = normalize_to_billion_vnd(_first_nonempty(
-            find_row_series(df_income, interest_keywords),
-            find_row_series(df_cashflow, interest_keywords),
-        ))
+            find_row_series(df_income,   interest_keywords),
+            find_row_series(df_cashflow, interest_keywords)))
         da_series_2 = normalize_to_billion_vnd(_first_nonempty(
             find_row_series(df_cashflow, da_keywords),
-            find_row_series(df_income, da_keywords),
-        ))
-        # Ưu tiên da_series đã tính trước đó (mục 5); nếu rỗng thì dùng biến thể mở rộng
+            find_row_series(df_income,   da_keywords)))
+
         da_latest_ebitda = da_latest if da_latest else (
             get_latest(da_series_2, default=0.0) if not da_series_2.empty else 0.0)
-
-        pretax_latest = get_latest(pretax_profit_series, default=0.0) if not pretax_profit_series.empty else 0.0
+        pretax_latest  = get_latest(pretax_profit_series,    default=0.0) if not pretax_profit_series.empty    else 0.0
         interest_latest = get_latest(interest_expense_series, default=0.0) if not interest_expense_series.empty else 0.0
 
-        # Ngân hàng: cấu trúc BCTC hoàn toàn khác (không có "chi phí lãi vay" dạng
-        # điều chỉnh phi tiền mặt, "doanh thu"/EBITDA không có ý nghĩa kinh tế) →
-        # loại trừ EV/EBITDA và P/S cho nhóm ngân hàng, tránh số liệu sai lệch.
         if is_bank:
-            ebitda_latest = 0.0
+            ebitda_latest  = 0.0
             revenue_latest = 0.0
         else:
             ebitda_latest = 0.0
             if pretax_latest:
                 ebitda_latest = abs(pretax_latest) + abs(interest_latest) + abs(da_latest_ebitda)
             elif da_latest_ebitda and not net_profit_series.empty:
-                # Fallback: LNST + D&A (thiếu lãi vay/thuế, chỉ là ước tính thô)
                 ebitda_latest = abs(get_latest(net_profit_series, default=0.0)) + abs(da_latest_ebitda)
 
-        # Nợ vay ròng = (Vay ngắn hạn + Vay dài hạn) - Tiền và tương đương tiền
         short_debt_series = normalize_to_billion_vnd(find_row_series(
-            df_balance,
-            ['vay và nợ thuê tài chính ngắn hạn', 'vay ngắn hạn',
-             'vay và nợ thuê tài chính ngắn hạn (*)', 'short-term borrowings',
-             'short-term debt']))
-        long_debt_series = normalize_to_billion_vnd(find_row_series(
-            df_balance,
-            ['vay và nợ thuê tài chính dài hạn', 'vay dài hạn',
-             'vay và nợ thuê tài chính dài hạn (*)', 'long-term borrowings',
-             'long-term debt']))
-        cash_series = normalize_to_billion_vnd(find_row_series(
-            df_balance,
-            ['tiền và các khoản tương đương tiền', 'tiền và tương đương tiền',
-             'tiền mặt và các khoản tương đương tiền', 'cash and cash equivalents']))
+            df_balance, ['vay và nợ thuê tài chính ngắn hạn', 'vay ngắn hạn',
+                         'short-term borrowings', 'short-term debt']))
+        long_debt_series  = normalize_to_billion_vnd(find_row_series(
+            df_balance, ['vay và nợ thuê tài chính dài hạn', 'vay dài hạn',
+                         'long-term borrowings', 'long-term debt']))
+        cash_series       = normalize_to_billion_vnd(find_row_series(
+            df_balance, ['tiền và các khoản tương đương tiền', 'tiền và tương đương tiền',
+                         'cash and cash equivalents']))
 
         short_debt_latest = get_latest(short_debt_series, default=0.0) if not short_debt_series.empty else 0.0
-        long_debt_latest = get_latest(long_debt_series, default=0.0) if not long_debt_series.empty else 0.0
-        cash_latest = get_latest(cash_series, default=0.0) if not cash_series.empty else 0.0
-        net_debt_latest = (short_debt_latest + long_debt_latest) - cash_latest
+        long_debt_latest  = get_latest(long_debt_series,  default=0.0) if not long_debt_series.empty  else 0.0
+        cash_latest_val   = get_latest(cash_series,       default=0.0) if not cash_series.empty       else 0.0
+        net_debt_latest   = (short_debt_latest + long_debt_latest) - cash_latest_val
 
         clean_metrics.update({
-            "revenue_latest_billion": revenue_latest,
-            "cfo_latest_billion": cfo_latest,
-            "ebitda_latest_billion": ebitda_latest,
-            "net_debt_billion": net_debt_latest,
-            "excl_extended_multiples": is_bank,  # cờ báo cho UI: ẩn/ghi chú P/S, EV/EBITDA
+            "revenue_latest_billion":  revenue_latest,
+            "cfo_latest_billion":      cfo_latest,
+            "ebitda_latest_billion":   ebitda_latest,
+            "net_debt_billion":        net_debt_latest,
+            "excl_extended_multiples": is_bank,
         })
 
         latest_fcff = None
         if not cfo_series.empty:
-            cfo_l = get_latest(cfo_series, default=None)
-            capex_l = get_latest(capex_series, default=0.0) if not capex_series.empty else 0.0
+            cfo_l    = get_latest(cfo_series,    default=None)
+            capex_l  = get_latest(capex_series,  default=0.0) if not capex_series.empty else 0.0
             if cfo_l is not None:
                 latest_fcff = (cfo_l - abs(capex_l)) * 1e9
 
         dcf_results = reverse_g = None
-        # WACC theo ngành + beta cụ thể (thay vì 10.5% cố định cho mọi mã —
-        # bug cũ khiến Ngân hàng/Bán lẻ/Công nghệ (WACC thật 8-11%) và
-        # BĐS/Hàng không (WACC thật 11-13%) đều bị định giá DCF sai lệch).
         industry_text = ""
         if not df_overview.empty:
             for col in ['industry', 'icb_name3', 'icb_name4', 'company_type']:
                 if col in df_overview.columns and pd.notna(df_overview[col].iloc[0]):
                     industry_text = str(df_overview[col].iloc[0])
                     break
+
         sector_detected = detect_sector(ticker, industry_text)
-        wacc_base = estimate_wacc(ticker, industry_text)
-        dcf_scenarios = wacc_scenarios(wacc_base)
+        wacc_base       = estimate_wacc(ticker, industry_text)
+        dcf_scenarios   = wacc_scenarios(wacc_base)
 
         if latest_fcff and latest_fcff > 0 and issue_share > 0:
             dcf_results = dcf_fcff_scenarios(
@@ -665,15 +773,11 @@ def execute_equity_research_pipeline(ticker):
                 current_price=current_price, shares_outstanding=issue_share,
                 latest_fcff=latest_fcff, wacc=wacc_base, net_debt=0.0)
 
-        graham_value = graham_number(eps_latest, bvps_latest) if eps_latest > 0 and bvps_latest > 0 else None
+        graham_value = graham_number(eps_latest, bvps_latest) \
+            if eps_latest > 0 and bvps_latest > 0 else None
 
-        # ── DDM (Gordon Growth) ─────────────────────────────────────────
-        # Chỉ áp dụng cho công ty trả cổ tức tiền mặt đều (dps_latest > 0).
-        # required_return dùng gần đúng bằng cost of equity ~ wacc_base
-        # (WACC theo ngành đã tính ở trên); g dùng kịch bản "Cơ sở" của
-        # cùng bảng wacc_scenarios để nhất quán với giả định DCF.
-        dps_latest = get_latest(dps_series, default=0.0) if not dps_series.empty else 0.0
-        ddm_required_return = wacc_base + 0.01  # cost of equity thường > WACC (có nợ giá rẻ hơn VCSH)
+        dps_latest        = get_latest(dps_series, default=0.0) if not dps_series.empty else 0.0
+        ddm_required_return = wacc_base + 0.01
         ddm_g = dcf_scenarios.get('Cơ sở', {}).get('g', 0.03) if dcf_scenarios else 0.03
         ddm_value = (ddm_gordon(dps_latest, required_return=ddm_required_return, g=ddm_g)
                      if dps_latest > 0 else None)
@@ -689,19 +793,20 @@ def execute_equity_research_pipeline(ticker):
             ps_series=ps_series, revenue_latest=revenue_latest,
             shares_outstanding=issue_share)
 
-        valuation_summary = summarize_valuation(valuation_methods, current_price) if valuation_methods else None
+        valuation_summary = summarize_valuation(valuation_methods, current_price) \
+            if valuation_methods else None
 
         valuation_package = {
-            "methods": valuation_methods,
-            "summary": valuation_summary,
-            "dcf_scenarios": dcf_results,
+            "methods":          valuation_methods,
+            "summary":          valuation_summary,
+            "dcf_scenarios":    dcf_results,
             "reverse_dcf_g_pct": reverse_g * 100 if reverse_g is not None else None,
-            "graham_value": graham_value,
-            "ddm_value": ddm_value,
-            "pe_series": pe_series,
-            "pb_series": pb_series,
-            "sector_detected": sector_detected,
-            "wacc_base_pct": wacc_base * 100,
+            "graham_value":     graham_value,
+            "ddm_value":        ddm_value,
+            "pe_series":        pe_series,
+            "pb_series":        pb_series,
+            "sector_detected":  sector_detected,
+            "wacc_base_pct":    wacc_base * 100,
         }
 
         # ── 10. Volume + Technical ─────────────────────────────────────────
@@ -712,54 +817,48 @@ def execute_equity_research_pipeline(ticker):
         df_price['MA20'] = df_price['close_vnd'].rolling(window=20).mean()
         df_price['MA50'] = df_price['close_vnd'].rolling(window=50).mean()
 
-        # RSI(14) — chỉ báo động lượng thật, tính từ chuỗi giá đóng cửa
-        delta = df_price['close_vnd'].diff()
-        gain = delta.clip(lower=0)
-        loss = -delta.clip(upper=0)
+        delta    = df_price['close_vnd'].diff()
+        gain     = delta.clip(lower=0)
+        loss     = -delta.clip(upper=0)
         avg_gain = gain.rolling(window=14).mean()
         avg_loss = loss.rolling(window=14).mean()
-        rs = avg_gain / avg_loss.replace(0, float('nan'))
+        rs       = avg_gain / avg_loss.replace(0, float('nan'))
         df_price['RSI14'] = 100 - (100 / (1 + rs))
         df_price['RSI14'] = df_price['RSI14'].fillna(50.0)
 
-        latest_vol = float(df_price['volume'].iloc[-1])
-        avg_vol_20d = float(df_price['volume_ma20'].iloc[-1]) if not pd.isna(df_price['volume_ma20'].iloc[-1]) else 0.0
+        latest_vol   = float(df_price['volume'].iloc[-1])
+        avg_vol_20d  = float(df_price['volume_ma20'].iloc[-1]) \
+            if not pd.isna(df_price['volume_ma20'].iloc[-1]) else 0.0
         vol_vs_avg_pct = ((latest_vol / avg_vol_20d - 1) * 100) if avg_vol_20d > 0 else 0.0
+        rsi_latest   = float(df_price['RSI14'].iloc[-1]) \
+            if not pd.isna(df_price['RSI14'].iloc[-1]) else 50.0
+        ma50_latest  = df_price['MA50'].iloc[-1]
 
-        rsi_latest = float(df_price['RSI14'].iloc[-1]) if not pd.isna(df_price['RSI14'].iloc[-1]) else 50.0
-        ma50_latest = df_price['MA50'].iloc[-1]
-
-        if rsi_latest >= 70:
-            rsi_signal = "🔴 QUÁ MUA (Overbought)"
-        elif rsi_latest <= 30:
-            rsi_signal = "🟢 QUÁ BÁN (Oversold)"
-        else:
-            rsi_signal = "⚖️ TRUNG TÍNH"
+        rsi_signal = ("🔴 QUÁ MUA (Overbought)" if rsi_latest >= 70 else
+                      "🟢 QUÁ BÁN (Oversold)"   if rsi_latest <= 30 else
+                      "⚖️ TRUNG TÍNH")
 
         technical_summary = {
-            "latest_volume": latest_vol,
-            "avg_volume_20d": avg_vol_20d,
+            "latest_volume":     latest_vol,
+            "avg_volume_20d":    avg_vol_20d,
             "volume_vs_avg_pct": vol_vs_avg_pct,
-            "ma20": df_price['MA20'].iloc[-1],
-            "ma50": ma50_latest,
-            "rsi14": rsi_latest,
-            "rsi_signal": rsi_signal,
-            "oil_correlation": 0.74 if ticker in ['BSR', 'OIL', 'PLX', 'PVD', 'PVS', 'GAS'] else 0.0,
-            "trend_signal": "KHẢ QUAN (Uptrend)" if current_price > df_price['MA20'].iloc[-1] else "RỦI RO (Downtrend)",
+            "ma20":              df_price['MA20'].iloc[-1],
+            "ma50":              ma50_latest,
+            "rsi14":             rsi_latest,
+            "rsi_signal":        rsi_signal,
+            "oil_correlation":   0.74 if ticker in ['BSR', 'OIL', 'PLX', 'PVD', 'PVS', 'GAS'] else 0.0,
+            "trend_signal":      ("KHẢ QUAN (Uptrend)" if current_price > df_price['MA20'].iloc[-1]
+                                  else "RỦI RO (Downtrend)"),
         }
 
         # ── 11. Tin tức ────────────────────────────────────────────────────
-        # RSS và vnstock news đã được fetch SONG SONG trong thread pool ở
-        # bước 2 (results["news_rss"] / results["news_vnstock"]) — không gọi
-        # network lần nữa ở đây. (Trước đây có 1 lệnh gọi `_safe_call(...)`
-        # bị lỗi NameError vì hàm đó không tồn tại trong file — đã xoá.)
         vnstock_news = []
         if df_news_raw is not None and not df_news_raw.empty:
             for _, row in df_news_raw.head(10).iterrows():
                 vnstock_news.append({
-                    "title": row.get('news_title', ''),
-                    "source": row.get('news_source', 'vnstock'),
-                    "url": row.get('news_url', '#'),
+                    "title":    row.get('news_title',  ''),
+                    "source":   row.get('news_source', 'vnstock'),
+                    "url":      row.get('news_url',    '#'),
                     "pub_date": "—",
                 })
 
