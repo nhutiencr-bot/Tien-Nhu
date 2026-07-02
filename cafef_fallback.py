@@ -1,5 +1,6 @@
 import re
 import time
+import unicodedata
 import pandas as pd
 import requests
 import concurrent.futures
@@ -59,6 +60,18 @@ def _extract_row_values(html_text: str, row_label_pattern: str):
     plain_text = re.sub(r'<[^>]+>', ' ', html_text)
     plain_text = re.sub(r'&nbsp;', ' ', plain_text)
     plain_text = re.sub(r'\s+', ' ', plain_text)
+    # ⚠️ CHUẨN HOÁ UNICODE (NFC): tiếng Việt có dấu có thể được mã hoá theo 2
+    # dạng byte KHÁC NHAU dù hiển thị GIỐNG HỆT nhau — dạng dựng sẵn NFC
+    # ("ệ" = 1 code point) hoặc dạng tổ hợp NFD ("ệ" = "package sẵn" gồm "e"
+    # + 2 dấu kết hợp riêng). Nếu HTML nguồn dùng NFD trong khi regex pattern
+    # viết bằng NFC (mặc định khi gõ trong editor), regex sẽ KHÔNG khớp dù
+    # mắt thường nhìn thấy chữ giống hệt — lỗi ẩn, rất khó phát hiện khi debug
+    # bằng mắt. Đây nhiều khả năng là nguyên nhân thực sự khiến việc mở rộng
+    # danh sách từ khoá "Lợi nhuận sau thuế"/"Doanh thu" trước đó vẫn không ăn
+    # thua cho 1 số mã/năm cụ thể — chuẩn hoá CẢ text nguồn LẪN pattern về
+    # cùng 1 dạng (NFC) trước khi so khớp để loại bỏ hẳn lớp lỗi này.
+    plain_text = unicodedata.normalize('NFC', plain_text)
+    row_label_pattern = unicodedata.normalize('NFC', row_label_pattern)
     pattern = re.compile(row_label_pattern + r'\s*((?:-?[\d.,]+\s*){1,40})', re.IGNORECASE)
     match = pattern.search(plain_text)
     if not match:
