@@ -85,6 +85,12 @@ def _fetch_one_period(ticker: str, year: int, quarter: int, slug: str):
     out = {}
     bsheet_url = f"https://s.cafef.vn/bao-cao-tai-chinh/{ticker.upper()}/bsheet/{year}/{quarter}/0/0/{slug}.chn"
     incsta_url = f"https://s.cafef.vn/bao-cao-tai-chinh/{ticker.upper()}/incsta/{year}/{quarter}/0/0/{slug}.chn"
+    # ⚠️ MỚI: trang lưu chuyển tiền tệ — cần cho FCFF = CFO - CapEx của DCF.
+    # Trước đây pipeline KHÔNG có nguồn dự phòng nào cho CFO/CapEx khi
+    # vnstock không trả về (chỉ Doanh thu/LNST/Vốn CSH/Tổng tài sản có
+    # fallback CafeF) → DCF luôn báo "thiếu dữ liệu dòng tiền" cho những
+    # mã/kỳ mà vnstock thiếu báo cáo lưu chuyển tiền tệ.
+    cashflow_url = f"https://s.cafef.vn/bao-cao-tai-chinh/{ticker.upper()}/cashflow/{year}/{quarter}/0/0/{slug}.chn"
 
     def _get(url):
         try:
@@ -93,13 +99,14 @@ def _fetch_one_period(ticker: str, year: int, quarter: int, slug: str):
         except Exception:
             return ""
 
-    # Bắn 2 request (bsheet + incsta) CÙNG LÚC thay vì lần lượt -> giảm ~một nửa
-    # thời gian chờ cho mỗi kỳ báo cáo.
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pair_executor:
+    # Bắn 3 request (bsheet + incsta + cashflow) CÙNG LÚC.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pair_executor:
         fut_bs = pair_executor.submit(_get, bsheet_url)
         fut_is = pair_executor.submit(_get, incsta_url)
+        fut_cf = pair_executor.submit(_get, cashflow_url)
         text_bs = fut_bs.result()
         text_is = fut_is.result()
+        text_cf = fut_cf.result()
 
     if text_bs:
         equity_vals = (_extract_row_values(text_bs, r'D\.\s*VỐN CHỦ SỞ HỮU') or
@@ -146,6 +153,25 @@ def _fetch_one_period(ticker: str, year: int, quarter: int, slug: str):
             out['revenue'] = revenue_vals[-1] / 1e9
         if profit_vals and profit_vals[-1] not in (None, 0.0, 0):
             out['net_profit'] = profit_vals[-1] / 1e9
+
+    if text_cf:
+        cfo_vals = (_extract_row_values(text_cf, r'Lưu chuyển tiền thuần từ hoạt động kinh doanh') or
+                    _extract_row_values(text_cf, r'Lưu chuyển tiền thuần từ hoạt động kinh doanh \(200\)') or
+                    _extract_row_values(text_cf, r'I\.\s*Lưu chuyển tiền từ hoạt động kinh doanh') or
+                    _extract_row_values(text_cf, r'Lưu chuyển tiền tệ ròng từ các hoạt động sản xuất kinh doanh') or
+                    _extract_row_values(text_cf, r'Lưu chuyển tiền thuần từ hoạt động sản xuất kinh doanh'))
+        capex_vals = (_extract_row_values(text_cf, r'Tiền chi để mua sắm, xây dựng TSCĐ') or
+                      _extract_row_values(text_cf, r'Tiền chi để mua sắm.{0,20}tài sản cố định') or
+                      _extract_row_values(text_cf, r'Mua sắm tài sản cố định') or
+                      _extract_row_values(text_cf, r'Mua sắm, xây dựng TSCĐ') or
+                      _extract_row_values(text_cf, r'Chi mua sắm tài sản cố định'))
+        # ⚠️ Cùng nguyên tắc sanity guard: CFO đúng bằng 0.0 gần như chắc chắn
+        # là lỗi trích xuất (rất hiếm công ty có dòng tiền HĐKD chính xác = 0
+        # cho cả 1 năm) — không lưu số 0 giả vào bảng, để "—" cho trung thực.
+        if cfo_vals and cfo_vals[-1] not in (None, 0.0, 0):
+            out['cfo'] = cfo_vals[-1] / 1e9
+        if capex_vals and capex_vals[-1] not in (None, 0.0, 0):
+            out['capex'] = capex_vals[-1] / 1e9
 
     return out
 
@@ -200,12 +226,12 @@ def fetch_cafef_balance_sheet_5y(ticker: str, end_year: int = None, years: list 
 
 def fetch_cafef_yearly_full(ticker: str, years: list, debug: bool = False):
     slug = _find_company_slug(ticker)
-    revenue, net_profit, equity, total_assets = {}, {}, {}, {}
+    revenue, net_profit, equity, total_assets, cfo, capex = {}, {}, {}, {}, {}, {}
     empty = pd.Series(dtype=float)
 
     if not _cafef_is_reachable() or not years:
         return {"revenue": empty, "net_profit": empty, "equity": empty, "total_assets": empty,
-                "roe": empty, "roa": empty}
+                "roe": empty, "roa": empty, "cfo": empty, "capex": empty}
 
     def fetch_task(year):
         return year, _fetch_one_period(ticker, year, 4, slug)
@@ -224,11 +250,16 @@ def fetch_cafef_yearly_full(ticker: str, years: list, debug: bool = False):
                     equity[year] = data['equity']
                 if 'total_assets' in data:
                     total_assets[year] = data['total_assets']
+                if 'cfo' in data:
+                    cfo[year] = data['cfo']
+                if 'capex' in data:
+                    capex[year] = data['capex']
             except Exception:
                 pass
 
     revenue_s, profit_s = pd.Series(revenue).sort_index(), pd.Series(net_profit).sort_index()
     equity_s, assets_s = pd.Series(equity).sort_index(), pd.Series(total_assets).sort_index()
+    cfo_s, capex_s = pd.Series(cfo).sort_index(), pd.Series(capex).sort_index()
     roe = (profit_s / equity_s.replace(0, float('nan')) * 100) if not equity_s.empty else pd.Series(dtype=float)
     roa = (profit_s / assets_s.replace(0, float('nan')) * 100) if not assets_s.empty else pd.Series(dtype=float)
 
@@ -236,6 +267,7 @@ def fetch_cafef_yearly_full(ticker: str, years: list, debug: bool = False):
         "revenue": revenue_s, "net_profit": profit_s,
         "equity": equity_s, "total_assets": assets_s,
         "roe": roe.dropna(), "roa": roa.dropna(),
+        "cfo": cfo_s, "capex": capex_s,
     }
 
 
