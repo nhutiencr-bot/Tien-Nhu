@@ -555,6 +555,16 @@ def execute_equity_research_pipeline(ticker):
         ddm_value = (ddm_gordon(dps_latest, required_return=0.11, g=0.04)
                      if dps_latest > 0 else None)
 
+        # ── Dividend Yield (Tỷ suất cổ tức) = DPS / Giá hiện tại × 100 ────
+        # Cho phép đối chiếu trực quan các mã CÓ chia cổ tức tiền mặt (VD
+        # ACB) vs mã KHÔNG chia (VD STB đang tái cơ cấu, giữ lại lợi nhuận)
+        # — 2 trường hợp này không "mã nào rẻ hơn", chỉ là DDM không áp
+        # dụng được cho mã không chia cổ tức, cần nhìn thêm 8 phương pháp
+        # định giá còn lại (đặc biệt DCF/PE/PB) để đánh giá đầy đủ.
+        dividend_yield_pct = (dps_latest / current_price * 100) if dps_latest > 0 and current_price > 0 else None
+        clean_metrics["dividend_yield_pct"] = dividend_yield_pct
+        clean_metrics["dps_latest"] = dps_latest if dps_latest > 0 else None
+
         valuation_methods = nine_methods_valuation(
             eps_latest=eps_latest, bvps_latest=bvps_latest,
             pe_series=pe_series, pb_series=pb_series,
