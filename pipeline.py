@@ -531,6 +531,14 @@ def execute_equity_research_pipeline(ticker):
             if cfo_l is not None:
                 latest_fcff = (cfo_l - abs(capex_l)) * 1e9
 
+        st.caption(
+            f"🔍 DEBUG DCF — CFO rỗng: {cfo_series.empty} | "
+            f"CFO gần nhất: {get_latest(cfo_series, default=None) if not cfo_series.empty else 'N/A'} tỷ | "
+            f"CapEx rỗng: {capex_series.empty} | "
+            f"CapEx gần nhất: {get_latest(capex_series, default=None) if not capex_series.empty else 'N/A'} tỷ | "
+            f"FCFF: {latest_fcff} | issue_share: {issue_share} | is_bank: {is_bank}"
+        )
+
         dcf_results = reverse_g = None
         if latest_fcff and latest_fcff > 0 and issue_share > 0:
             dcf_results = dcf_fcff_scenarios(
