@@ -350,6 +350,23 @@ def execute_equity_research_pipeline(ticker):
         if total_assets_series.empty:
             st.warning(f"⚠️ Không dò được 'Tổng tài sản' cho {ticker}.")
 
+        # ── Suy ra ROE/ROA cho các năm bảng ratio (vnstock) không có nhưng
+        # đã có đủ LNST + Vốn CSH/Tổng tài sản (từ gap-fill CafeF ở trên) ──
+        # Không cần số CP lưu hành nên AN TOÀN để tính trực tiếp (khác với
+        # EPS/BVPS — 2 chỉ số đó bắt buộc cần số CP đúng theo từng năm, nếu
+        # thiếu thì để "—" thay vì đoán, tránh lặp lại rủi ro Bẫy 1/2).
+        for y in sorted(TARGET_YEARS):
+            if y not in roe_series.index and y in net_profit_series.index and y in equity_series.index:
+                eq_y = equity_series[y]
+                if eq_y and eq_y > 0:
+                    roe_series[y] = net_profit_series[y] / eq_y * 100  # % , cùng đơn vị tỷ/tỷ
+            if y not in roa_series.index and y in net_profit_series.index and y in total_assets_series.index:
+                ta_y = total_assets_series[y]
+                if ta_y and ta_y > 0:
+                    roa_series[y] = net_profit_series[y] / ta_y * 100
+        roe_series = roe_series.sort_index()
+        roa_series = roa_series.sort_index()
+
         # ── 5. Số CP lưu hành ─────────────────────────────────────────────
         market_cap_series_raw = fin5.get('market_cap', pd.Series(dtype=float))
         market_cap_direct = get_latest(market_cap_series_raw, default=0.0)
