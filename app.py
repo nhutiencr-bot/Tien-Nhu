@@ -126,11 +126,15 @@ with tab_multiples:
     pe_median_5y = float(pe_hist_series.dropna().median()) if pe_hist_series is not None and not pe_hist_series.dropna().empty else None
     pb_median_5y = float(pb_hist_series.dropna().median()) if pb_hist_series is not None and not pb_hist_series.dropna().empty else None
 
-    m1, m2, m3, m4 = st.columns(4)
+    m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("P/E", f"{pe_now:.2f}x" if pe_now else "—")
     m2.metric("P/B", f"{pb_now:.2f}x" if pb_now else "—")
     m3.metric("EPS", fmt(fundamentals.get('eps_latest', 0), suffix=" đ", decimals=0))
     m4.metric("BVPS", fmt(fundamentals.get('bvps_latest', 0), suffix=" đ", decimals=0))
+    div_yield = metrics.get('dividend_yield_pct')
+    m5.metric("Dividend Yield", f"{div_yield:.2f}%" if div_yield else "—")
+    if div_yield is None:
+        st.caption("ℹ️ Mã này không có cổ tức tiền mặt trong dữ liệu 5 năm gần nhất (có thể đang giữ lại lợi nhuận để tái đầu tư/tái cơ cấu, hoặc chỉ trả cổ tức bằng cổ phiếu) — DDM (Gordon) do đó không áp dụng được, hãy tham khảo các phương pháp định giá khác (PE/PB/DCF) ở tab bên cạnh.")
 
     st.markdown("---")
     is_bank_flag = metrics.get('excl_extended_multiples', False) or metrics.get('is_bank', False)
