@@ -253,16 +253,22 @@ def _fetch_one_period(ticker: str, year: int, quarter: int, slug: str) -> dict:
 def fetch_cafef_balance_sheet_5y(ticker: str, end_year: int):
     slug = _find_company_slug(ticker)
     equity_by_year, total_assets_by_year = {}, {}
+    revenue_by_year, net_profit_by_year = {}, {}
 
     if not _cafef_is_reachable():
-        return {"equity": pd.Series(dtype=float), "total_assets": pd.Series(dtype=float)}
+        empty = pd.Series(dtype=float)
+        return {"equity": empty, "total_assets": empty,
+                "revenue": empty, "net_profit": empty}
+
+    # ⚠️ end_year phải là năm CÓ BÁO CÁO (2025), không phải datetime.today().year (2026)
+    # range(end_year - 4, end_year + 1) = [2021, 2022, 2023, 2024, 2025] ✓
+    target_years = list(range(end_year - 4, end_year + 1))
 
     def fetch_task(year):
         return year, _fetch_one_period(ticker, year, 4, slug)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-        future_to_y = {executor.submit(fetch_task, y): y
-                       for y in range(end_year - 4, end_year + 1)}
+        future_to_y = {executor.submit(fetch_task, y): y for y in target_years}
         for future in concurrent.futures.as_completed(future_to_y):
             try:
                 year, data = future.result()
@@ -270,12 +276,18 @@ def fetch_cafef_balance_sheet_5y(ticker: str, end_year: int):
                     equity_by_year[year] = data['equity']
                 if 'total_assets' in data:
                     total_assets_by_year[year] = data['total_assets']
+                if 'revenue' in data:
+                    revenue_by_year[year] = data['revenue']
+                if 'net_profit' in data:
+                    net_profit_by_year[year] = data['net_profit']
             except Exception:
                 pass
 
     return {
         "equity": pd.Series(equity_by_year).sort_index(),
         "total_assets": pd.Series(total_assets_by_year).sort_index(),
+        "revenue": pd.Series(revenue_by_year).sort_index(),
+        "net_profit": pd.Series(net_profit_by_year).sort_index(),
     }
 
 
