@@ -180,6 +180,12 @@ def render_tab_kqkd(df_5y_table, fundamentals, period_col='Năm'):
         f"(theo {'năm' if period_col == 'Năm' else 'quý, quy đổi ra năm'}). "
         "Cột 'Tăng trưởng' là biểu đồ mini thể hiện xu hướng qua các kỳ."
     )
+    st.caption(
+        "ℹ️ Một số năm cũ (bù từ nguồn phụ CafeF khi nguồn chính không có) có thể "
+        "thiếu EPS/BVPS — 2 chỉ số này bắt buộc cần đúng số CP lưu hành của năm đó, "
+        "nếu không có sẽ để trống thay vì suy đoán sai. ROE/ROA vẫn được suy ra trực "
+        "tiếp từ LNST/Vốn CSH/Tổng tài sản (không cần số CP) nên vẫn hiển thị đầy đủ."
+    )
 
 
 def render_tab_valuation(valuation_pkg, metrics):
