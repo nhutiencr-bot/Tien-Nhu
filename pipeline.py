@@ -331,22 +331,45 @@ def execute_equity_research_pipeline(ticker):
             df_cashflow,
             ['lưu chuyển tiền thuần từ hoạt động kinh doanh',
              'lưu chuyển tiền thuần từ hđkd',
+             'i. lưu chuyển tiền từ hoạt động kinh doanh',
+             'lưu chuyển tiền thuần từ hoạt động kinh doanh trước thuế',
              'net cash flow from operating', 'net cash provided by operating',
-             'cash flow from operating activities', 'cash flows from operating activities']))
+             'net cash from operating activities',
+             'cash flow from operating activities', 'cash flows from operating activities',
+             'net cash generated from operating activities']))
         cfo_latest = get_latest(cfo_series_for_multiples, default=0.0) if not cfo_series_for_multiples.empty else 0.0
 
         pretax_series = normalize_to_billion_vnd(find_row_series(
             df_income,
             ['lợi nhuận trước thuế', 'tổng lợi nhuận kế toán trước thuế',
-             'lợi nhuận trước thuế tndn', 'profit before tax', 'income before tax']))
+             'lợi nhuận trước thuế tndn', 'lợi nhuận thuần từ hoạt động kinh doanh trước thuế',
+             'profit before tax', 'income before tax', 'earnings before tax']))
         interest_series = normalize_to_billion_vnd(find_row_series(
             df_income,
             ['chi phí lãi vay', 'lãi vay đã trả', 'trong đó: chi phí lãi vay',
-             'interest expense', 'interest paid']))
+             'trong đó: chi phí lãi vay ',
+             'interest expense', 'interest paid', 'interest expenses']))
+        # Nếu không tìm được lãi vay trong KQKD (thường do gộp chung vào
+        # "chi phí tài chính"), thử tìm thêm trong LCTT (phần điều chỉnh).
+        if interest_series.empty:
+            interest_series = normalize_to_billion_vnd(find_row_series(
+                df_cashflow,
+                ['chi phí lãi vay', 'lãi vay đã trả', 'interest expense', 'interest paid']))
         da_series = normalize_to_billion_vnd(find_row_series(
             df_cashflow,
             ['khấu hao tài sản cố định', 'khấu hao và phân bổ', 'khấu hao tscđ',
-             'depreciation and amortization', 'depreciation']))
+             'khấu hao và hao mòn tài sản cố định', 'hao mòn tài sản cố định',
+             'chi phí khấu hao', 'khấu hao bất động sản đầu tư',
+             'depreciation and amortization', 'depreciation & amortisation',
+             'depreciation']))
+        # Nếu LCTT không có dòng khấu hao (hiếm nhưng xảy ra với vài nguồn),
+        # thử tìm trong KQKD (một số công ty thuyết minh chi phí khấu hao
+        # trong phần chi phí quản lý/giá vốn).
+        if da_series.empty:
+            da_series = normalize_to_billion_vnd(find_row_series(
+                df_income,
+                ['khấu hao tài sản cố định', 'khấu hao và phân bổ',
+                 'depreciation and amortization', 'depreciation']))
 
         pretax_latest = get_latest(pretax_series, default=0.0) if not pretax_series.empty else 0.0
         interest_latest = get_latest(interest_series, default=0.0) if not interest_series.empty else 0.0
