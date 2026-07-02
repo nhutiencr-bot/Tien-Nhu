@@ -531,17 +531,6 @@ def execute_equity_research_pipeline(ticker):
             if cfo_l is not None:
                 latest_fcff = (cfo_l - abs(capex_l)) * 1e9
 
-        # ── DEBUG TẠM THỜI: hiển thị số liệu CFO/CapEx/FCFF thật để chẩn
-        # đoán chính xác vì sao DCF báo "thiếu dữ liệu dòng tiền". XOÁ khối
-        # này sau khi xác định xong nguyên nhân.
-        st.caption(
-            f"🔍 DEBUG DCF — CFO series rỗng: {cfo_series.empty} | "
-            f"CFO gần nhất: {get_latest(cfo_series, default=None) if not cfo_series.empty else 'N/A'} tỷ | "
-            f"CapEx series rỗng: {capex_series.empty} | "
-            f"CapEx gần nhất: {get_latest(capex_series, default=None) if not capex_series.empty else 'N/A'} tỷ | "
-            f"FCFF tính được: {latest_fcff} | issue_share: {issue_share}"
-        )
-
         dcf_results = reverse_g = None
         if latest_fcff and latest_fcff > 0 and issue_share > 0:
             dcf_results = dcf_fcff_scenarios(
@@ -551,7 +540,20 @@ def execute_equity_research_pipeline(ticker):
                 latest_fcff=latest_fcff, wacc=0.105, net_debt=0.0)
 
         graham_value = graham_number(eps_latest, bvps_latest) if eps_latest > 0 and bvps_latest > 0 else None
-        ddm_value    = None
+
+        # ── DDM (Gordon Growth) ─────────────────────────────────────────
+        # Chỉ áp dụng khi công ty có DPS tiền mặt > 0 (financial_normalizer
+        # đã lọc đúng 'cổ tức tiền mặt' / 'dividend per share', KHÔNG lẫn
+        # cổ tức cổ phiếu — tránh đúng bẫy HPG/VNM mà bạn nêu: DPS tiền mặt
+        # thấp do trả cổ tức bằng cổ phiếu sẽ khiến DDM ra giá thấp bất
+        # thường nếu tính nhầm từ tổng cổ tức).
+        # ke=11%, g=4% là giả định mặc định hợp lý cho CP VN trả cổ tức đều
+        # (utilities, ngân hàng truyền thống) — có thể tinh chỉnh theo ngành
+        # sau nếu cần.
+        dps_series = fin5.get('dps', pd.Series(dtype=float))
+        dps_latest = get_latest(dps_series, default=0.0) if not dps_series.empty else 0.0
+        ddm_value = (ddm_gordon(dps_latest, required_return=0.11, g=0.04)
+                     if dps_latest > 0 else None)
 
         valuation_methods = nine_methods_valuation(
             eps_latest=eps_latest, bvps_latest=bvps_latest,
