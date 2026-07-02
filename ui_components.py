@@ -1,4 +1,4 @@
-\"""
+"""
 ui_components.py
 -----------------
 Tách toàn bộ component UI ra khỏi app.py để giảm tải render,
@@ -662,3 +662,9 @@ border:1px solid rgba(168,85,247,0.25);">
         st.caption("ℹ️ Tổng hợp từ PE/PB Median 5N, DCF, Graham. Không phải lời khuyên đầu tư.")
     else:
         st.info("Chưa đủ dữ liệu để tổng hợp khuyến nghị 9 phương pháp cho mã này.")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ALIAS: app.py gọi render_tab_volume, nội dung giống render_tab_technical
+# ─────────────────────────────────────────────────────────────────────────────
+render_tab_volume = render_tab_technical
