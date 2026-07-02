@@ -236,8 +236,72 @@ def render_tab_valuation(valuation_pkg, metrics):
         st.plotly_chart(fig2, use_container_width=True)
 
 
+def _fmt_k(value):
+    """Format số tiền lớn dạng rút gọn kiểu 'K' giống ảnh mẫu (31200 -> '31.2K')."""
+    if value is None:
+        return "—"
+    try:
+        return f"{value/1000:,.1f}K"
+    except Exception:
+        return "—"
+
+
+_DCF_CARD_CSS = """
+<style>
+    .dcf-card {
+        border-radius: 16px;
+        padding: 20px 22px;
+        margin-bottom: 14px;
+        border: 1px solid rgba(255,255,255,0.06);
+    }
+    .dcf-card-bear   { background: rgba(244, 63, 94, 0.10); border-color: rgba(244,63,94,0.25); }
+    .dcf-card-base   { background: linear-gradient(135deg, rgba(168,85,247,0.16), rgba(236,72,153,0.10)); border-color: rgba(168,85,247,0.30); }
+    .dcf-card-bull   { background: rgba(16, 185, 129, 0.10); border-color: rgba(16,185,129,0.28); }
+    .dcf-card-neutral{ background: rgba(255,255,255,0.03); }
+    .dcf-card-header { display:flex; justify-content:space-between; align-items:center; }
+    .dcf-card-title  { font-size: 17px; font-weight: 700; color: #f1f1f6; }
+    .dcf-card-badge  {
+        background: linear-gradient(90deg, #a855f7, #ec4899);
+        color: white; font-size: 11px; font-weight: 700;
+        padding: 3px 10px; border-radius: 20px; letter-spacing: 0.5px;
+    }
+    .dcf-card-sub    { color: #9a9aab; font-size: 13px; margin-top: 4px; }
+    .dcf-card-bottom { display:flex; justify-content:space-between; align-items:flex-end; margin-top: 10px; }
+    .dcf-card-value  { font-size: 30px; font-weight: 800; font-family: 'Courier New', monospace; }
+    .dcf-card-pct    { font-size: 14px; font-weight: 700; }
+    .val-bear { color: #f43f5e; } .val-base { color: #f1f1f6; } .val-bull { color: #22c55e; }
+    .pct-bear { color: #f43f5e; } .pct-base { color: #22c55e; } .pct-bull { color: #22c55e; }
+
+    .simple-card {
+        border-radius: 16px; padding: 20px 22px; margin-bottom: 14px;
+        background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.06);
+    }
+    .simple-card-eyebrow {
+        color: #9a9aab; font-size: 12px; font-weight: 700; letter-spacing: 1px;
+        text-transform: uppercase; margin-bottom: 6px;
+    }
+    .simple-card-title { font-size: 17px; font-weight: 700; color: #f1f1f6; margin-bottom: 4px; }
+    .simple-card-sub   { color: #9a9aab; font-size: 13px; margin-bottom: 14px; }
+    .graham-row { display:flex; align-items:baseline; gap: 14px; margin-bottom: 16px; }
+    .graham-val { font-size: 34px; font-weight: 800; font-family: 'Courier New', monospace; color: #22c55e; }
+    .graham-vs  { color: #6b6b7b; font-size: 16px; }
+    .graham-cur { font-size: 34px; font-weight: 800; font-family: 'Courier New', monospace; color: #f1f1f6; }
+    .graham-label { color: #9a9aab; font-size: 12px; display:block; margin-top: 2px; }
+    .verdict-pill {
+        border-radius: 12px; padding: 12px 16px; font-weight: 700; font-size: 15px;
+        text-align: center;
+    }
+    .verdict-cheap { background: rgba(34,197,94,0.15); color: #22c55e; }
+    .verdict-expensive { background: rgba(244,63,94,0.15); color: #f43f5e; }
+    .verdict-fair { background: rgba(255,255,255,0.06); color: #d4d4e0; }
+    .big-metric-value { font-size: 34px; font-weight: 800; font-family: 'Courier New', monospace; }
+</style>
+"""
+
+
 def render_tab_dcf(valuation_pkg, metrics):
-    st.markdown("### Định Giá Nội Tại · DCF & Graham")
+    st.markdown(_DCF_CARD_CSS, unsafe_allow_html=True)
+    st.markdown("### Định Giá Nội Tại · DCF (FCFF) & Graham")
 
     sector_labels = {
         'bank': 'Ngân hàng', 'steel': 'Thép / Công nghiệp nặng',
@@ -254,42 +318,106 @@ def render_tab_dcf(valuation_pkg, metrics):
             f"(áp dụng cho kịch bản DCF bên dưới — không dùng chung 10.5% cho mọi mã)."
         )
 
+    current_price = metrics.get('current_price', 0)
     dcf = valuation_pkg.get('dcf_scenarios')
+
     if dcf:
-        st.markdown("#### DCF — 3 Kịch Bản FCFF")
-        for name, res in dcf.items():
-            if res:
-                pct = (res['value_per_share'] / metrics['current_price'] - 1) * 100 if metrics['current_price'] else 0
-                icon = "🚀" if pct > 50 else ("⚖️" if pct > -10 else "🔻")
-                st.metric(f"{icon} {name}", f"{res['value_per_share']:,.0f} đ", delta=f"{pct:+.1f}%")
+        st.markdown(f"##### DCF — 3 Kịch Bản FCFF")
+        # Thứ tự cố định Bi quan → Cơ sở → Tích cực, khớp ảnh mẫu, bất kể
+        # dict trả về theo thứ tự nào từ valuation.py.
+        order = [
+            ('Bi quan', '🔻', 'bear'), ('Cơ sở', '⚖️', 'base'), ('Tích cực', '🚀', 'bull'),
+        ]
+        for name, icon, tone in order:
+            res = dcf.get(name)
+            if not res:
+                continue
+            pct = (res['value_per_share'] / current_price - 1) * 100 if current_price else 0
+            wacc_pct = res.get('wacc', 0) * 100
+            g_pct = res.get('g', 0) * 100
+            badge_html = '<span class="dcf-card-badge">BASE</span>' if tone == 'base' else ''
+            st.markdown(f"""
+            <div class="dcf-card dcf-card-{tone}">
+                <div class="dcf-card-header">
+                    <span class="dcf-card-title">{icon} {name}</span>
+                    {badge_html}
+                </div>
+                <div class="dcf-card-sub">WACC {wacc_pct:.0f}% · g {g_pct:.1f}%</div>
+                <div class="dcf-card-bottom">
+                    <span></span>
+                    <div style="text-align:right;">
+                        <div class="dcf-card-value val-{tone}">{_fmt_k(res['value_per_share'])}</div>
+                        <div class="dcf-card-pct pct-{tone}">{pct:+.0f}%</div>
+                    </div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
     else:
         st.warning("Không tính được DCF do thiếu dữ liệu dòng tiền.")
 
-    reverse_g = valuation_pkg.get('reverse_dcf_g_pct')
-    if reverse_g is not None:
-        st.markdown("#### Reverse DCF")
-        st.metric("Tốc Độ Tăng Trưởng FCFF Thị Trường Ngụ Ý", f"~{reverse_g:.1f}%/năm")
-
     graham = valuation_pkg.get('graham_value')
     if graham:
-        st.markdown("#### Graham Number")
-        g_pct = (graham / metrics['current_price'] - 1) * 100 if metrics['current_price'] else 0
-        c1, c2 = st.columns(2)
-        c1.metric("Graham Number", f"{graham:,.0f} đ")
-        c2.metric("So Với Giá Hiện Tại", f"{g_pct:+.1f}%")
+        g_pct = (graham / current_price - 1) * 100 if current_price else 0
         if g_pct > 10:
-            st.success(f"✅ Rẻ hơn ~{g_pct:.0f}% theo Graham Number")
+            verdict_class, verdict_text = "verdict-cheap", f"✅ RẺ {g_pct:.0f}% theo Graham Number"
         elif g_pct < -10:
-            st.error(f"⚠️ Đắt hơn ~{abs(g_pct):.0f}% theo Graham Number")
+            verdict_class, verdict_text = "verdict-expensive", f"⚠️ ĐẮT {abs(g_pct):.0f}% theo Graham Number"
         else:
-            st.info("Giá đang quanh mức hợp lý theo Graham Number")
+            verdict_class, verdict_text = "verdict-fair", "⚖️ Giá đang quanh mức hợp lý theo Graham Number"
+
+        st.markdown(f"""
+        <div class="simple-card">
+            <div class="simple-card-title">Graham Number √(22.5 × EPS × BVPS)</div>
+            <div class="simple-card-sub">Sanity check đầu tư giá trị</div>
+            <div class="graham-row">
+                <div>
+                    <div class="graham-val">{_fmt_k(graham)}</div>
+                    <span class="graham-label">Graham</span>
+                </div>
+                <span class="graham-vs">vs</span>
+                <div>
+                    <div class="graham-cur">{_fmt_k(current_price)}</div>
+                    <span class="graham-label">Giá hiện tại</span>
+                </div>
+            </div>
+            <div class="verdict-pill {verdict_class}">{verdict_text}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    reverse_g = valuation_pkg.get('reverse_dcf_g_pct')
+    if reverse_g is not None:
+        st.markdown(f"""
+        <div class="simple-card">
+            <div class="simple-card-eyebrow">🔄 Reverse DCF</div>
+            <div class="big-metric-value" style="color:#22c55e;">~{reverse_g:.0f}%/năm</div>
+            <div class="simple-card-sub" style="margin-top:8px;margin-bottom:0;">
+                Tại giá {_fmt_k(current_price)}, thị trường đang ngụ ý tốc độ tăng trưởng FCFF ~{reverse_g:.0f}%/năm.
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
 
     ddm = valuation_pkg.get('ddm_value')
-    st.markdown("#### DDM (Gordon Growth)")
     if ddm:
-        st.metric("DDM", f"{ddm:,.0f} đ")
+        ddm_pct = (ddm / current_price - 1) * 100 if current_price else 0
+        ddm_color = "#22c55e" if ddm_pct >= 0 else "#f43f5e"
+        st.markdown(f"""
+        <div class="simple-card">
+            <div class="simple-card-eyebrow">🔋 DDM (Gordon)</div>
+            <div class="big-metric-value" style="color:{ddm_color};">{_fmt_k(ddm)}</div>
+            <div class="simple-card-sub" style="margin-top:8px;margin-bottom:0;">
+                So với giá hiện tại: {ddm_pct:+.0f}%.
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
     else:
-        st.caption("DDM không áp dụng — thiếu DPS hoặc mã không chia cổ tức đều đặn.")
+        st.markdown("""
+        <div class="simple-card">
+            <div class="simple-card-eyebrow">🔋 DDM (Gordon)</div>
+            <div class="simple-card-sub" style="margin-bottom:0;">
+                Không áp dụng — thiếu DPS hoặc mã không chia cổ tức tiền mặt đều đặn.
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
 
 
 def render_tab_dupont(df_dupont):
