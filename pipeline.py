@@ -531,23 +531,36 @@ def execute_equity_research_pipeline(ticker):
             if cfo_l is not None:
                 latest_fcff = (cfo_l - abs(capex_l)) * 1e9
 
-        st.caption(
-            f"🔍 DEBUG DCF — CFO rỗng: {cfo_series.empty} | "
-            f"CFO gần nhất: {get_latest(cfo_series, default=None) if not cfo_series.empty else 'N/A'} tỷ | "
-            f"CapEx rỗng: {capex_series.empty} | "
-            f"CapEx gần nhất: {get_latest(capex_series, default=None) if not capex_series.empty else 'N/A'} tỷ | "
-            f"FCFF: {latest_fcff} | issue_share: {issue_share} | is_bank: {is_bank}"
-        )
+        # ⚠️ Xóa debug caption sau khi xác nhận ok (không hiển thị trên production)
 
         dcf_results = reverse_g = None
-        if latest_fcff and latest_fcff > 0 and issue_share > 0:
+        # 🔴 KHÔNG tính DCF (FCFF) cho ngân hàng — CFO trong báo cáo LCTT của
+        # ngân hàng bao gồm dòng tiền gửi khách hàng (deposit inflows) được
+        # phân loại là "hoạt động kinh doanh" theo chuẩn mực kế toán VN,
+        # khiến CFO ngân hàng thường ở mức 50,000–150,000 tỷ/năm. Dùng con số
+        # này làm FCFF rồi chiết khấu DCF sẽ cho Enterprise Value phình lên
+        # hàng triệu tỷ → giá mục tiêu DCF cao hơn giá thực 500-1000%
+        # (đã tái hiện: TCB giá 30K → DCF Cơ sở ra 308K, upside +927% — sai
+        # hoàn toàn). Với ngân hàng, dùng DDM (Gordon) + P/B + ROE thay thế.
+        is_bank_full = is_bank or ticker.upper() in [
+            'VCB', 'BID', 'CTG', 'TCB', 'MBB', 'VPB', 'ACB', 'STB', 'HDB',
+            'LPB', 'OCB', 'TPB', 'MSB', 'VIB', 'EIB', 'SHB', 'ABB', 'NVB',
+        ]
+        if latest_fcff and latest_fcff > 0 and issue_share > 0 and not is_bank_full:
             dcf_results = dcf_fcff_scenarios(
                 latest_fcff=latest_fcff, shares_outstanding=issue_share, net_debt=0.0)
             reverse_g = reverse_dcf_implied_growth(
                 current_price=current_price, shares_outstanding=issue_share,
                 latest_fcff=latest_fcff, wacc=0.105, net_debt=0.0)
 
-        graham_value = graham_number(eps_latest, bvps_latest) if eps_latest > 0 and bvps_latest > 0 else None
+        # 🔴 Graham Number không áp dụng cho ngân hàng — công thức √(22.5×EPS×BVPS)
+        # được thiết kế cho công ty sản xuất/phi tài chính. Với ngân hàng: BVPS
+        # cao (do đòn bẩy tài chính lớn, equity/assets ~8-12%) nhân EPS vừa phải
+        # → Graham Number thường cao hơn giá thực 20-60%, không phản ánh định giá
+        # thật mà chỉ là artifact của cấu trúc vốn đặc thù ngân hàng.
+        graham_value = (graham_number(eps_latest, bvps_latest)
+                        if eps_latest > 0 and bvps_latest > 0 and not is_bank_full
+                        else None)
 
         # ── DDM (Gordon Growth) ─────────────────────────────────────────
         # Chỉ áp dụng khi công ty có DPS tiền mặt > 0 (financial_normalizer
