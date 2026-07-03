@@ -299,6 +299,24 @@ def execute_equity_research_pipeline(ticker):
         if bvps_latest == 0.0 and issue_share > 0 and not equity_series.empty:
             bvps_latest = get_latest(equity_series, default=0.0) * 1e9 / issue_share
 
+        # ── Fallback quan trọng: nếu eps_latest / bvps_latest vẫn = 0 sau
+        # tất cả các bước trên (thường xảy ra với ngân hàng khi số CP sai
+        # hoặc sanity clamp đã loại BVPS về 0), suy ngược từ:
+        #   eps_latest  = current_price / pe_latest    (từ ratio table)
+        #   bvps_latest = current_price / pb_latest    (từ ratio table)
+        # Đây là cách duy nhất đảm bảo nine_methods_valuation có đủ input
+        # để tính PE/PB fair-value — KPI cards đã hiển thị P/E và P/B đúng
+        # (lấy từ ratio table) nên suy ngược là an toàn và nhất quán.
+        if eps_latest == 0.0 and not pe_series.empty and current_price > 0:
+            pe_latest = get_latest(pe_series, default=0.0)
+            if pe_latest > 0:
+                eps_latest = current_price / pe_latest
+
+        if bvps_latest == 0.0 and not pb_series.empty and current_price > 0:
+            pb_latest = get_latest(pb_series, default=0.0)
+            if pb_latest > 0:
+                bvps_latest = current_price / pb_latest
+
         def _normalize_pct(s):
             if s is None or s.empty:
                 return s
