@@ -331,10 +331,44 @@ with tab_news:
     else:
         st.info("Không có tin tức nào trong thời gian qua.")
 
-# --- TAB BÁO CÁO PHÂN TÍCH ---
+import requests
+import streamlit as st
+
+# =====================================================================
+# HÀM CÀO API NGẦM (NÉ ANTI-BOT) - Dán ngay trên phần vẽ Tab
+# =====================================================================
+def fetch_tcbs_reports(ticker):
+    """Lấy danh sách báo cáo phân tích từ API ngầm TCBS"""
+    url = f"https://apipubaws.tcbs.com.vn/tcanalysis/v1/ticker/{ticker}/analysis-reports?page=0&size=15"
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+    reports = []
+    try:
+        res = requests.get(url, headers=headers, timeout=5)
+        if res.status_code == 200:
+            data = res.json().get('listAnalysisReports', [])
+            for item in data:
+                # Xử lý dữ liệu trả về để khớp 100% với bảng HTML của bạn
+                reports.append({
+                    "ticker": ticker.upper(),
+                    "report_date": item.get('publishDate', '').split('T')[0],
+                    "recommendation": item.get('recommendation') or "—",
+                    "target_price": item.get('targetPrice'), # Có thể là None
+                    "source": item.get('source', 'Tổng hợp'),
+                    "url": item.get('url', '#')
+                })
+    except Exception:
+        pass
+    return reports
+
+# =====================================================================
+# GIAO DIỆN TAB BÁO CÁO PHÂN TÍCH CỦA BẠN (GIỮ NGUYÊN HTML)
+# =====================================================================
 with tab_report:
     st.markdown("### 📑 Báo Cáo Phân Tích & Khuyến Nghị")
-    st.caption(f"Tổng hợp khuyến nghị mới nhất cho mã {ticker_input.upper()} từ CafeF — không cần đăng nhập.")
+    st.caption(f"Tổng hợp khuyến nghị mới nhất cho mã {ticker_input.upper()} — Dữ liệu lấy trực tiếp không cần đăng nhập.")
 
     cafef_url = f"https://s.cafef.vn/bao-cao-phan-tich/{ticker_input.lower()}.chn"
     vietstock_url = f"https://finance.vietstock.vn/{ticker_input.upper()}/bao-cao-phan-tich.htm"
@@ -348,19 +382,20 @@ with tab_report:
     st.divider()
 
     with st.spinner("Đang tải danh sách báo cáo..."):
-        reports_list = fetch_cafef_reports(ticker_input)
+        # CHỖ ĐỔI MỚI: Gọi hàm fetch_tcbs_reports thay vì cafef
+        reports_list = fetch_tcbs_reports(ticker_input)
 
     current_price = metrics.get("current_price", 0) or 0
 
     if not reports_list:
         st.info(
-            f"Hiện chưa cào được báo cáo nào cho mã {ticker_input.upper()} từ CafeF. "
-            "Có thể trang đã đổi cấu trúc HTML hoặc không có báo cáo gần đây — dùng nút phía trên để xem trực tiếp."
+            f"Hiện chưa lấy được báo cáo nào cho mã {ticker_input.upper()}. "
+            "Có thể không có báo cáo gần đây — dùng nút phía trên để xem trực tiếp."
         )
     else:
         rows_html = ""
         for r in reports_list:
-            tp = r["target_price"]
+            tp = r.get("target_price")
             if tp and current_price > 0:
                 upside_pct = (tp - current_price) / current_price * 100
                 upside_str = f"{upside_pct:+.0f}%"
@@ -375,12 +410,12 @@ with tab_report:
             <tr style="border-bottom: 1px solid rgba(255,255,255,0.08);">
                 <td style="padding:10px 14px; font-weight:bold;">{r['ticker']}</td>
                 <td style="padding:10px 14px;">{r['report_date']}</td>
-                <td style="padding:10px 14px;">{r['recommendation']}</td>
+                <td style="padding:10px 14px; font-weight:bold;">{r['recommendation']}</td>
                 <td style="padding:10px 14px; text-align:right;">{tp_str}</td>
                 <td style="padding:10px 14px; text-align:right; color:{upside_color}; font-weight:bold;">{upside_str}</td>
                 <td style="padding:10px 14px;">{r['source']}</td>
                 <td style="padding:10px 14px;">
-                    <a href="{r['url']}" target="_blank" style="color:#8B5CF6; font-weight:bold; text-decoration:none;">Xem BCPT →</a>
+                    <a href="{r['url']}" target="_blank" style="color:#8B5CF6; font-weight:bold; text-decoration:none; padding:4px 8px; border:1px solid #8B5CF6; border-radius:4px;">Xem BCPT →</a>
                 </td>
             </tr>
             """
@@ -412,4 +447,5 @@ with tab_report:
         "⚠️ **Disclaimer:** Báo cáo giáo dục/tham khảo. "
         "Đối chiếu BCTC kiểm toán chính thức trước khi ra quyết định. "
         "**Không phải lời khuyên đầu tư.** Đầu tư cổ phiếu có rủi ro mất vốn."
+    )
     )
