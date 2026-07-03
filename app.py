@@ -4,7 +4,7 @@ from pipeline import execute_equity_research_pipeline
 from symbols_loader import load_all_symbols, build_display_options
 from ui_components import (
     render_kpi_cards, render_tab_kqkd, render_tab_valuation,
-    render_tab_dcf, render_tab_dupont, render_tab_volume, render_tab_news, fmt,
+    render_tab_dcf, render_tab_dupont, render_tab_technical, render_tab_news, fmt,
 )
 
 st.set_page_config(page_title="Equity Research AI", layout="wide")
@@ -62,7 +62,7 @@ render_kpi_cards(metrics, fundamentals)
 
 # --- Tabs (giữ nguyên tất cả) ---
 (tab_kqkd, tab_valuation, tab_multiples, tab_dcf, tab_dupont,
- tab_insights, tab_volume, tab_news) = st.tabs([
+ tab_insights, tab_technical, tab_news) = st.tabs([
     "📋 KQKD 5 Năm",
     "💰 Định Giá PE/PB · 9PP",
     "📐 Multiples Mở Rộng",
@@ -111,6 +111,10 @@ with tab_multiples:
     if ddm_note:
         st.info(f"ℹ️ **DDM:** {ddm_note}")
 
+    div_yield = metrics.get('dividend_yield_pct')
+    if div_yield:
+        st.metric("Dividend Yield", f"{div_yield:.2f}%")
+
     st.info("ℹ️ EV/EBITDA, P/CF, P/S phụ thuộc field bổ sung — không phải nguồn nào cũng cung cấp.")
 
 with tab_dcf:
@@ -139,8 +143,8 @@ with tab_insights:
             f"— mã nhạy cảm với biến động dầu thô WTI."
         )
 
-with tab_volume:
-    render_tab_volume(df_price_clean, tech, metrics)
+with tab_technical:
+    render_tab_technical(df_price_clean, tech, metrics)
 
 with tab_news:
     render_tab_news(news_cards)
