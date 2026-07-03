@@ -105,10 +105,14 @@ def _safe_call(fn, key, source, default=None):
         return default if default is not None else pd.DataFrame()
 
 
-def _fetch_income_statement(ticker, period='year', limit=DEFAULT_YEAR_LIMIT):
-    for source in SOURCE_FALLBACK_ORDER:
+def _fetch_income_statement(ticker, source, period='year', limit=DEFAULT_YEAR_LIMIT):
+    # Thử nguồn ĐÃ XÁC ĐỊNH (source_used) TRƯỚC TIÊN — nhanh, đúng ngay lần
+    # đầu trong đa số trường hợp — thay vì luôn thử lại VCI trước cho mọi
+    # field (nguyên nhân chính khiến app load chậm). Chỉ fallback sang
+    # nguồn khác nếu riêng field này rỗng ở nguồn đã chọn.
+    for src in [source] + [s for s in SOURCE_FALLBACK_ORDER if s != source]:
         try:
-            f = Finance(symbol=ticker, source=source, period=period)
+            f = Finance(symbol=ticker, source=src, period=period)
             try:
                 df = f.income_statement(period=period, limit=limit)
             except TypeError:
@@ -120,10 +124,10 @@ def _fetch_income_statement(ticker, period='year', limit=DEFAULT_YEAR_LIMIT):
     return pd.DataFrame()
 
 
-def _fetch_ratio(ticker, period='year', limit=DEFAULT_YEAR_LIMIT):
-    for source in SOURCE_FALLBACK_ORDER:
+def _fetch_ratio(ticker, source, period='year', limit=DEFAULT_YEAR_LIMIT):
+    for src in [source] + [s for s in SOURCE_FALLBACK_ORDER if s != source]:
         try:
-            f = Finance(symbol=ticker, source=source, period=period)
+            f = Finance(symbol=ticker, source=src, period=period)
             try:
                 df = f.ratio(period=period, limit=limit)
             except TypeError:
@@ -135,10 +139,10 @@ def _fetch_ratio(ticker, period='year', limit=DEFAULT_YEAR_LIMIT):
     return pd.DataFrame()
 
 
-def _fetch_cashflow(ticker, period='year', limit=DEFAULT_YEAR_LIMIT):
-    for source in SOURCE_FALLBACK_ORDER:
+def _fetch_cashflow(ticker, source, period='year', limit=DEFAULT_YEAR_LIMIT):
+    for src in [source] + [s for s in SOURCE_FALLBACK_ORDER if s != source]:
         try:
-            f = Finance(symbol=ticker, source=source, period=period)
+            f = Finance(symbol=ticker, source=src, period=period)
             try:
                 df = f.cash_flow(period=period, limit=limit)
             except TypeError:
@@ -150,10 +154,10 @@ def _fetch_cashflow(ticker, period='year', limit=DEFAULT_YEAR_LIMIT):
     return pd.DataFrame()
 
 
-def _fetch_balance_sheet(ticker, period='year', limit=DEFAULT_YEAR_LIMIT):
-    for source in SOURCE_FALLBACK_ORDER:
+def _fetch_balance_sheet(ticker, source, period='year', limit=DEFAULT_YEAR_LIMIT):
+    for src in [source] + [s for s in SOURCE_FALLBACK_ORDER if s != source]:
         try:
-            f = Finance(symbol=ticker, source=source, period=period)
+            f = Finance(symbol=ticker, source=src, period=period)
             try:
                 df = f.balance_sheet(period=period, limit=limit)
             except TypeError:
@@ -169,8 +173,6 @@ def _fetch_balance_sheet(ticker, period='year', limit=DEFAULT_YEAR_LIMIT):
 def execute_equity_research_pipeline(ticker):
     try:
         q_engine, f_engine, c_engine, source_used = _build_engines_with_fallback(ticker)
-        if source_used != 'VCI':
-            st.info(f"ℹ️ Nguồn VCI không khả dụng cho {ticker}, đang dùng: {source_used}")
 
         end_date = datetime.today().strftime('%Y-%m-%d')
         start_date = (datetime.today() - timedelta(days=365 * 3)).strftime('%Y-%m-%d')
@@ -178,13 +180,13 @@ def execute_equity_research_pipeline(ticker):
         tasks = {
             "price":      lambda: q_engine.history(start=start_date, end=end_date, interval='1D'),
             "overview":   lambda: c_engine.overview(),
-            "income_y":   lambda: _fetch_income_statement(ticker, period='year',    limit=DEFAULT_YEAR_LIMIT),
-            "cashflow_y": lambda: _fetch_cashflow(ticker,          period='year',    limit=DEFAULT_YEAR_LIMIT),
-            "ratio_y":    lambda: _fetch_ratio(ticker,             period='year',    limit=DEFAULT_YEAR_LIMIT),
-            "income_q":   lambda: _fetch_income_statement(ticker, period='quarter', limit=20),
-            "ratio_q":    lambda: _fetch_ratio(ticker,            period='quarter', limit=20),
-            "balance_y":  lambda: _fetch_balance_sheet(ticker,    period='year',    limit=DEFAULT_YEAR_LIMIT),
-            "balance_q":  lambda: _fetch_balance_sheet(ticker,    period='quarter', limit=20),
+            "income_y":   lambda: _fetch_income_statement(ticker, source_used, period='year',    limit=DEFAULT_YEAR_LIMIT),
+            "cashflow_y": lambda: _fetch_cashflow(ticker,          source_used, period='year',    limit=DEFAULT_YEAR_LIMIT),
+            "ratio_y":    lambda: _fetch_ratio(ticker,             source_used, period='year',    limit=DEFAULT_YEAR_LIMIT),
+            "income_q":   lambda: _fetch_income_statement(ticker, source_used, period='quarter', limit=20),
+            "ratio_q":    lambda: _fetch_ratio(ticker,            source_used, period='quarter', limit=20),
+            "balance_y":  lambda: _fetch_balance_sheet(ticker,    source_used, period='year',    limit=DEFAULT_YEAR_LIMIT),
+            "balance_q":  lambda: _fetch_balance_sheet(ticker,    source_used, period='quarter', limit=20),
             "news":       lambda: c_engine.news(),
         }
 
@@ -531,14 +533,6 @@ def execute_equity_research_pipeline(ticker):
             if cfo_l is not None:
                 latest_fcff = (cfo_l - abs(capex_l)) * 1e9
 
-        st.caption(
-            f"🔍 DEBUG DCF — CFO rỗng: {cfo_series.empty} | "
-            f"CFO gần nhất: {get_latest(cfo_series, default=None) if not cfo_series.empty else 'N/A'} tỷ | "
-            f"CapEx rỗng: {capex_series.empty} | "
-            f"CapEx gần nhất: {get_latest(capex_series, default=None) if not capex_series.empty else 'N/A'} tỷ | "
-            f"FCFF: {latest_fcff} | issue_share: {issue_share} | is_bank: {is_bank}"
-        )
-
         dcf_results = reverse_g = None
         if latest_fcff and latest_fcff > 0 and issue_share > 0:
             dcf_results = dcf_fcff_scenarios(
@@ -590,15 +584,6 @@ def execute_equity_research_pipeline(ticker):
             "ddm_value":          ddm_value,
             "pe_series":          pe_series,
             "pb_series":          pb_series,
-            "bvps_series":        bvps_series_filled,
-            "price_series":       (
-                # Giá cuối năm từ df_price (close_vnd cuối tháng 12 mỗi năm)
-                df_price.set_index('time')['close_vnd']
-                .resample('YE').last()
-                .rename(lambda x: x.year)
-                if not df_price.empty and 'time' in df_price.columns and 'close_vnd' in df_price.columns
-                else pd.Series(dtype=float)
-            ),
         }
 
         if 'volume' not in df_price.columns:
