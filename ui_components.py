@@ -234,323 +234,57 @@ def render_tab_kqkd(df_5y_table, fundamentals, period_col='Năm'):
 
 
 def render_tab_valuation(valuation_pkg, metrics):
-    """Tab Định Giá PE/PB · 9PP — hiển thị đầy đủ theo ngành."""
-    current_price = metrics.get('current_price', 0) or 0
+    st.markdown("### Định Giá PE · PB · BV Trung Bình 5 Năm")
     summary = valuation_pkg.get('summary')
     methods = valuation_pkg.get('methods', {})
-    sector = valuation_pkg.get('sector_detected', 'default')
-    is_bank = metrics.get('is_bank', False)
-
-    SECTOR_LABELS = {
-        'bank': '🏦 Ngân hàng', 'steel': '⚙️ Thép / Công nghiệp nặng',
-        'real_estate': '🏢 Bất động sản', 'retail': '🛍️ Bán lẻ / Tiêu dùng',
-        'tech': '💻 Công nghệ / Viễn thông', 'oil_gas': '🛢️ Dầu khí / Hoá chất',
-        'aviation': '✈️ Hàng không / Vận tải', 'default': '📊 Chung',
-    }
-    SECTOR_NOTES = {
-        'bank': 'Ưu tiên **P/B + ROE** (không dùng PE/P/S). P/B < 1.5x = vùng mua, > 3.0x = vùng bán.',
-        'steel': 'Chu kỳ → **P/B + EV/EBITDA**. PE median có thể lệch do đáy chu kỳ. P/B < 1.3x = mua.',
-        'real_estate': 'Ưu tiên **P/B + NAV**. PE không có ý nghĩa do doanh thu không đều.',
-        'retail': '**PE + PEG** là chính. PEG < 1.0 = rẻ. PE hợp lý: 15–25x.',
-        'tech': '**PE + PEG + Revenue Growth**. PE 20–40x hợp lý nếu tăng trưởng cao.',
-        'oil_gas': '**EV/EBITDA + P/CF** là chính. EV/EBITDA < 5x = hợp lý.',
-        'default': 'Dùng median 5N của chính mã để định giá (PE/PB/EV-EBITDA/DCF/Graham).',
-    }
-
-    st.markdown(f"### 💰 Định Giá · 9 Phương Pháp Hội Tụ")
-    st.caption(
-        f"📌 **{SECTOR_LABELS.get(sector, sector)}** — "
-        + SECTOR_NOTES.get(sector, SECTOR_NOTES['default'])
-    )
 
     if not summary:
         st.warning("Không đủ dữ liệu để chạy các phương pháp định giá.")
         return
 
-    # ── Verdict header ───────────────────────────────────────────────────────
-    upside = summary.get('upside_median_pct', 0) or 0
-    verdict = summary.get('verdict', '')
-    if 'UNDERVALUED' in verdict:
-        vcolor, vbg = '#22c55e', 'rgba(34,197,94,0.12)'
-    elif 'OVERVALUED' in verdict:
-        vcolor, vbg = '#f43f5e', 'rgba(244,63,94,0.12)'
-    else:
-        vcolor, vbg = '#fbbf24', 'rgba(251,191,36,0.10)'
+    st.markdown(f"#### Giá Trị Hợp Lý Ước Tính: **{summary['median']:,.0f} đ/CP**")
+    c1, c2 = st.columns([1, 2])
+    c1.metric("Verdict", summary['verdict'])
+    c2.metric("So Với Giá Hiện Tại",
+              f"{summary['upside_median_pct']:+.1f}%",
+              delta=f"{summary['upside_median_pct']:+.1f}%")
 
-    p25 = summary.get('p25', 0); p75 = summary.get('p75', 0)
-    median_val = summary.get('median', 0)
-    st.markdown(f"""
-<div style="border-radius:16px;padding:18px 22px;background:{vbg};border:1px solid {vcolor}33;margin-bottom:12px;">
-  <div style="font-size:0.8rem;opacity:0.7;letter-spacing:1px;text-transform:uppercase;">Kết Luận · {len(methods)} Phương Pháp</div>
-  <div style="font-size:1.8rem;font-weight:800;color:{vcolor};">{verdict}</div>
-  <div style="display:flex;gap:24px;margin-top:8px;font-size:0.9rem;">
-    <span>Giá HT: <b>₫{current_price:,.0f}</b></span>
-    <span>Median: <b>₫{median_val:,.0f}</b></span>
-    <span>Upside: <b style="color:{vcolor};">{upside:+.1f}%</b></span>
-    <span>Dải P25-P75: <b>₫{p25:,.0f} – ₫{p75:,.0f}</b></span>
-  </div>
-</div>""", unsafe_allow_html=True)
+    if methods:
+        st.markdown("#### Các Kịch Bản Định Giá")
+        cols = st.columns(min(len(methods), 4) or 1)
+        for i, (name, value) in enumerate(methods.items()):
+            pct = (value / metrics['current_price'] - 1) * 100 if metrics['current_price'] else 0
+            cols[i % len(cols)].metric(name, f"{value:,.0f} đ", delta=f"{pct:+.1f}%")
 
-    if not methods:
-        st.warning("Chưa có dữ liệu phương pháp định giá.")
-        return
+        fig = go.Figure()
+        names, values = list(methods.keys()), list(methods.values())
+        colors = ['#10d98a' if v >= metrics['current_price'] else '#ff4d6d' for v in values]
+        fig.add_trace(go.Bar(x=names, y=values, marker_color=colors))
+        fig.add_hline(y=metrics['current_price'], line_dash='dash', line_color='#fbbf24',
+                      annotation_text=f"Giá hiện tại {metrics['current_price']:,.0f}đ")
+        fig.update_layout(template='plotly_dark',
+                          paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+                          margin=dict(t=20, b=20))
+        st.plotly_chart(fig, use_container_width=True)
 
-    # ── Nhóm phương pháp ────────────────────────────────────────────────────
-    GROUP_ORDER = [
-        ('📐 Multiples (Median lịch sử)', ['PE Median 5N', 'PE TB 5N', 'PB Median 5N', 'PB TB 5N', 'PB Sàn 5N (min)']),
-        ('📊 Multiples Mở Rộng', ['EV/EBITDA Median 5N', 'P/CF Median 5N', 'P/S Median 5N']),
-        ('🔬 Nội Tại (Intrinsic)', ['DCF (Bi quan)', 'DCF (Cơ sở)', 'DCF (Tích cực)', 'Graham Number', 'DDM (Gordon)']),
-    ]
-
-    for group_title, group_keys in GROUP_ORDER:
-        group_methods = {k: methods[k] for k in group_keys if k in methods}
-        if not group_methods:
-            continue
-        st.markdown(f"#### {group_title}")
-        cols = st.columns(min(len(group_methods), 4))
-        for i, (name, val) in enumerate(group_methods.items()):
-            pct = (val / current_price - 1) * 100 if current_price else 0
-            arrow = "↑" if pct >= 0 else "↓"
-            cols[i % len(cols)].metric(
-                name,
-                f"₫{val:,.0f}",
-                delta=f"{arrow} {abs(pct):.1f}%",
-            )
-
-    # ── Bar chart hội tụ ─────────────────────────────────────────────────────
-    st.markdown("#### 📈 Biểu Đồ Hội Tụ 9 Phương Pháp")
-    names = list(methods.keys())
-    values = list(methods.values())
-    colors = ['#22c55e' if v >= current_price else '#f43f5e' for v in values]
-
-    fig = go.Figure()
-    fig.add_trace(go.Bar(x=names, y=values, marker_color=colors, text=[f"₫{v:,.0f}" for v in values],
-                         textposition='outside', textfont=dict(size=10)))
-    fig.add_hline(y=current_price, line_dash='dash', line_color='#fbbf24', line_width=2,
-                  annotation_text=f"Giá HT ₫{current_price:,.0f}", annotation_position="top left")
-    if p25 and p75:
-        fig.add_hrect(y0=p25, y1=p75, fillcolor='rgba(168,85,247,0.08)',
-                      line_color='rgba(168,85,247,0.3)', line_width=1,
-                      annotation_text="Dải P25–P75", annotation_position="top right")
-    fig.update_layout(template='plotly_dark', paper_bgcolor='rgba(0,0,0,0)',
-                      plot_bgcolor='rgba(0,0,0,0)', margin=dict(t=40, b=20),
-                      yaxis=dict(title='Giá ước tính (đ)'),
-                      xaxis=dict(tickangle=-30))
-    st.plotly_chart(fig, use_container_width=True)
-
-    # ── Lịch sử P/E & P/B 5 năm ─────────────────────────────────────────────
     pe_s = valuation_pkg.get('pe_series')
     pb_s = valuation_pkg.get('pb_series')
-    if pe_s is not None and not pe_s.dropna().empty:
-        pe_clean = pe_s.dropna()
-        pb_clean = pb_s.dropna() if pb_s is not None else pd.Series(dtype=float)
-
-        # Caption động — nhận diện tình huống đặc biệt
-        pe_now = metrics.get('pe', 0) or 0
-        pb_now = metrics.get('pb', 0) or 0
-        pb_med = float(pb_clean.median()) if not pb_clean.empty else 0
-        pe_med = float(pe_clean.median()) if not pe_clean.empty else 0
-        pb_min = float(pb_clean.min()) if not pb_clean.empty else 0
-        pe_min = float(pe_clean.min()) if not pe_clean.empty else 0
-        yr_latest = int(pe_clean.index[-1]) if not pe_clean.empty else "N/A"
-
-        if pb_now > 0 and pb_now < 1.0:
-            caption_pepb = f"{yr_latest}: PB rơi xuống dưới 1.0 lần — vùng \"mua\" theo lịch sử"
-        elif pb_now > 0 and pb_now < pb_min * 1.1:
-            caption_pepb = f"{yr_latest}: PB {pb_now:.2f}x — gần mức sàn lịch sử {pb_min:.2f}x"
-        elif pb_now > 0 and pb_now < pb_med:
-            caption_pepb = f"{yr_latest}: PB {pb_now:.2f}x — dưới median lịch sử {pb_med:.2f}x (rẻ hơn TB)"
-        elif pe_now > 0 and pe_now < pe_med:
-            caption_pepb = f"{yr_latest}: PE {pe_now:.1f}x — dưới median lịch sử {pe_med:.1f}x"
-        else:
-            caption_pepb = f"{yr_latest}: PE {pe_now:.1f}x · PB {pb_now:.2f}x · Median PE {pe_med:.1f}x · Median PB {pb_med:.2f}x"
-
-        st.markdown("#### 📉 Lịch Sử P/E & P/B 5 Năm")
-        st.caption(caption_pepb)
-
+    if pe_s is not None and not pe_s.empty:
+        st.markdown("### Lịch Sử P/E & P/B 5 Năm")
         fig2 = go.Figure()
-        fig2.add_trace(go.Scatter(
-            x=pe_clean.index.astype(str), y=pe_clean.values,
-            name='P/E', line=dict(color='#a855f7', width=2.5),
-            mode='lines+markers',
-            marker=dict(size=10, color='#a855f7', line=dict(width=2, color='white')),
-            yaxis='y1'
-        ))
-        if not pb_clean.empty:
-            fig2.add_trace(go.Scatter(
-                x=pb_clean.index.astype(str), y=pb_clean.values,
-                name='P/B', line=dict(color='#10d98a', width=2.5),
-                mode='lines+markers',
-                marker=dict(size=10, color='#10d98a', line=dict(width=2, color='white')),
-                yaxis='y2'
-            ))
-        # Vạch median P/E
-        if not pe_clean.empty:
-            fig2.add_hline(y=float(pe_clean.median()), line_dash='dot',
-                           line_color='rgba(168,85,247,0.4)', line_width=1.5,
-                           annotation_text=f"PE Median {pe_clean.median():.1f}x",
-                           annotation_font_color='#a855f7')
-        # Vạch PB=1.0 (book value floor)
-        if not pb_clean.empty:
-            fig2.add_hline(y=1.0, line_dash='dash',
-                           line_color='rgba(16,217,138,0.3)', line_width=1,
-                           annotation_text="PB=1.0 (sàn)",
-                           annotation_position="bottom right",
-                           annotation_font_color='#10d98a',
-                           secondary_y=True if False else False)  # note: add_hline không hỗ trợ y2
-
+        fig2.add_trace(go.Scatter(x=pe_s.index, y=pe_s.values, name='P/E',
+                                  line=dict(color='#a855f7', width=2), yaxis='y1'))
+        if pb_s is not None and not pb_s.empty:
+            fig2.add_trace(go.Scatter(x=pb_s.index, y=pb_s.values, name='P/B',
+                                      line=dict(color='#10d98a', width=2), yaxis='y2'))
         fig2.update_layout(
-            template='plotly_dark', paper_bgcolor='rgba(0,0,0,0)',
-            plot_bgcolor='rgba(0,0,0,0)',
-            yaxis=dict(title='P/E (x)', side='left', color='#a855f7',
-                       gridcolor='rgba(168,85,247,0.08)'),
-            yaxis2=dict(title='P/B (x)', overlaying='y', side='right',
-                        color='#10d98a', showgrid=False),
-            legend=dict(orientation='h', y=1.1),
-            margin=dict(t=30, b=20),
+            template='plotly_dark',
+            paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+            yaxis=dict(title='P/E (x)'),
+            yaxis2=dict(title='P/B (x)', overlaying='y', side='right'),
+            margin=dict(t=20, b=20),
         )
         st.plotly_chart(fig2, use_container_width=True)
-
-        # ── Bảng thống kê chi tiết P/E & P/B ───────────────────────────────
-        st.markdown("#### 📊 Thông Số P/E & P/B Chi Tiết")
-        pe_cols = st.columns(5)
-        pb_cols = st.columns(5)
-
-        def _cmp_color(now, ref):
-            if not ref or ref == 0:
-                return "#e5e7eb"
-            return "#22c55e" if now < ref else "#f43f5e"
-
-        if not pe_clean.empty:
-            pe_min_v = float(pe_clean.min())
-            pe_max_v = float(pe_clean.max())
-            pe_avg   = float(pe_clean.mean())
-            for col, label, val in zip(pe_cols,
-                ["PE Hiện Tại", "PE Median 5N", "PE TB 5N", "PE Min 5N", "PE Max 5N"],
-                [pe_now, pe_med, pe_avg, pe_min_v, pe_max_v]):
-                c = _cmp_color(pe_now, val) if label != "PE Hiện Tại" else "#f0f0ff"
-                col.markdown(
-                    f"<div style='text-align:center'>"
-                    f"<div style='font-size:.75rem;opacity:.7'>{label}</div>"
-                    f"<div style='font-size:1.5rem;font-weight:700;color:{c}'>{val:.1f}x</div>"
-                    f"</div>", unsafe_allow_html=True)
-
-        if not pb_clean.empty:
-            pb_min_v = float(pb_clean.min())
-            pb_max_v = float(pb_clean.max())
-            pb_avg   = float(pb_clean.mean())
-            for col, label, val in zip(pb_cols,
-                ["PB Hiện Tại", "PB Median 5N", "PB TB 5N", "PB Sàn 5N", "PB Đỉnh 5N"],
-                [pb_now, pb_med, pb_avg, pb_min_v, pb_max_v]):
-                c = _cmp_color(pb_now, val) if label != "PB Hiện Tại" else "#f0f0ff"
-                col.markdown(
-                    f"<div style='text-align:center'>"
-                    f"<div style='font-size:.75rem;opacity:.7'>{label}</div>"
-                    f"<div style='font-size:1.5rem;font-weight:700;color:{c}'>{val:.2f}x</div>"
-                    f"</div>", unsafe_allow_html=True)
-
-        # ── 5 kịch bản định giá PE/PB (card style như ảnh tham chiếu) ───────
-        bvps_latest = metrics.get('bvps_latest') or 0
-        eps_latest  = metrics.get('eps_latest') or 0
-        st.markdown("---")
-        st.markdown("#### 🃏 5 Kịch Bản Định Giá PE · PB")
-        st.caption("Hệ số PE/PB tham chiếu × EPS & BVPS năm gần nhất")
-
-        scenarios = []
-        if bvps_latest > 0 and not pb_clean.empty:
-            scenarios.append(("PB 1.0x (Sàn)", bvps_latest * 1.0, "BVPS (book value)"))
-            scenarios.append(("PB Median 5N", bvps_latest * pb_med,
-                               f"BVPS × PB {pb_med:.2f}x"))
-            scenarios.append(("PB TB 5N", bvps_latest * pb_avg,
-                               f"BVPS × PB {pb_avg:.2f}x", True))
-        if eps_latest > 0 and not pe_clean.empty:
-            scenarios.append(("PE Median 5N", eps_latest * pe_med,
-                               f"EPS × PE {pe_med:.1f}x", True))
-            scenarios.append(("PE TB 5N", eps_latest * pe_avg,
-                               f"EPS × PE {pe_avg:.1f}x"))
-
-        if scenarios:
-            max_val = max(s[1] for s in scenarios)
-            card_cols = st.columns(len(scenarios))
-            for col, s in zip(card_cols, scenarios):
-                name, val, note = s[0], s[1], s[2]
-                is_rec = len(s) > 3 and s[3]
-                pct = (val / current_price - 1) * 100 if current_price else 0
-                bar_w = int(val / max_val * 100)
-                bar_color = "#22c55e" if pct >= 0 else "#f43f5e"
-                val_color = "#22c55e" if pct >= 0 else "#f43f5e"
-                badge = "<div style='background:linear-gradient(90deg,#a855f7,#ec4899);color:white;font-size:9px;padding:2px 7px;border-radius:20px;display:inline-block;margin-bottom:4px;'>KHUYẾN NGHỊ</div>" if is_rec else ""
-                col.markdown(f"""
-<div style="border-radius:14px;padding:14px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);height:100%">
-  {badge}
-  <div style="font-size:0.72rem;opacity:0.6;text-transform:uppercase;letter-spacing:.5px;">{name}</div>
-  <div style="font-size:1.6rem;font-weight:800;color:{val_color};font-family:'Courier New',monospace;">
-    {val/1000:.1f}<span style="font-size:1rem;">K</span>
-  </div>
-  <div style="font-size:0.8rem;font-weight:700;color:{val_color};">{pct:+.0f}%</div>
-  <div style="height:4px;border-radius:2px;background:rgba(255,255,255,0.08);margin:8px 0;">
-    <div style="width:{bar_w}%;height:4px;border-radius:2px;background:{bar_color};"></div>
-  </div>
-  <div style="font-size:0.7rem;opacity:0.55;">{note}</div>
-</div>""", unsafe_allow_html=True)
-
-        # ── Giá vs BVPS chart ─────────────────────────────────────────────────
-        st.markdown("---")
-        price_series = valuation_pkg.get('price_series')
-        bvps_series  = valuation_pkg.get('bvps_series')
-        if bvps_series is not None and not bvps_series.dropna().empty:
-            bvps_clean = bvps_series.dropna()
-            yr_latest_b = int(bvps_clean.index[-1]) if not bvps_clean.empty else "?"
-
-            # Caption động
-            if bvps_latest > 0 and current_price > 0:
-                prem = (current_price / bvps_latest - 1) * 100
-                direction = ">" if current_price > bvps_latest else "<"
-                prem_label = "premium" if prem >= 0 else "discount"
-                caption_bvps = (
-                    f"{yr_latest_b}: Giá ({current_price/1000:.3f}K đ) {direction} "
-                    f"BVPS ({bvps_latest/1000:.3f}K đ) — {prem_label} ~{abs(prem):.0f}%"
-                )
-            else:
-                caption_bvps = "Giá vs BVPS theo năm"
-
-            st.markdown("#### 📈 Giá vs Giá Trị Sổ Sách (BVPS)")
-            st.caption(caption_bvps)
-
-            fig3 = go.Figure()
-            xs = bvps_clean.index.astype(str)
-            # Bar BVPS màu teal (như ảnh)
-            fig3.add_trace(go.Bar(
-                x=xs, y=bvps_clean.values / 1000,
-                name='BVPS (K đ)',
-                marker_color='#0e7490',
-                opacity=0.75,
-            ))
-            # Line Giá màu hồng (như ảnh)
-            if price_series is not None and not price_series.dropna().empty:
-                price_clean = price_series.dropna()
-                fig3.add_trace(go.Scatter(
-                    x=price_clean.index.astype(str),
-                    y=price_clean.values / 1000,
-                    name='Giá (K đ)',
-                    line=dict(color='#ec4899', width=2.5),
-                    mode='lines+markers',
-                    marker=dict(size=10, color='#ec4899', line=dict(width=2, color='white')),
-                ))
-            fig3.update_layout(
-                template='plotly_dark', paper_bgcolor='rgba(0,0,0,0)',
-                plot_bgcolor='rgba(0,0,0,0)', margin=dict(t=20, b=20),
-                yaxis=dict(title='Nghìn đồng'),
-                legend=dict(orientation='h', y=1.1),
-                barmode='overlay',
-            )
-            st.plotly_chart(fig3, use_container_width=True)
-
-    st.caption(
-        "ℹ️ Giá ước tính = Hệ số Median lịch sử 5N của chính mã × Số liệu năm gần nhất. "
-        "DCF 3 kịch bản chi tiết xem tab **🧮 DCF & Graham**. "
-        "Tham khảo/giáo dục — không phải lời khuyên đầu tư."
-    )
 
 
 def _fmt_k(value):
@@ -934,3 +668,342 @@ border:1px solid rgba(168,85,247,0.25);">
 # ALIAS: app.py gọi render_tab_volume, nội dung giống render_tab_technical
 # ─────────────────────────────────────────────────────────────────────────────
 render_tab_volume = render_tab_technical
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TAB 3: MULTIPLES MỞ RỘNG — Card UI đẹp theo ảnh tham khảo
+# ─────────────────────────────────────────────────────────────────────────────
+
+_MULTIPLES_CSS = """
+<style>
+.mult-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 14px;
+    margin: 18px 0 24px;
+}
+@media (max-width: 640px) {
+    .mult-grid { grid-template-columns: repeat(2, 1fr); }
+}
+.mult-card {
+    background: rgba(255,255,255,0.03);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 18px;
+    padding: 20px 16px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    transition: border 0.2s;
+}
+.mult-card:hover { border-color: rgba(168,85,247,0.45); }
+.mult-card-label {
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.6px;
+    color: #8b8ba7;
+    text-transform: uppercase;
+}
+.mult-card-year {
+    font-size: 11px;
+    color: #555571;
+    margin-top: -4px;
+}
+.mult-card-value {
+    font-size: 32px;
+    font-weight: 800;
+    font-family: 'Courier New', monospace;
+    color: #22c55e;
+    line-height: 1.1;
+    margin: 4px 0 2px;
+}
+.mult-card-value.neutral { color: #c084fc; }
+.mult-card-value.warn    { color: #f59e0b; }
+.mult-card-value.danger  { color: #f43f5e; }
+.mult-card-value.na      { color: #555571; font-size: 18px; }
+.mult-card-sub {
+    font-size: 12px;
+    color: #8b8ba7;
+    line-height: 1.4;
+}
+.mult-card-sub strong { color: #c084fc; }
+.mult-section-title {
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 1.2px;
+    color: #8b8ba7;
+    text-transform: uppercase;
+    margin: 28px 0 4px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+.mult-section-title::before {
+    content: '';
+    display: inline-block;
+    width: 28px;
+    height: 28px;
+    border-radius: 8px;
+    background: linear-gradient(135deg, #a855f7, #ec4899);
+    font-size: 14px;
+    text-align: center;
+    line-height: 28px;
+    color: white;
+    font-weight: 900;
+}
+.mult-note {
+    background: linear-gradient(135deg, rgba(168,85,247,0.10), rgba(236,72,153,0.06));
+    border: 1px solid rgba(168,85,247,0.28);
+    border-radius: 12px;
+    padding: 13px 16px;
+    color: #c4b0ff;
+    font-size: 13px;
+    line-height: 1.6;
+    margin: 8px 0 20px;
+}
+.mult-note strong { color: #e9d5ff; }
+.mult-badge {
+    display: inline-block;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    padding: 2px 8px;
+    border-radius: 20px;
+    margin-left: 6px;
+    vertical-align: middle;
+}
+.badge-cheap   { background: rgba(34,197,94,0.15);  color: #22c55e; }
+.badge-fair    { background: rgba(168,85,247,0.15); color: #c084fc; }
+.badge-dear    { background: rgba(245,158,11,0.15); color: #f59e0b; }
+.badge-pricey  { background: rgba(244,63,94,0.15);  color: #f43f5e; }
+.badge-na      { background: rgba(255,255,255,0.05); color: #555571; }
+</style>
+"""
+
+def _mult_card(label, year, value_str, color_cls, sub_html, badge_html=""):
+    return f"""
+<div class="mult-card">
+  <div class="mult-card-label">{label}{badge_html}</div>
+  <div class="mult-card-year">{year}</div>
+  <div class="mult-card-value {color_cls}">{value_str}</div>
+  <div class="mult-card-sub">{sub_html}</div>
+</div>"""
+
+
+def _pe_color(pe):
+    if pe <= 0:   return "na"
+    if pe < 10:   return ""        # green
+    if pe < 15:   return "neutral" # purple
+    if pe < 20:   return "warn"
+    return "danger"
+
+def _pb_color(pb):
+    if pb <= 0:   return "na"
+    if pb < 1.0:  return ""
+    if pb < 1.5:  return "neutral"
+    if pb < 2.5:  return "warn"
+    return "danger"
+
+def _pe_sub(pe, pe_median_5y):
+    if pe <= 0: return "Không có dữ liệu"
+    m = f"{pe_median_5y:.1f}x" if pe_median_5y else "—"
+    if pe_median_5y and pe < pe_median_5y * 0.85:
+        return f"<strong>Dưới TB 5N</strong> ({m})"
+    if pe_median_5y and pe > pe_median_5y * 1.15:
+        return f"Trên TB 5N ({m})"
+    return f"Quanh TB 5N ({m})"
+
+def _pb_sub(pb, pb_median_5y):
+    if pb <= 0: return "Không có dữ liệu"
+    m = f"{pb_median_5y:.2f}x" if pb_median_5y else "—"
+    if pb_median_5y and pb < pb_median_5y * 0.85:
+        return f"<strong>Dưới TB 5N</strong> ({m})"
+    if pb_median_5y and pb > pb_median_5y * 1.15:
+        return f"Trên TB 5N ({m})"
+    return f"Quanh TB 5N ({m})"
+
+def _badge(pe, pe_med):
+    if not pe_med or pe <= 0: return ""
+    ratio = pe / pe_med
+    if ratio < 0.85:   return '<span class="mult-badge badge-cheap">Rẻ</span>'
+    if ratio < 1.0:    return '<span class="mult-badge badge-cheap">Hơi rẻ</span>'
+    if ratio < 1.15:   return '<span class="mult-badge badge-fair">Hợp lý</span>'
+    if ratio < 1.40:   return '<span class="mult-badge badge-dear">Hơi đắt</span>'
+    return '<span class="mult-badge badge-pricey">Đắt</span>'
+
+def render_tab_multiples(metrics, fundamentals, valuation_pkg):
+    st.markdown(_MULTIPLES_CSS, unsafe_allow_html=True)
+
+    is_bank       = metrics.get("is_bank", False)
+    current_year  = __import__('datetime').datetime.today().year
+    latest_year   = current_year - 1   # năm BCTC đầy đủ gần nhất
+
+    pe   = metrics.get("pe",  0.0) or 0.0
+    pb   = metrics.get("pb",  0.0) or 0.0
+    eps  = fundamentals.get("eps_latest",  0.0) or 0.0
+    bvps = fundamentals.get("bvps_latest", 0.0) or 0.0
+
+    pe_series = valuation_pkg.get("pe_series")
+    pb_series = valuation_pkg.get("pb_series")
+    import pandas as pd
+    def _median5(s):
+        if s is None or s.empty: return None
+        v = pd.to_numeric(s, errors='coerce').dropna()
+        v = v[(v > 0) & (v < 200)]
+        return float(v.median()) if not v.empty else None
+
+    pe_med = _median5(pe_series)
+    pb_med = _median5(pb_series)
+
+    ev_ebitda   = metrics.get("ebitda_latest_billion",  0.0) or 0.0
+    cfo_billion = metrics.get("cfo_latest_billion",     0.0) or 0.0
+    rev_billion = metrics.get("revenue_latest_billion", 0.0) or 0.0
+    net_debt    = metrics.get("net_debt_billion",       0.0) or 0.0
+    mktcap_b    = metrics.get("market_cap_billion",     0.0) or 0.0
+
+    ev_b = mktcap_b + net_debt
+    ev_ebitda_x = (ev_b / ev_ebitda)   if ev_ebitda > 0 and ev_b > 0 else None
+    pcf_x       = (mktcap_b / cfo_billion) if cfo_billion > 0 and mktcap_b > 0 else None
+    ps_x        = (mktcap_b / rev_billion)  if rev_billion > 0 and mktcap_b > 0 else None
+
+    ev_ebitda_series = valuation_pkg.get("pe_series")   # placeholder — same median logic
+    pcf_series       = None
+    ps_series        = None
+
+    # ── Section 01: Core multiples ────────────────────────────────────────
+    st.markdown(
+        '<div class="mult-section-title" style="--n:\'01\';">01 &nbsp; Định giá cốt lõi · P/E · P/B · EPS · BVPS</div>',
+        unsafe_allow_html=True
+    )
+
+    pe_badge  = _badge(pe, pe_med)
+    pb_badge  = _badge(pb, pb_med)
+    yr = str(latest_year)
+
+    pe_val_str  = f"{pe:.2f}x"  if pe  > 0 else "N/A"
+    pb_val_str  = f"{pb:.2f}x"  if pb  > 0 else "N/A"
+    eps_val_str = f"{eps:,.0f}đ" if eps > 0 else "N/A"
+    bvp_val_str = f"{bvps:,.0f}đ" if bvps > 0 else "N/A"
+
+    cards_01 = (
+        _mult_card("P/E", yr, pe_val_str,  _pe_color(pe),  _pe_sub(pe, pe_med),  pe_badge)
+      + _mult_card("P/B", yr, pb_val_str,  _pb_color(pb),  _pb_sub(pb, pb_med),  pb_badge)
+      + _mult_card("EPS", yr, eps_val_str, "neutral" if eps > 0 else "na",
+                   "Thu nhập / cổ phiếu" if eps > 0 else "Không có dữ liệu")
+      + _mult_card("BVPS", yr, bvp_val_str, "neutral" if bvps > 0 else "na",
+                   "Giá trị sổ sách / CP" if bvps > 0 else "Không có dữ liệu")
+    )
+    st.markdown(f'<div class="mult-grid">{cards_01}</div>', unsafe_allow_html=True)
+
+    # ── Section 02: Extended multiples ────────────────────────────────────
+    st.markdown(
+        '<div class="mult-section-title">02 &nbsp; Multiples mở rộng · EV/EBITDA · P/CF · P/S</div>',
+        unsafe_allow_html=True
+    )
+
+    if is_bank:
+        st.markdown("""
+<div class="mult-note">
+ℹ️ <strong>P/S và EV/EBITDA không áp dụng cho ngân hàng</strong> —
+khái niệm 'Doanh thu' và 'EBITDA' không phản ánh đúng bản chất kinh doanh
+(thu nhập lãi thuần, chi phí dự phòng rủi ro tín dụng có cấu trúc riêng).
+Với ngân hàng nên dùng <strong>P/B + ROE, NIM, NPL, CAR</strong> thay thế.
+</div>""", unsafe_allow_html=True)
+
+        # Ngân hàng: hiển thị NIM / NPL placeholder
+        cards_bank = (
+            _mult_card("P/B", yr, pb_val_str, _pb_color(pb),
+                       "Định giá chính cho ngân hàng", pb_badge)
+          + _mult_card("EPS", yr, eps_val_str, "neutral" if eps > 0 else "na", "—")
+          + _mult_card("P/CF", yr, "N/A", "na", "Không áp dụng ngân hàng")
+          + _mult_card("P/S · EV/EBITDA", yr, "N/A", "na", "Không áp dụng ngân hàng")
+        )
+        st.markdown(f'<div class="mult-grid">{cards_bank}</div>', unsafe_allow_html=True)
+
+    else:
+        def _pcf_sub(pcf):
+            if pcf is None: return "Thiếu dữ liệu CFO"
+            if pcf < 8:   return "<strong>Dòng tiền hấp dẫn</strong>"
+            if pcf < 15:  return "Dòng tiền hợp lý"
+            return "Dòng tiền đắt"
+
+        def _evebitda_sub(ev_eb):
+            if ev_eb is None: return "Thiếu dữ liệu EBITDA"
+            if ev_eb < 8:   return "<strong>Định giá rẻ</strong>"
+            if ev_eb < 12:  return "Định giá hợp lý"
+            return "Định giá cao"
+
+        def _ps_sub(ps):
+            if ps is None: return "Thiếu dữ liệu Doanh thu"
+            if ps < 1:    return "<strong>Cạnh tranh tốt</strong>"
+            if ps < 2:    return "Canh tranh hợp lý"
+            return "Premium định giá"
+
+        ev_str  = f"{ev_ebitda_x:.2f}x" if ev_ebitda_x else "N/A"
+        pcf_str = f"{pcf_x:.2f}x"       if pcf_x       else "N/A"
+        ps_str  = f"{ps_x:.2f}x"        if ps_x        else "N/A"
+
+        def _val_color(v, thresholds):
+            if v is None: return "na"
+            lo, hi = thresholds
+            if v < lo:  return ""        # green
+            if v < hi:  return "neutral" # purple
+            return "warn"
+
+        cards_ext = (
+            _mult_card("EV/EBITDA", yr, ev_str,
+                       _val_color(ev_ebitda_x, (8, 12)), _evebitda_sub(ev_ebitda_x))
+          + _mult_card("P/CF", yr, pcf_str,
+                       _val_color(pcf_x, (8, 15)), _pcf_sub(pcf_x))
+          + _mult_card("P/S", yr, ps_str,
+                       _val_color(ps_x, (1, 2)), _ps_sub(ps_x))
+          + _mult_card("Vốn hóa / Tài sản", yr,
+                       f"{(mktcap_b / (metrics.get('market_cap_billion',1) or 1)):.2f}x"
+                       if False else "—",
+                       "na", "Market Cap / Net Assets")
+        )
+        st.markdown(f'<div class="mult-grid">{cards_ext}</div>', unsafe_allow_html=True)
+
+        if not ev_ebitda_x or not pcf_x or not ps_x:
+            st.markdown("""
+<div class="mult-note">
+ℹ️ Một số chỉ số chưa tính được do <strong>thiếu dữ liệu EBITDA / CFO / Doanh thu</strong>
+từ nguồn API. Pipeline sẽ tự bù từ TCBS/CafeF ở lần tải tiếp theo.
+</div>""", unsafe_allow_html=True)
+
+    # ── Section 03: So sánh trực quan PE/PB với TB 5 năm ────────────────
+    if pe_med or pb_med:
+        st.markdown(
+            '<div class="mult-section-title">03 &nbsp; So sánh với trung bình 5 năm</div>',
+            unsafe_allow_html=True
+        )
+        import plotly.graph_objects as go
+
+        cats, cur_vals, med_vals = [], [], []
+        if pe > 0 and pe_med:
+            cats.append("P/E"); cur_vals.append(pe); med_vals.append(pe_med)
+        if pb > 0 and pb_med:
+            cats.append("P/B"); cur_vals.append(pb); med_vals.append(pb_med)
+
+        if cats:
+            fig = go.Figure()
+            fig.add_trace(go.Bar(
+                x=cats, y=med_vals, name="TB 5 năm",
+                marker_color="rgba(168,85,247,0.35)",
+                marker_line_color="rgba(168,85,247,0.8)",
+                marker_line_width=1.5,
+            ))
+            fig.add_trace(go.Bar(
+                x=cats, y=cur_vals, name="Hiện tại",
+                marker_color="rgba(34,197,94,0.8)",
+            ))
+            fig.update_layout(
+                barmode="group", template="plotly_dark",
+                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                height=260,
+                margin=dict(t=10, b=10, l=20, r=20),
+                legend=dict(orientation="h", y=1.1),
+                font=dict(color="#c4b0ff"),
+                xaxis=dict(showgrid=False),
+                yaxis=dict(showgrid=True, gridcolor="rgba(255,255,255,0.05)"),
+            )
+            st.plotly_chart(fig, use_container_width=True)
