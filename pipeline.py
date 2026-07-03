@@ -590,6 +590,15 @@ def execute_equity_research_pipeline(ticker):
             "ddm_value":          ddm_value,
             "pe_series":          pe_series,
             "pb_series":          pb_series,
+            "bvps_series":        bvps_series_filled,
+            "price_series":       (
+                # Giá cuối năm từ df_price (close_vnd cuối tháng 12 mỗi năm)
+                df_price.set_index('time')['close_vnd']
+                .resample('YE').last()
+                .rename(lambda x: x.year)
+                if not df_price.empty and 'time' in df_price.columns and 'close_vnd' in df_price.columns
+                else pd.Series(dtype=float)
+            ),
         }
 
         if 'volume' not in df_price.columns:
