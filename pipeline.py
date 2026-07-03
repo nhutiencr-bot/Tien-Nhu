@@ -14,10 +14,13 @@ from financial_normalizer import (
 from valuation import (
     dupont_decomposition, dcf_fcff_scenarios, reverse_dcf_implied_growth,
     graham_number, ddm_gordon, nine_methods_valuation, summarize_valuation,
+    detect_stock_dividend_years, normalize_eps_bvps_series, estimate_wacc,
 )
 from cafef_fallback import fetch_cafef_balance_sheet_5y
 
-SOURCE_FALLBACK_ORDER = ['VCI', 'KBS', 'DNSE']
+# Thử KBS trước (hoạt động ổn định qua mọi lần test) — VCI hay fail/timeout,
+# đưa lên đầu gây chờ vô ích trước khi fallback. Đây là fix tốc độ chính.
+SOURCE_FALLBACK_ORDER = ['KBS', 'VCI', 'DNSE']
 DEFAULT_YEAR_LIMIT = 5
 
 
@@ -91,10 +94,12 @@ def _safe_fetch(fn, default=None):
         return default if default is not None else pd.DataFrame()
 
 
-def _fetch_income_statement(ticker, period='year', limit=DEFAULT_YEAR_LIMIT):
-    for source in SOURCE_FALLBACK_ORDER:
+def _fetch_income_statement(ticker, source, period='year', limit=DEFAULT_YEAR_LIMIT):
+    # Thử nguồn ĐÃ XÁC ĐỊNH (source_used) trước tiên — nhanh, đúng ngay lần
+    # đầu — thay vì luôn thử lại VCI trước cho mọi field (fix tốc độ).
+    for src in [source] + [s for s in SOURCE_FALLBACK_ORDER if s != source]:
         try:
-            f = Finance(symbol=ticker, source=source, period=period)
+            f = Finance(symbol=ticker, source=src, period=period)
             try:
                 df = f.income_statement(period=period, limit=limit)
             except TypeError:
@@ -106,10 +111,10 @@ def _fetch_income_statement(ticker, period='year', limit=DEFAULT_YEAR_LIMIT):
     return pd.DataFrame()
 
 
-def _fetch_ratio(ticker, period='year', limit=DEFAULT_YEAR_LIMIT):
-    for source in SOURCE_FALLBACK_ORDER:
+def _fetch_ratio(ticker, source, period='year', limit=DEFAULT_YEAR_LIMIT):
+    for src in [source] + [s for s in SOURCE_FALLBACK_ORDER if s != source]:
         try:
-            f = Finance(symbol=ticker, source=source, period=period)
+            f = Finance(symbol=ticker, source=src, period=period)
             try:
                 df = f.ratio(period=period, limit=limit)
             except TypeError:
@@ -121,10 +126,10 @@ def _fetch_ratio(ticker, period='year', limit=DEFAULT_YEAR_LIMIT):
     return pd.DataFrame()
 
 
-def _fetch_cashflow(ticker, period='year', limit=DEFAULT_YEAR_LIMIT):
-    for source in SOURCE_FALLBACK_ORDER:
+def _fetch_cashflow(ticker, source, period='year', limit=DEFAULT_YEAR_LIMIT):
+    for src in [source] + [s for s in SOURCE_FALLBACK_ORDER if s != source]:
         try:
-            f = Finance(symbol=ticker, source=source, period=period)
+            f = Finance(symbol=ticker, source=src, period=period)
             try:
                 df = f.cash_flow(period=period, limit=limit)
             except TypeError:
@@ -136,10 +141,10 @@ def _fetch_cashflow(ticker, period='year', limit=DEFAULT_YEAR_LIMIT):
     return pd.DataFrame()
 
 
-def _fetch_balance_sheet(ticker, period='year', limit=DEFAULT_YEAR_LIMIT):
-    for source in SOURCE_FALLBACK_ORDER:
+def _fetch_balance_sheet(ticker, source, period='year', limit=DEFAULT_YEAR_LIMIT):
+    for src in [source] + [s for s in SOURCE_FALLBACK_ORDER if s != source]:
         try:
-            f = Finance(symbol=ticker, source=source, period=period)
+            f = Finance(symbol=ticker, source=src, period=period)
             try:
                 df = f.balance_sheet(period=period, limit=limit)
             except TypeError:
@@ -154,7 +159,6 @@ def _fetch_balance_sheet(ticker, period='year', limit=DEFAULT_YEAR_LIMIT):
 @st.cache_data(ttl=1800)
 def execute_equity_research_pipeline(ticker):
     try:
-        # FIX 1: Xóa st.info "Nguồn VCI không khả dụng" — chỉ lưu nội bộ
         q_engine, f_engine, c_engine, source_used = _build_engines_with_fallback(ticker)
 
         end_date   = datetime.today().strftime('%Y-%m-%d')
@@ -163,13 +167,13 @@ def execute_equity_research_pipeline(ticker):
         tasks = {
             "price":      lambda: q_engine.history(start=start_date, end=end_date, interval='1D'),
             "overview":   lambda: c_engine.overview(),
-            "income_y":   lambda: _fetch_income_statement(ticker, period='year',    limit=DEFAULT_YEAR_LIMIT),
-            "cashflow_y": lambda: _fetch_cashflow(ticker,          period='year',    limit=DEFAULT_YEAR_LIMIT),
-            "ratio_y":    lambda: _fetch_ratio(ticker,             period='year',    limit=DEFAULT_YEAR_LIMIT),
-            "income_q":   lambda: _fetch_income_statement(ticker,  period='quarter', limit=20),
-            "ratio_q":    lambda: _fetch_ratio(ticker,             period='quarter', limit=20),
-            "balance_y":  lambda: _fetch_balance_sheet(ticker,     period='year',    limit=DEFAULT_YEAR_LIMIT),
-            "balance_q":  lambda: _fetch_balance_sheet(ticker,     period='quarter', limit=20),
+            "income_y":   lambda: _fetch_income_statement(ticker, source_used, period='year',    limit=DEFAULT_YEAR_LIMIT),
+            "cashflow_y": lambda: _fetch_cashflow(ticker,          source_used, period='year',    limit=DEFAULT_YEAR_LIMIT),
+            "ratio_y":    lambda: _fetch_ratio(ticker,             source_used, period='year',    limit=DEFAULT_YEAR_LIMIT),
+            "income_q":   lambda: _fetch_income_statement(ticker,  source_used, period='quarter', limit=20),
+            "ratio_q":    lambda: _fetch_ratio(ticker,             source_used, period='quarter', limit=20),
+            "balance_y":  lambda: _fetch_balance_sheet(ticker,     source_used, period='year',    limit=DEFAULT_YEAR_LIMIT),
+            "balance_q":  lambda: _fetch_balance_sheet(ticker,     source_used, period='quarter', limit=20),
             "news":       lambda: c_engine.news(),
         }
 
@@ -215,10 +219,10 @@ def execute_equity_research_pipeline(ticker):
             fin5['net_profit'], equity_series, fin5['roe'])
         eps_series              = fin5['eps']
         bvps_series             = fin5['bvps']
-        roe_series              = fin5['roe']
-        roa_series              = fin5['roa']
-        pe_series               = fin5['pe']
-        pb_series               = fin5['pb']
+        roe_series               = fin5['roe']
+        roa_series               = fin5['roa']
+        pe_series                = fin5['pe']
+        pb_series                = fin5['pb']
         outstanding_shares_series = fin5['outstanding_shares']
 
         if equity_series.empty and not total_assets_series.empty:
@@ -457,7 +461,6 @@ def execute_equity_research_pipeline(ticker):
             revenue_series, net_profit_series, total_assets_series, equity_series)
 
         # ── DCF ───────────────────────────────────────────────────────────
-        # FIX 2: Xóa hoàn toàn dòng st.caption DEBUG DCF
         cfo_series = cfo_series_for_multiples
         capex_series = normalize_to_billion_vnd(find_row_series(
             df_cashflow,
@@ -474,23 +477,35 @@ def execute_equity_research_pipeline(ticker):
             capex_l = get_latest(capex_series, default=0.0) if not capex_series.empty else 0.0
             if cfo_l is not None:
                 latest_fcff = (cfo_l - abs(capex_l)) * 1e9
-        # (không có st.caption DEBUG ở đây)
 
+        # net_debt_latest (tính ở khối Multiples phía trên) dùng lại cho DCF
+        # để EV chính xác hơn thay vì giả định net_debt = 0.
         dcf_results = reverse_g = None
         if latest_fcff and latest_fcff > 0 and issue_share > 0:
             dcf_results = dcf_fcff_scenarios(
-                latest_fcff=latest_fcff, shares_outstanding=issue_share, net_debt=0.0)
+                latest_fcff=latest_fcff, shares_outstanding=issue_share,
+                net_debt=net_debt_latest * 1e9, ticker=ticker)
             reverse_g = reverse_dcf_implied_growth(
                 current_price=current_price, shares_outstanding=issue_share,
-                latest_fcff=latest_fcff, wacc=0.105, net_debt=0.0)
+                latest_fcff=latest_fcff, wacc=estimate_wacc(ticker),
+                net_debt=net_debt_latest * 1e9)
 
         graham_value = graham_number(eps_latest, bvps_latest) \
             if eps_latest > 0 and bvps_latest > 0 else None
 
+        # ── Phát hiện pha loãng (cổ tức CP) + điều chỉnh EPS/BVPS lịch sử ──
+        dilution_years = detect_stock_dividend_years(outstanding_shares_series)
+        eps_adj, bvps_adj = normalize_eps_bvps_series(
+            eps_series_filled, bvps_series_filled, outstanding_shares_series)
+
+        # ── DDM (Gordon Growth) — chữ ký ĐÚNG theo valuation.py hiện tại:
+        # nhận cả series, tự kiểm tra payout ratio, trả về tuple (giá, lý_do).
+        # ⚠️ Đây là fix quan trọng nhất — bản cũ gọi ddm_gordon(dps_latest,
+        # required_return=..., g=...) SAI chữ ký, gây crash TOÀN BỘ pipeline
+        # (not just DDM) cho mọi mã chưa có cache.
         dps_series = fin5.get('dps', pd.Series(dtype=float))
         dps_latest = get_latest(dps_series, default=0.0) if not dps_series.empty else 0.0
-        ddm_value  = (ddm_gordon(dps_latest, required_return=0.11, g=0.04)
-                      if dps_latest > 0 else None)
+        ddm_value, ddm_note = ddm_gordon(dps_series, net_profit_series, ticker=ticker)
 
         dividend_yield_pct = (dps_latest / current_price * 100) \
             if dps_latest > 0 and current_price > 0 else None
@@ -501,7 +516,11 @@ def execute_equity_research_pipeline(ticker):
             eps_latest=eps_latest, bvps_latest=bvps_latest,
             pe_series=pe_series, pb_series=pb_series,
             current_price=current_price,
-            dcf_results=dcf_results, graham_value=graham_value, ddm_value=ddm_value)
+            dcf_results=dcf_results, graham_value=graham_value, ddm_value=ddm_value,
+            eps_adj=eps_adj, bvps_adj=bvps_adj,
+            shares_series=outstanding_shares_series,
+            net_profit_series=net_profit_series,
+            dps_series=dps_series, ticker=ticker)
 
         valuation_summary = summarize_valuation(valuation_methods, current_price) \
             if valuation_methods else None
@@ -513,6 +532,8 @@ def execute_equity_research_pipeline(ticker):
             "reverse_dcf_g_pct": reverse_g * 100 if reverse_g is not None else None,
             "graham_value":      graham_value,
             "ddm_value":         ddm_value,
+            "ddm_note":          ddm_note,
+            "dilution_years":    dilution_years,
             "pe_series":         pe_series,
             "pb_series":         pb_series,
             "bvps_series":       bvps_series_filled,
@@ -546,7 +567,7 @@ def execute_equity_research_pipeline(ticker):
                                  else "RỦI RO (Downtrend)",
         }
 
-        # ── Tin tức — FIX 3: dùng _safe_fetch thay _safe_call ────────────
+        # ── Tin tức ──────────────────────────────────────────────────────
         vnstock_news = []
         news_raw = _safe_fetch(lambda: c_engine.news(), default=pd.DataFrame())
         if news_raw is not None and not news_raw.empty:
