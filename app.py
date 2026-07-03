@@ -363,12 +363,10 @@ def fetch_tcbs_reports(ticker):
         pass
     return reports
 
-# =====================================================================
-# GIAO DIỆN TAB BÁO CÁO PHÂN TÍCH CỦA BẠN (GIỮ NGUYÊN HTML)
-# =====================================================================
+# --- TAB BÁO CÁO PHÂN TÍCH (ĐÃ SỬA LỖI CÚ PHÁP) ---
 with tab_report:
     st.markdown("### 📑 Báo Cáo Phân Tích & Khuyến Nghị")
-    st.caption(f"Tổng hợp khuyến nghị mới nhất cho mã {ticker_input.upper()} — Dữ liệu lấy trực tiếp không cần đăng nhập.")
+    st.caption(f"Tổng hợp khuyến nghị mới nhất cho mã {ticker_input.upper()} — Dữ liệu lấy trực tiếp.")
 
     cafef_url = f"https://s.cafef.vn/bao-cao-phan-tich/{ticker_input.lower()}.chn"
     vietstock_url = f"https://finance.vietstock.vn/{ticker_input.upper()}/bao-cao-phan-tich.htm"
@@ -382,20 +380,18 @@ with tab_report:
     st.divider()
 
     with st.spinner("Đang tải danh sách báo cáo..."):
-        # CHỖ ĐỔI MỚI: Gọi hàm fetch_tcbs_reports thay vì cafef
+        # Sử dụng hàm API ngầm mới để tránh lỗi trống dữ liệu
         reports_list = fetch_tcbs_reports(ticker_input)
 
     current_price = metrics.get("current_price", 0) or 0
 
     if not reports_list:
-        st.info(
-            f"Hiện chưa lấy được báo cáo nào cho mã {ticker_input.upper()}. "
-            "Có thể không có báo cáo gần đây — dùng nút phía trên để xem trực tiếp."
-        )
+        st.info(f"Hiện không có báo cáo phân tích mới nào cho mã {ticker_input.upper()}.")
     else:
         rows_html = ""
         for r in reports_list:
             tp = r.get("target_price")
+            # Tính toán upside an toàn
             if tp and current_price > 0:
                 upside_pct = (tp - current_price) / current_price * 100
                 upside_str = f"{upside_pct:+.0f}%"
@@ -426,7 +422,7 @@ with tab_report:
             <thead>
                 <tr style="border-bottom: 2px solid rgba(255,255,255,0.25); text-align:left;">
                     <th style="padding:10px 14px;">Mã</th>
-                    <th style="padding:10px 14px;">Ngày khuyến nghị</th>
+                    <th style="padding:10px 14px;">Ngày</th>
                     <th style="padding:10px 14px;">Khuyến nghị</th>
                     <th style="padding:10px 14px; text-align:right;">Giá mục tiêu</th>
                     <th style="padding:10px 14px; text-align:right;">% upside</th>
@@ -443,8 +439,4 @@ with tab_report:
         st.markdown(table_html, unsafe_allow_html=True)
 
     st.divider()
-    st.caption(
-        "⚠️ **Disclaimer:** Báo cáo giáo dục/tham khảo. "
-        "Đối chiếu BCTC kiểm toán chính thức trước khi ra quyết định. "
-        "**Không phải lời khuyên đầu tư.** Đầu tư cổ phiếu có rủi ro mất vốn."
-    )
+    st.caption("⚠️ **Disclaimer:** Báo cáo giáo dục/tham khảo. Đầu tư cổ phiếu có rủi ro mất vốn.")
