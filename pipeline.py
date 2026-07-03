@@ -14,6 +14,7 @@ from financial_normalizer import (
 from valuation import (
     dupont_decomposition, dcf_fcff_scenarios, reverse_dcf_implied_growth,
     graham_number, ddm_gordon, nine_methods_valuation, summarize_valuation,
+    detect_stock_dividend_years, normalize_eps_bvps_series, estimate_wacc,
 )
 from cafef_fallback import fetch_cafef_balance_sheet_5y
 
@@ -533,36 +534,33 @@ def execute_equity_research_pipeline(ticker):
             if cfo_l is not None:
                 latest_fcff = (cfo_l - abs(capex_l)) * 1e9
 
+        # net_debt_latest đã tính ở mục 5b (Multiples Mở Rộng) — dùng lại
+        # để EV trong DCF chính xác hơn thay vì giả định net_debt=0.
         dcf_results = reverse_g = None
         if latest_fcff and latest_fcff > 0 and issue_share > 0:
             dcf_results = dcf_fcff_scenarios(
-                latest_fcff=latest_fcff, shares_outstanding=issue_share, net_debt=0.0)
+                latest_fcff=latest_fcff, shares_outstanding=issue_share,
+                net_debt=net_debt_latest * 1e9, ticker=ticker)
             reverse_g = reverse_dcf_implied_growth(
                 current_price=current_price, shares_outstanding=issue_share,
-                latest_fcff=latest_fcff, wacc=0.105, net_debt=0.0)
+                latest_fcff=latest_fcff, wacc=estimate_wacc(ticker),
+                net_debt=net_debt_latest * 1e9)
 
         graham_value = graham_number(eps_latest, bvps_latest) if eps_latest > 0 and bvps_latest > 0 else None
 
-        # ── DDM (Gordon Growth) ─────────────────────────────────────────
-        # Chỉ áp dụng khi công ty có DPS tiền mặt > 0 (financial_normalizer
-        # đã lọc đúng 'cổ tức tiền mặt' / 'dividend per share', KHÔNG lẫn
-        # cổ tức cổ phiếu — tránh đúng bẫy HPG/VNM mà bạn nêu: DPS tiền mặt
-        # thấp do trả cổ tức bằng cổ phiếu sẽ khiến DDM ra giá thấp bất
-        # thường nếu tính nhầm từ tổng cổ tức).
-        # ke=11%, g=4% là giả định mặc định hợp lý cho CP VN trả cổ tức đều
-        # (utilities, ngân hàng truyền thống) — có thể tinh chỉnh theo ngành
-        # sau nếu cần.
+        # ── Phát hiện pha loãng (cổ tức CP) + điều chỉnh EPS/BVPS lịch sử ──
+        dilution_years = detect_stock_dividend_years(outstanding_shares_series)
+        eps_adj, bvps_adj = normalize_eps_bvps_series(
+            eps_series_filled, bvps_series_filled, outstanding_shares_series)
+
+        # ── DDM (Gordon Growth) — chữ ký mới: nhận cả series, tự kiểm tra
+        # payout ratio 3 năm gần nhất, tự chọn ke theo WACC ngành, trả về
+        # tuple (giá, lý_do_từ_chối_nếu_có).
         dps_series = fin5.get('dps', pd.Series(dtype=float))
         dps_latest = get_latest(dps_series, default=0.0) if not dps_series.empty else 0.0
-        ddm_value = (ddm_gordon(dps_latest, required_return=0.11, g=0.04)
-                     if dps_latest > 0 else None)
+        ddm_value, ddm_note = ddm_gordon(dps_series, net_profit_series, ticker=ticker)
 
         # ── Dividend Yield (Tỷ suất cổ tức) = DPS / Giá hiện tại × 100 ────
-        # Cho phép đối chiếu trực quan các mã CÓ chia cổ tức tiền mặt (VD
-        # ACB) vs mã KHÔNG chia (VD STB đang tái cơ cấu, giữ lại lợi nhuận)
-        # — 2 trường hợp này không "mã nào rẻ hơn", chỉ là DDM không áp
-        # dụng được cho mã không chia cổ tức, cần nhìn thêm 8 phương pháp
-        # định giá còn lại (đặc biệt DCF/PE/PB) để đánh giá đầy đủ.
         dividend_yield_pct = (dps_latest / current_price * 100) if dps_latest > 0 and current_price > 0 else None
         clean_metrics["dividend_yield_pct"] = dividend_yield_pct
         clean_metrics["dps_latest"] = dps_latest if dps_latest > 0 else None
@@ -571,7 +569,11 @@ def execute_equity_research_pipeline(ticker):
             eps_latest=eps_latest, bvps_latest=bvps_latest,
             pe_series=pe_series, pb_series=pb_series,
             current_price=current_price,
-            dcf_results=dcf_results, graham_value=graham_value, ddm_value=ddm_value)
+            dcf_results=dcf_results, graham_value=graham_value, ddm_value=ddm_value,
+            eps_adj=eps_adj, bvps_adj=bvps_adj,
+            shares_series=outstanding_shares_series,
+            net_profit_series=net_profit_series,
+            dps_series=dps_series, ticker=ticker)
 
         valuation_summary = summarize_valuation(valuation_methods, current_price) if valuation_methods else None
 
@@ -582,6 +584,8 @@ def execute_equity_research_pipeline(ticker):
             "reverse_dcf_g_pct":  reverse_g * 100 if reverse_g is not None else None,
             "graham_value":       graham_value,
             "ddm_value":          ddm_value,
+            "ddm_note":           ddm_note,
+            "dilution_years":     dilution_years,
             "pe_series":          pe_series,
             "pb_series":          pb_series,
         }
