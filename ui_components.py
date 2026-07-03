@@ -369,14 +369,118 @@ def render_tab_valuation(valuation_pkg, metrics):
         )
         st.plotly_chart(fig2, use_container_width=True)
 
-        # Bảng tóm tắt thống kê P/E P/B
-        c1, c2, c3, c4 = st.columns(4)
+        # ── Bảng thống kê chi tiết P/E & P/B ───────────────────────────────
+        pe_now = metrics.get('pe', 0) or 0
+        pb_now = metrics.get('pb', 0) or 0
+
+        st.markdown("#### 📊 Thông Số P/E & P/B Chi Tiết")
+        pe_cols = st.columns(5)
+        pb_cols = st.columns(5)
+
+        def _cmp_color(now, ref):
+            if not ref or ref == 0:
+                return "#e5e7eb"
+            return "#22c55e" if now < ref else "#f43f5e"
+
         if not pe_clean.empty:
-            c1.metric("PE Hiện Tại", f"{metrics.get('pe', 0):.2f}x")
-            c2.metric("PE Median 5N", f"{pe_clean.median():.2f}x")
+            pe_min = float(pe_clean.min())
+            pe_max = float(pe_clean.max())
+            pe_med = float(pe_clean.median())
+            pe_avg = float(pe_clean.mean())
+            for col, label, val in zip(pe_cols,
+                ["PE Hiện Tại", "PE Median 5N", "PE TB 5N", "PE Min 5N", "PE Max 5N"],
+                [pe_now, pe_med, pe_avg, pe_min, pe_max]):
+                c = _cmp_color(pe_now, val) if label != "PE Hiện Tại" else "#f0f0ff"
+                col.markdown(
+                    f"<div style='text-align:center'>"
+                    f"<div style='font-size:.75rem;opacity:.7'>{label}</div>"
+                    f"<div style='font-size:1.5rem;font-weight:700;color:{c}'>{val:.1f}x</div>"
+                    f"</div>", unsafe_allow_html=True)
+
         if not pb_clean.empty:
-            c3.metric("PB Hiện Tại", f"{metrics.get('pb', 0):.2f}x")
-            c4.metric("PB Median 5N", f"{pb_clean.median():.2f}x")
+            pb_min = float(pb_clean.min())
+            pb_max = float(pb_clean.max())
+            pb_med = float(pb_clean.median())
+            pb_avg = float(pb_clean.mean())
+            for col, label, val in zip(pb_cols,
+                ["PB Hiện Tại", "PB Median 5N", "PB TB 5N", "PB Sàn 5N", "PB Đỉnh 5N"],
+                [pb_now, pb_med, pb_avg, pb_min, pb_max]):
+                c = _cmp_color(pb_now, val) if label != "PB Hiện Tại" else "#f0f0ff"
+                col.markdown(
+                    f"<div style='text-align:center'>"
+                    f"<div style='font-size:.75rem;opacity:.7'>{label}</div>"
+                    f"<div style='font-size:1.5rem;font-weight:700;color:{c}'>{val:.2f}x</div>"
+                    f"</div>", unsafe_allow_html=True)
+
+        # ── 5 kịch bản định giá PE/PB (card style như ảnh tham chiếu) ───────
+        bvps_latest = metrics.get('bvps_latest') or 0
+        eps_latest  = metrics.get('eps_latest') or 0
+        st.markdown("---")
+        st.markdown("#### 🃏 5 Kịch Bản Định Giá PE · PB")
+        st.caption("Hệ số PE/PB tham chiếu × EPS & BVPS năm gần nhất")
+
+        scenarios = []
+        if bvps_latest > 0 and not pb_clean.empty:
+            scenarios.append(("PB 1.0x (Sàn)", bvps_latest * 1.0, "BVPS (book value)"))
+            scenarios.append(("PB Median 5N", bvps_latest * pb_med,
+                               f"BVPS × PB {pb_med:.2f}x"))
+            scenarios.append(("PB TB 5N", bvps_latest * pb_avg,
+                               f"BVPS × PB {pb_avg:.2f}x", True))
+        if eps_latest > 0 and not pe_clean.empty:
+            scenarios.append(("PE Median 5N", eps_latest * pe_med,
+                               f"EPS × PE {pe_med:.1f}x", True))
+            scenarios.append(("PE TB 5N", eps_latest * pe_avg,
+                               f"EPS × PE {pe_avg:.1f}x"))
+
+        if scenarios:
+            max_val = max(s[1] for s in scenarios)
+            card_cols = st.columns(len(scenarios))
+            for col, s in zip(card_cols, scenarios):
+                name, val, note = s[0], s[1], s[2]
+                is_rec = len(s) > 3 and s[3]
+                pct = (val / current_price - 1) * 100 if current_price else 0
+                bar_w = int(val / max_val * 100)
+                bar_color = "#22c55e" if pct >= 0 else "#f43f5e"
+                val_color = "#22c55e" if pct >= 0 else "#f43f5e"
+                badge = "<div style='background:linear-gradient(90deg,#a855f7,#ec4899);color:white;font-size:9px;padding:2px 7px;border-radius:20px;display:inline-block;margin-bottom:4px;'>KHUYẾN NGHỊ</div>" if is_rec else ""
+                col.markdown(f"""
+<div style="border-radius:14px;padding:14px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);height:100%">
+  {badge}
+  <div style="font-size:0.72rem;opacity:0.6;text-transform:uppercase;letter-spacing:.5px;">{name}</div>
+  <div style="font-size:1.6rem;font-weight:800;color:{val_color};font-family:'Courier New',monospace;">
+    {val/1000:.1f}<span style="font-size:1rem;">K</span>
+  </div>
+  <div style="font-size:0.8rem;font-weight:700;color:{val_color};">{pct:+.0f}%</div>
+  <div style="height:4px;border-radius:2px;background:rgba(255,255,255,0.08);margin:8px 0;">
+    <div style="width:{bar_w}%;height:4px;border-radius:2px;background:{bar_color};"></div>
+  </div>
+  <div style="font-size:0.7rem;opacity:0.55;">{note}</div>
+</div>""", unsafe_allow_html=True)
+
+        # ── Giá vs BVPS chart ────────────────────────────────────────────────
+        price_series = valuation_pkg.get('price_series')
+        bvps_series  = valuation_pkg.get('bvps_series')
+        if price_series is not None and bvps_series is not None:
+            st.markdown("---")
+            st.markdown("#### 📈 Giá vs Giá Trị Sổ Sách (BVPS)")
+            yr_latest = max(bvps_series.dropna().index) if not bvps_series.dropna().empty else "?"
+            if bvps_latest > 0 and current_price > 0:
+                prem = (current_price / bvps_latest - 1) * 100
+                st.caption(f"{yr_latest}: Giá ({current_price:,.0f}đ) {'>' if prem >= 0 else '<'} BVPS ({bvps_latest:,.0f}đ) — {'premium' if prem >= 0 else 'discount'} ~{abs(prem):.0f}%")
+            fig3 = go.Figure()
+            xs = bvps_series.dropna().index.astype(str)
+            fig3.add_trace(go.Bar(x=xs, y=bvps_series.dropna().values / 1000,
+                                   name='BVPS (K đ)', marker_color='#06b6d4', opacity=0.7))
+            if price_series is not None and not price_series.dropna().empty:
+                xp = price_series.dropna().index.astype(str)
+                fig3.add_trace(go.Scatter(x=xp, y=price_series.dropna().values / 1000,
+                                          name='Giá (K đ)', line=dict(color='#ec4899', width=2),
+                                          mode='lines+markers', yaxis='y'))
+            fig3.update_layout(template='plotly_dark', paper_bgcolor='rgba(0,0,0,0)',
+                                plot_bgcolor='rgba(0,0,0,0)', margin=dict(t=20, b=20),
+                                yaxis=dict(title='Nghìn đồng'),
+                                legend=dict(orientation='h', y=1.1))
+            st.plotly_chart(fig3, use_container_width=True)
 
     st.caption(
         "ℹ️ Giá ước tính = Hệ số Median lịch sử 5N của chính mã × Số liệu năm gần nhất. "
