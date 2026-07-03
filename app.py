@@ -31,9 +31,9 @@ def fmt_price(v):
 st.title("🎯 AI Equity Research Terminal")
 st.caption("Khởi chạy hệ thống tự động 7 bước kết hợp cơ chế kiểm toán vượt 7 bẫy BCTC đặc thù thị trường Việt Nam.")
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def get_cached_pipeline(ticker):
-    return execute_equity_research_pipeline(ticker)
+# Không bọc thêm 1 lớp cache nữa — execute_equity_research_pipeline() đã tự
+# có @st.cache_data(ttl=1800) riêng rồi, bọc thêm lớp ngoài (ttl=3600) chỉ
+# tạo thêm overhead kiểm tra hash không cần thiết mỗi lần rerun.
 
 # --- Chọn mã ---
 df_symbols = load_all_symbols()
@@ -60,8 +60,8 @@ if not ticker_input:
     st.stop()
 
 # --- Pipeline ---
-with st.spinner(f"⏳ Đang tải dữ liệu {ticker_input}... Lần đầu có thể mất 10-15s!"):
-    pipeline_output = get_cached_pipeline(ticker_input)
+with st.spinner(f"⏳ Đang tải dữ liệu {ticker_input}..."):
+    pipeline_output = execute_equity_research_pipeline(ticker_input)
 
 if pipeline_output is None:
     st.error(f"Không thể tải dữ liệu cho mã {ticker_input}. Vui lòng thử mã khác.")
