@@ -448,4 +448,3 @@ with tab_report:
         "Đối chiếu BCTC kiểm toán chính thức trước khi ra quyết định. "
         "**Không phải lời khuyên đầu tư.** Đầu tư cổ phiếu có rủi ro mất vốn."
     )
-    )
