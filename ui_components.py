@@ -564,7 +564,10 @@ def render_tab_dcf(valuation_pkg, metrics):
             res = dcf.get(name)
             if not res:
                 continue
-            pct = (res['value_per_share'] / current_price - 1) * 100 if current_price else 0
+            value_per_share = res if isinstance(res, (int, float)) else (res.get('value_per_share') if isinstance(res, dict) else None)
+            if value_per_share is None:
+                continue
+            pct = (value_per_share / current_price - 1) * 100 if current_price else 0
             wacc_pct = res.get('wacc', 0) * 100
             g_pct    = res.get('g', 0) * 100
             badge_html = '<span class="dcf-card-badge">BASE</span>' if tone == 'base' else ''
