@@ -234,57 +234,155 @@ def render_tab_kqkd(df_5y_table, fundamentals, period_col='Năm'):
 
 
 def render_tab_valuation(valuation_pkg, metrics):
-    st.markdown("### Định Giá PE · PB · BV Trung Bình 5 Năm")
+    """Tab Định Giá PE/PB · 9PP — hiển thị đầy đủ theo ngành."""
+    current_price = metrics.get('current_price', 0) or 0
     summary = valuation_pkg.get('summary')
     methods = valuation_pkg.get('methods', {})
+    sector = valuation_pkg.get('sector_detected', 'default')
+    is_bank = metrics.get('is_bank', False)
+
+    SECTOR_LABELS = {
+        'bank': '🏦 Ngân hàng', 'steel': '⚙️ Thép / Công nghiệp nặng',
+        'real_estate': '🏢 Bất động sản', 'retail': '🛍️ Bán lẻ / Tiêu dùng',
+        'tech': '💻 Công nghệ / Viễn thông', 'oil_gas': '🛢️ Dầu khí / Hoá chất',
+        'aviation': '✈️ Hàng không / Vận tải', 'default': '📊 Chung',
+    }
+    SECTOR_NOTES = {
+        'bank': 'Ưu tiên **P/B + ROE** (không dùng PE/P/S). P/B < 1.5x = vùng mua, > 3.0x = vùng bán.',
+        'steel': 'Chu kỳ → **P/B + EV/EBITDA**. PE median có thể lệch do đáy chu kỳ. P/B < 1.3x = mua.',
+        'real_estate': 'Ưu tiên **P/B + NAV**. PE không có ý nghĩa do doanh thu không đều.',
+        'retail': '**PE + PEG** là chính. PEG < 1.0 = rẻ. PE hợp lý: 15–25x.',
+        'tech': '**PE + PEG + Revenue Growth**. PE 20–40x hợp lý nếu tăng trưởng cao.',
+        'oil_gas': '**EV/EBITDA + P/CF** là chính. EV/EBITDA < 5x = hợp lý.',
+        'default': 'Dùng median 5N của chính mã để định giá (PE/PB/EV-EBITDA/DCF/Graham).',
+    }
+
+    st.markdown(f"### 💰 Định Giá · 9 Phương Pháp Hội Tụ")
+    st.caption(
+        f"📌 **{SECTOR_LABELS.get(sector, sector)}** — "
+        + SECTOR_NOTES.get(sector, SECTOR_NOTES['default'])
+    )
 
     if not summary:
         st.warning("Không đủ dữ liệu để chạy các phương pháp định giá.")
         return
 
-    st.markdown(f"#### Giá Trị Hợp Lý Ước Tính: **{summary['median']:,.0f} đ/CP**")
-    c1, c2 = st.columns([1, 2])
-    c1.metric("Verdict", summary['verdict'])
-    c2.metric("So Với Giá Hiện Tại",
-              f"{summary['upside_median_pct']:+.1f}%",
-              delta=f"{summary['upside_median_pct']:+.1f}%")
+    # ── Verdict header ───────────────────────────────────────────────────────
+    upside = summary.get('upside_median_pct', 0) or 0
+    verdict = summary.get('verdict', '')
+    if 'UNDERVALUED' in verdict:
+        vcolor, vbg = '#22c55e', 'rgba(34,197,94,0.12)'
+    elif 'OVERVALUED' in verdict:
+        vcolor, vbg = '#f43f5e', 'rgba(244,63,94,0.12)'
+    else:
+        vcolor, vbg = '#fbbf24', 'rgba(251,191,36,0.10)'
 
-    if methods:
-        st.markdown("#### Các Kịch Bản Định Giá")
-        cols = st.columns(min(len(methods), 4) or 1)
-        for i, (name, value) in enumerate(methods.items()):
-            pct = (value / metrics['current_price'] - 1) * 100 if metrics['current_price'] else 0
-            cols[i % len(cols)].metric(name, f"{value:,.0f} đ", delta=f"{pct:+.1f}%")
+    p25 = summary.get('p25', 0); p75 = summary.get('p75', 0)
+    median_val = summary.get('median', 0)
+    st.markdown(f"""
+<div style="border-radius:16px;padding:18px 22px;background:{vbg};border:1px solid {vcolor}33;margin-bottom:12px;">
+  <div style="font-size:0.8rem;opacity:0.7;letter-spacing:1px;text-transform:uppercase;">Kết Luận · {len(methods)} Phương Pháp</div>
+  <div style="font-size:1.8rem;font-weight:800;color:{vcolor};">{verdict}</div>
+  <div style="display:flex;gap:24px;margin-top:8px;font-size:0.9rem;">
+    <span>Giá HT: <b>₫{current_price:,.0f}</b></span>
+    <span>Median: <b>₫{median_val:,.0f}</b></span>
+    <span>Upside: <b style="color:{vcolor};">{upside:+.1f}%</b></span>
+    <span>Dải P25-P75: <b>₫{p25:,.0f} – ₫{p75:,.0f}</b></span>
+  </div>
+</div>""", unsafe_allow_html=True)
 
-        fig = go.Figure()
-        names, values = list(methods.keys()), list(methods.values())
-        colors = ['#10d98a' if v >= metrics['current_price'] else '#ff4d6d' for v in values]
-        fig.add_trace(go.Bar(x=names, y=values, marker_color=colors))
-        fig.add_hline(y=metrics['current_price'], line_dash='dash', line_color='#fbbf24',
-                      annotation_text=f"Giá hiện tại {metrics['current_price']:,.0f}đ")
-        fig.update_layout(template='plotly_dark',
-                          paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
-                          margin=dict(t=20, b=20))
-        st.plotly_chart(fig, use_container_width=True)
+    if not methods:
+        st.warning("Chưa có dữ liệu phương pháp định giá.")
+        return
 
+    # ── Nhóm phương pháp ────────────────────────────────────────────────────
+    GROUP_ORDER = [
+        ('📐 Multiples (Median lịch sử)', ['PE Median 5N', 'PE TB 5N', 'PB Median 5N', 'PB TB 5N', 'PB Sàn 5N (min)']),
+        ('📊 Multiples Mở Rộng', ['EV/EBITDA Median 5N', 'P/CF Median 5N', 'P/S Median 5N']),
+        ('🔬 Nội Tại (Intrinsic)', ['DCF (Bi quan)', 'DCF (Cơ sở)', 'DCF (Tích cực)', 'Graham Number', 'DDM (Gordon)']),
+    ]
+
+    for group_title, group_keys in GROUP_ORDER:
+        group_methods = {k: methods[k] for k in group_keys if k in methods}
+        if not group_methods:
+            continue
+        st.markdown(f"#### {group_title}")
+        cols = st.columns(min(len(group_methods), 4))
+        for i, (name, val) in enumerate(group_methods.items()):
+            pct = (val / current_price - 1) * 100 if current_price else 0
+            arrow = "↑" if pct >= 0 else "↓"
+            cols[i % len(cols)].metric(
+                name,
+                f"₫{val:,.0f}",
+                delta=f"{arrow} {abs(pct):.1f}%",
+            )
+
+    # ── Bar chart hội tụ ─────────────────────────────────────────────────────
+    st.markdown("#### 📈 Biểu Đồ Hội Tụ 9 Phương Pháp")
+    names = list(methods.keys())
+    values = list(methods.values())
+    colors = ['#22c55e' if v >= current_price else '#f43f5e' for v in values]
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(x=names, y=values, marker_color=colors, text=[f"₫{v:,.0f}" for v in values],
+                         textposition='outside', textfont=dict(size=10)))
+    fig.add_hline(y=current_price, line_dash='dash', line_color='#fbbf24', line_width=2,
+                  annotation_text=f"Giá HT ₫{current_price:,.0f}", annotation_position="top left")
+    if p25 and p75:
+        fig.add_hrect(y0=p25, y1=p75, fillcolor='rgba(168,85,247,0.08)',
+                      line_color='rgba(168,85,247,0.3)', line_width=1,
+                      annotation_text="Dải P25–P75", annotation_position="top right")
+    fig.update_layout(template='plotly_dark', paper_bgcolor='rgba(0,0,0,0)',
+                      plot_bgcolor='rgba(0,0,0,0)', margin=dict(t=40, b=20),
+                      yaxis=dict(title='Giá ước tính (đ)'),
+                      xaxis=dict(tickangle=-30))
+    st.plotly_chart(fig, use_container_width=True)
+
+    # ── Lịch sử P/E & P/B 5 năm ─────────────────────────────────────────────
     pe_s = valuation_pkg.get('pe_series')
     pb_s = valuation_pkg.get('pb_series')
-    if pe_s is not None and not pe_s.empty:
-        st.markdown("### Lịch Sử P/E & P/B 5 Năm")
+    if pe_s is not None and not pe_s.dropna().empty:
+        st.markdown("#### 📉 Lịch Sử P/E & P/B 5 Năm")
+        pe_clean = pe_s.dropna()
+        pb_clean = pb_s.dropna() if pb_s is not None else pd.Series(dtype=float)
+
         fig2 = go.Figure()
-        fig2.add_trace(go.Scatter(x=pe_s.index, y=pe_s.values, name='P/E',
-                                  line=dict(color='#a855f7', width=2), yaxis='y1'))
-        if pb_s is not None and not pb_s.empty:
-            fig2.add_trace(go.Scatter(x=pb_s.index, y=pb_s.values, name='P/B',
-                                      line=dict(color='#10d98a', width=2), yaxis='y2'))
+        fig2.add_trace(go.Scatter(x=pe_clean.index.astype(str), y=pe_clean.values,
+                                   name='P/E', line=dict(color='#a855f7', width=2),
+                                   mode='lines+markers'))
+        if not pb_clean.empty:
+            fig2.add_trace(go.Scatter(x=pb_clean.index.astype(str), y=pb_clean.values,
+                                       name='P/B', line=dict(color='#10d98a', width=2),
+                                       mode='lines+markers', yaxis='y2'))
+        # Vạch median
+        if not pe_clean.empty:
+            fig2.add_hline(y=float(pe_clean.median()), line_dash='dot',
+                           line_color='rgba(168,85,247,0.5)',
+                           annotation_text=f"PE Median {pe_clean.median():.1f}x")
         fig2.update_layout(
-            template='plotly_dark',
-            paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
-            yaxis=dict(title='P/E (x)'),
+            template='plotly_dark', paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(0,0,0,0)',
+            yaxis=dict(title='P/E (x)', side='left'),
             yaxis2=dict(title='P/B (x)', overlaying='y', side='right'),
-            margin=dict(t=20, b=20),
+            legend=dict(orientation='h', y=1.1),
+            margin=dict(t=30, b=20),
         )
         st.plotly_chart(fig2, use_container_width=True)
+
+        # Bảng tóm tắt thống kê P/E P/B
+        c1, c2, c3, c4 = st.columns(4)
+        if not pe_clean.empty:
+            c1.metric("PE Hiện Tại", f"{metrics.get('pe', 0):.2f}x")
+            c2.metric("PE Median 5N", f"{pe_clean.median():.2f}x")
+        if not pb_clean.empty:
+            c3.metric("PB Hiện Tại", f"{metrics.get('pb', 0):.2f}x")
+            c4.metric("PB Median 5N", f"{pb_clean.median():.2f}x")
+
+    st.caption(
+        "ℹ️ Giá ước tính = Hệ số Median lịch sử 5N của chính mã × Số liệu năm gần nhất. "
+        "DCF 3 kịch bản chi tiết xem tab **🧮 DCF & Graham**. "
+        "Tham khảo/giáo dục — không phải lời khuyên đầu tư."
+    )
 
 
 def _fmt_k(value):
