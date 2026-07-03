@@ -556,9 +556,10 @@ def render_tab_dcf(valuation_pkg, metrics):
 
     current_price = metrics.get('current_price', 0)
     dcf = valuation_pkg.get('dcf_scenarios')
+    is_bank_ui = metrics.get('is_bank', False)
 
     if dcf:
-        st.markdown(f"##### DCF — 3 Kịch Bản FCFF")
+        st.markdown("##### DCF — 3 Kịch Bản FCFF")
         order = [('Bi quan', '🔻', 'bear'), ('Cơ sở', '⚖️', 'base'), ('Tích cực', '🚀', 'bull')]
         for name, icon, tone in order:
             res = dcf.get(name)
@@ -581,8 +582,21 @@ def render_tab_dcf(valuation_pkg, metrics):
     </div>
   </div>
 </div>""", unsafe_allow_html=True)
+    elif is_bank_ui:
+        st.markdown("""
+<div class="simple-card">
+  <div class="simple-card-eyebrow">🏦 DCF (FCFF) — Không áp dụng cho Ngân hàng</div>
+  <div class="simple-card-sub" style="margin-top:8px;margin-bottom:0;">
+    CFO trong LCTT ngân hàng bao gồm <b>tiền gửi khách hàng</b> được hạch toán là
+    "hoạt động kinh doanh" — khiến CFO thường ở mức 50,000–150,000 tỷ/năm. Nếu
+    dùng làm FCFF, DCF sẽ cho giá mục tiêu cao hơn giá thực <b>500–1,000%</b>
+    (không phải undervalued — đây là artifact của chuẩn mực kế toán ngân hàng).<br><br>
+    ✅ Phương pháp phù hợp: <b>DDM (Gordon)</b> nếu có cổ tức tiền mặt +
+    <b>P/B × ROE</b> + <b>NIM / NPL / CAR</b>.
+  </div>
+</div>""", unsafe_allow_html=True)
     else:
-        st.warning("Không tính được DCF do thiếu dữ liệu dòng tiền.")
+        st.warning("Không tính được DCF do thiếu dữ liệu CFO/CapEx từ nguồn API.")
 
     graham = valuation_pkg.get('graham_value')
     if graham:
