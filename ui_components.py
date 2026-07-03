@@ -342,37 +342,76 @@ def render_tab_valuation(valuation_pkg, metrics):
     pe_s = valuation_pkg.get('pe_series')
     pb_s = valuation_pkg.get('pb_series')
     if pe_s is not None and not pe_s.dropna().empty:
-        st.markdown("#### 📉 Lịch Sử P/E & P/B 5 Năm")
         pe_clean = pe_s.dropna()
         pb_clean = pb_s.dropna() if pb_s is not None else pd.Series(dtype=float)
 
+        # Caption động — nhận diện tình huống đặc biệt
+        pe_now = metrics.get('pe', 0) or 0
+        pb_now = metrics.get('pb', 0) or 0
+        pb_med = float(pb_clean.median()) if not pb_clean.empty else 0
+        pe_med = float(pe_clean.median()) if not pe_clean.empty else 0
+        pb_min = float(pb_clean.min()) if not pb_clean.empty else 0
+        pe_min = float(pe_clean.min()) if not pe_clean.empty else 0
+        yr_latest = int(pe_clean.index[-1]) if not pe_clean.empty else "N/A"
+
+        if pb_now > 0 and pb_now < 1.0:
+            caption_pepb = f"{yr_latest}: PB rơi xuống dưới 1.0 lần — vùng \"mua\" theo lịch sử"
+        elif pb_now > 0 and pb_now < pb_min * 1.1:
+            caption_pepb = f"{yr_latest}: PB {pb_now:.2f}x — gần mức sàn lịch sử {pb_min:.2f}x"
+        elif pb_now > 0 and pb_now < pb_med:
+            caption_pepb = f"{yr_latest}: PB {pb_now:.2f}x — dưới median lịch sử {pb_med:.2f}x (rẻ hơn TB)"
+        elif pe_now > 0 and pe_now < pe_med:
+            caption_pepb = f"{yr_latest}: PE {pe_now:.1f}x — dưới median lịch sử {pe_med:.1f}x"
+        else:
+            caption_pepb = f"{yr_latest}: PE {pe_now:.1f}x · PB {pb_now:.2f}x · Median PE {pe_med:.1f}x · Median PB {pb_med:.2f}x"
+
+        st.markdown("#### 📉 Lịch Sử P/E & P/B 5 Năm")
+        st.caption(caption_pepb)
+
         fig2 = go.Figure()
-        fig2.add_trace(go.Scatter(x=pe_clean.index.astype(str), y=pe_clean.values,
-                                   name='P/E', line=dict(color='#a855f7', width=2),
-                                   mode='lines+markers'))
+        fig2.add_trace(go.Scatter(
+            x=pe_clean.index.astype(str), y=pe_clean.values,
+            name='P/E', line=dict(color='#a855f7', width=2.5),
+            mode='lines+markers',
+            marker=dict(size=10, color='#a855f7', line=dict(width=2, color='white')),
+            yaxis='y1'
+        ))
         if not pb_clean.empty:
-            fig2.add_trace(go.Scatter(x=pb_clean.index.astype(str), y=pb_clean.values,
-                                       name='P/B', line=dict(color='#10d98a', width=2),
-                                       mode='lines+markers', yaxis='y2'))
-        # Vạch median
+            fig2.add_trace(go.Scatter(
+                x=pb_clean.index.astype(str), y=pb_clean.values,
+                name='P/B', line=dict(color='#10d98a', width=2.5),
+                mode='lines+markers',
+                marker=dict(size=10, color='#10d98a', line=dict(width=2, color='white')),
+                yaxis='y2'
+            ))
+        # Vạch median P/E
         if not pe_clean.empty:
             fig2.add_hline(y=float(pe_clean.median()), line_dash='dot',
-                           line_color='rgba(168,85,247,0.5)',
-                           annotation_text=f"PE Median {pe_clean.median():.1f}x")
+                           line_color='rgba(168,85,247,0.4)', line_width=1.5,
+                           annotation_text=f"PE Median {pe_clean.median():.1f}x",
+                           annotation_font_color='#a855f7')
+        # Vạch PB=1.0 (book value floor)
+        if not pb_clean.empty:
+            fig2.add_hline(y=1.0, line_dash='dash',
+                           line_color='rgba(16,217,138,0.3)', line_width=1,
+                           annotation_text="PB=1.0 (sàn)",
+                           annotation_position="bottom right",
+                           annotation_font_color='#10d98a',
+                           secondary_y=True if False else False)  # note: add_hline không hỗ trợ y2
+
         fig2.update_layout(
             template='plotly_dark', paper_bgcolor='rgba(0,0,0,0)',
             plot_bgcolor='rgba(0,0,0,0)',
-            yaxis=dict(title='P/E (x)', side='left'),
-            yaxis2=dict(title='P/B (x)', overlaying='y', side='right'),
+            yaxis=dict(title='P/E (x)', side='left', color='#a855f7',
+                       gridcolor='rgba(168,85,247,0.08)'),
+            yaxis2=dict(title='P/B (x)', overlaying='y', side='right',
+                        color='#10d98a', showgrid=False),
             legend=dict(orientation='h', y=1.1),
             margin=dict(t=30, b=20),
         )
         st.plotly_chart(fig2, use_container_width=True)
 
         # ── Bảng thống kê chi tiết P/E & P/B ───────────────────────────────
-        pe_now = metrics.get('pe', 0) or 0
-        pb_now = metrics.get('pb', 0) or 0
-
         st.markdown("#### 📊 Thông Số P/E & P/B Chi Tiết")
         pe_cols = st.columns(5)
         pb_cols = st.columns(5)
@@ -383,13 +422,12 @@ def render_tab_valuation(valuation_pkg, metrics):
             return "#22c55e" if now < ref else "#f43f5e"
 
         if not pe_clean.empty:
-            pe_min = float(pe_clean.min())
-            pe_max = float(pe_clean.max())
-            pe_med = float(pe_clean.median())
-            pe_avg = float(pe_clean.mean())
+            pe_min_v = float(pe_clean.min())
+            pe_max_v = float(pe_clean.max())
+            pe_avg   = float(pe_clean.mean())
             for col, label, val in zip(pe_cols,
                 ["PE Hiện Tại", "PE Median 5N", "PE TB 5N", "PE Min 5N", "PE Max 5N"],
-                [pe_now, pe_med, pe_avg, pe_min, pe_max]):
+                [pe_now, pe_med, pe_avg, pe_min_v, pe_max_v]):
                 c = _cmp_color(pe_now, val) if label != "PE Hiện Tại" else "#f0f0ff"
                 col.markdown(
                     f"<div style='text-align:center'>"
@@ -398,13 +436,12 @@ def render_tab_valuation(valuation_pkg, metrics):
                     f"</div>", unsafe_allow_html=True)
 
         if not pb_clean.empty:
-            pb_min = float(pb_clean.min())
-            pb_max = float(pb_clean.max())
-            pb_med = float(pb_clean.median())
-            pb_avg = float(pb_clean.mean())
+            pb_min_v = float(pb_clean.min())
+            pb_max_v = float(pb_clean.max())
+            pb_avg   = float(pb_clean.mean())
             for col, label, val in zip(pb_cols,
                 ["PB Hiện Tại", "PB Median 5N", "PB TB 5N", "PB Sàn 5N", "PB Đỉnh 5N"],
-                [pb_now, pb_med, pb_avg, pb_min, pb_max]):
+                [pb_now, pb_med, pb_avg, pb_min_v, pb_max_v]):
                 c = _cmp_color(pb_now, val) if label != "PB Hiện Tại" else "#f0f0ff"
                 col.markdown(
                     f"<div style='text-align:center'>"
@@ -457,29 +494,56 @@ def render_tab_valuation(valuation_pkg, metrics):
   <div style="font-size:0.7rem;opacity:0.55;">{note}</div>
 </div>""", unsafe_allow_html=True)
 
-        # ── Giá vs BVPS chart ────────────────────────────────────────────────
+        # ── Giá vs BVPS chart ─────────────────────────────────────────────────
+        st.markdown("---")
         price_series = valuation_pkg.get('price_series')
         bvps_series  = valuation_pkg.get('bvps_series')
-        if price_series is not None and bvps_series is not None:
-            st.markdown("---")
-            st.markdown("#### 📈 Giá vs Giá Trị Sổ Sách (BVPS)")
-            yr_latest = max(bvps_series.dropna().index) if not bvps_series.dropna().empty else "?"
+        if bvps_series is not None and not bvps_series.dropna().empty:
+            bvps_clean = bvps_series.dropna()
+            yr_latest_b = int(bvps_clean.index[-1]) if not bvps_clean.empty else "?"
+
+            # Caption động
             if bvps_latest > 0 and current_price > 0:
                 prem = (current_price / bvps_latest - 1) * 100
-                st.caption(f"{yr_latest}: Giá ({current_price:,.0f}đ) {'>' if prem >= 0 else '<'} BVPS ({bvps_latest:,.0f}đ) — {'premium' if prem >= 0 else 'discount'} ~{abs(prem):.0f}%")
+                direction = ">" if current_price > bvps_latest else "<"
+                prem_label = "premium" if prem >= 0 else "discount"
+                caption_bvps = (
+                    f"{yr_latest_b}: Giá ({current_price/1000:.3f}K đ) {direction} "
+                    f"BVPS ({bvps_latest/1000:.3f}K đ) — {prem_label} ~{abs(prem):.0f}%"
+                )
+            else:
+                caption_bvps = "Giá vs BVPS theo năm"
+
+            st.markdown("#### 📈 Giá vs Giá Trị Sổ Sách (BVPS)")
+            st.caption(caption_bvps)
+
             fig3 = go.Figure()
-            xs = bvps_series.dropna().index.astype(str)
-            fig3.add_trace(go.Bar(x=xs, y=bvps_series.dropna().values / 1000,
-                                   name='BVPS (K đ)', marker_color='#06b6d4', opacity=0.7))
+            xs = bvps_clean.index.astype(str)
+            # Bar BVPS màu teal (như ảnh)
+            fig3.add_trace(go.Bar(
+                x=xs, y=bvps_clean.values / 1000,
+                name='BVPS (K đ)',
+                marker_color='#0e7490',
+                opacity=0.75,
+            ))
+            # Line Giá màu hồng (như ảnh)
             if price_series is not None and not price_series.dropna().empty:
-                xp = price_series.dropna().index.astype(str)
-                fig3.add_trace(go.Scatter(x=xp, y=price_series.dropna().values / 1000,
-                                          name='Giá (K đ)', line=dict(color='#ec4899', width=2),
-                                          mode='lines+markers', yaxis='y'))
-            fig3.update_layout(template='plotly_dark', paper_bgcolor='rgba(0,0,0,0)',
-                                plot_bgcolor='rgba(0,0,0,0)', margin=dict(t=20, b=20),
-                                yaxis=dict(title='Nghìn đồng'),
-                                legend=dict(orientation='h', y=1.1))
+                price_clean = price_series.dropna()
+                fig3.add_trace(go.Scatter(
+                    x=price_clean.index.astype(str),
+                    y=price_clean.values / 1000,
+                    name='Giá (K đ)',
+                    line=dict(color='#ec4899', width=2.5),
+                    mode='lines+markers',
+                    marker=dict(size=10, color='#ec4899', line=dict(width=2, color='white')),
+                ))
+            fig3.update_layout(
+                template='plotly_dark', paper_bgcolor='rgba(0,0,0,0)',
+                plot_bgcolor='rgba(0,0,0,0)', margin=dict(t=20, b=20),
+                yaxis=dict(title='Nghìn đồng'),
+                legend=dict(orientation='h', y=1.1),
+                barmode='overlay',
+            )
             st.plotly_chart(fig3, use_container_width=True)
 
     st.caption(
