@@ -463,10 +463,14 @@ def execute_equity_research_pipeline(ticker):
             news_list = [{"title": "Không có sự kiện bất thường trong 30 ngày.",
                           "source": "Hệ thống tự động", "url": "#", "pub_date": "—"}]
 
+        # reports_pkg = None: placeholder để khớp với app.py unpack 11 giá trị
+        reports_pkg = None
+
         return (
             df_price, df_5y_table, df_quarter_table, df_balance,
             clean_metrics, technical_summary,
             news_list, fundamentals_summary, df_dupont, valuation_package,
+            reports_pkg,
         )
 
     except Exception as e:
