@@ -357,201 +357,176 @@ with tab_valuation:
 
 
 with tab_multiples:
-
-    st.markdown("### Multiples Mở Rộng")
-
-
+    st.markdown("### 📐 Multiples Mở Rộng · EV/EBITDA · P/CF · P/S")
 
     market_cap_b = metrics.get('market_cap_billion', 0) or 0
+    revenue_b    = metrics.get('revenue_latest_billion', 0) or 0
+    cfo_b        = metrics.get('cfo_latest_billion', 0) or 0
+    ebitda_b     = metrics.get('ebitda_latest_billion', 0) or 0
+    net_debt_b   = metrics.get('net_debt_billion', 0) or 0
+    ev_b         = market_cap_b + net_debt_b
 
-    revenue_b = metrics.get('revenue_latest_billion', 0) or 0
+    # Sanity guard: vốn hóa < 100 tỷ gần như chắc chắn là lỗi đơn vị
+    if market_cap_b < 100.0:
+        market_cap_b = 0.0
 
-    cfo_b = metrics.get('cfo_latest_billion', 0) or 0
+    def _sane(val, lo=0.05, hi=200.0):
+        return val if (val is not None and lo <= val <= hi) else None
 
-    ebitda_b = metrics.get('ebitda_latest_billion', 0) or 0
-
-    net_debt_b = metrics.get('net_debt_billion', 0) or 0
-
-    ev_b = market_cap_b + net_debt_b
-
-
-
-    ps = (market_cap_b / revenue_b) if revenue_b > 0 else None
-
-    pcf = (market_cap_b / cfo_b) if cfo_b > 0 else None
-
-    ev_ebitda = (ev_b / ebitda_b) if ebitda_b > 0 else None
-
-
+    ps        = _sane((market_cap_b / revenue_b) if revenue_b > 0 else None)
+    pcf       = _sane((market_cap_b / cfo_b)     if cfo_b > 0     else None)
+    ev_ebitda = _sane((ev_b / ebitda_b)          if ebitda_b > 0  else None)
 
     pe_now = metrics.get('pe', 0) or 0
-
     pb_now = metrics.get('pb', 0) or 0
 
-
-
-    # So sánh với median 5N CỦA CHÍNH MÃ (không dùng ngưỡng cố định chung cho mọi
-
-    # ngành/mã — trước đây P/B<2 luôn bị gắn "Định giá cao", sai với ngân hàng
-
-    # thường giao dịch quanh P/B 1.5-2.5x, gây mâu thuẫn với kết luận ở tab 9PP).
-
     pe_hist_series = valuation_pkg.get('pe_series')
-
     pb_hist_series = valuation_pkg.get('pb_series')
-
     pe_median_5y = float(pe_hist_series.dropna().median()) if pe_hist_series is not None and not pe_hist_series.dropna().empty else None
-
     pb_median_5y = float(pb_hist_series.dropna().median()) if pb_hist_series is not None and not pb_hist_series.dropna().empty else None
-
-
-
-    bvps_mismatch = metrics.get('bvps_mismatch_pct')
-
-    if bvps_mismatch is not None and bvps_mismatch > 5:
-
-        st.caption(
-
-            f"⚠️ BVPS gốc từ nguồn dữ liệu lệch {bvps_mismatch:.1f}% so với BVPS tự tính lại "
-
-            f"(Vốn CSH / Số CP hiện tại) — có thể do số CP lưu hành trong bảng ratio đã cũ "
-
-            f"(trước đợt chia cổ tức/tăng vốn gần nhất). Đã dùng số tự tính lại (mới hơn) cho P/B."
-
-        )
-
-
-
-    def _card_label(value, avg=None, low_note="Dưới TB 5N", high_note="Trên TB 5N",
-
-                     low_thresh=None, low_msg=None, high_msg=None):
-
-        """Trả về (màu, dòng chú thích nhỏ) theo phong cách dashboard tham chiếu."""
-
-        if value is None:
-
-            return "#888", "Thiếu dữ liệu"
-
-        if avg is not None and avg > 0:
-
-            if value < avg:
-
-                return "#22c55e", f"{low_note} ({avg:.2f}x)"
-
-            return "#ef4444", f"{high_note} ({avg:.2f}x)"
-
-        if low_thresh is not None:
-
-            if value < low_thresh:
-
-                return "#22c55e", low_msg or "Hấp dẫn"
-
-            return "#eab308", high_msg or "Bình thường"
-
-        return "#e5e7eb", ""
-
-
-
-    def _render_card(col, title, value_str, color, note):
-
-        col.markdown(
-
-            f"""<div style="padding:0.5rem 0;">
-
-                <div style="opacity:0.7;font-size:0.85rem;">{title}</div>
-
-                <div style="font-size:1.9rem;font-weight:700;color:{color};">{value_str}</div>
-
-                <div style="opacity:0.75;font-size:0.8rem;">{note}</div>
-
-            </div>""",
-
-            unsafe_allow_html=True,
-
-        )
-
-
-
-    m1, m2, m3, m4 = st.columns(4)
-
-    c, n = _card_label(pe_now if pe_now else None, avg=pe_median_5y,
-
-                        low_note="Rẻ hơn TB 5N", high_note="Đắt hơn TB 5N")
-
-    _render_card(m1, "P/E", f"{pe_now:.2f}x" if pe_now else "—", c, n)
-
-    c, n = _card_label(pb_now if pb_now else None, avg=pb_median_5y,
-
-                        low_note="Rẻ hơn TB 5N", high_note="Đắt hơn TB 5N")
-
-    _render_card(m2, "P/B", f"{pb_now:.2f}x" if pb_now else "—", c, n)
-
-    m3.metric("EPS", fmt(fundamentals.get('eps_latest', 0), suffix=" đ", decimals=0))
-
-    m4.metric("BVPS", fmt(fundamentals.get('bvps_latest', 0), suffix=" đ", decimals=0))
-
-
-
-    st.markdown("---")
 
     is_bank_flag = metrics.get('excl_extended_multiples', False) or metrics.get('is_bank', False)
 
+    bvps_mismatch = metrics.get('bvps_mismatch_pct')
+    if bvps_mismatch is not None and bvps_mismatch > 5:
+        st.caption(
+            f"⚠️ BVPS gốc từ nguồn dữ liệu lệch {bvps_mismatch:.1f}% so với BVPS tự tính lại "
+            f"(Vốn CSH / Số CP hiện tại) — có thể do số CP lưu hành trong bảng ratio đã cũ "
+            f"(trước đợt chia cổ tức/tăng vốn gần nhất). Đã dùng số tự tính lại (mới hơn) cho P/B."
+        )
 
+    st.markdown("""<style>
+.mc-card{border-radius:18px;padding:18px 16px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.09);min-height:148px;}
+.mc-card-bank{background:rgba(168,85,247,0.06);border-color:rgba(168,85,247,0.18);}
+.mc-label{font-size:.72rem;opacity:.5;text-transform:uppercase;letter-spacing:.5px;line-height:1.4;}
+.mc-val{font-size:2.3rem;font-weight:800;font-family:'Courier New',monospace;line-height:1.1;margin:7px 0 5px;}
+.mc-note1{font-size:.80rem;color:#a0a0c0;}
+.mc-note2{font-size:.73rem;color:#6b6b8a;}
+</style>""", unsafe_allow_html=True)
+
+    def _mc(col, label, sublabel, val_str, color, note1, note2="", bank=False):
+        cls = "mc-card mc-card-bank" if bank else "mc-card"
+        col.markdown(f"""<div class="{cls}">
+  <div class="mc-label">{label}<br><span style="font-size:.68rem;">{sublabel}</span></div>
+  <div class="mc-val" style="color:{color};">{val_str}</div>
+  <div class="mc-note1">{note1}</div>
+  <div class="mc-note2">{note2}</div>
+</div>""", unsafe_allow_html=True)
+
+    def _color_vs_avg(val, avg):
+        if val is None: return "#888"
+        if avg and val < avg: return "#22c55e"
+        return "#f0f0ff"
+
+    def _note_vs_avg(val, avg, label="TB 5N"):
+        if val is None: return "Thiếu dữ liệu", ""
+        if avg and val < avg: return f"Dưới {label}", f"({avg:.2f}x)"
+        if avg: return f"Trên {label}", f"({avg:.2f}x)"
+        return "", ""
+
+    latest_year = datetime.today().year - 1
+
+    # ── Hàng 1: P/E · P/B · P/S · P/CF ─────────────────────────────────────
+    c1, c2, c3, c4 = st.columns(4)
+
+    n1, n2 = _note_vs_avg(pe_now or None, pe_median_5y)
+    _mc(c1, "P/E", str(latest_year),
+        f"{pe_now:.1f}x" if pe_now else "—",
+        _color_vs_avg(pe_now or None, pe_median_5y), n1, n2)
+
+    n1, n2 = _note_vs_avg(pb_now or None, pb_median_5y)
+    _mc(c2, "P/B", str(latest_year),
+        f"{pb_now:.2f}x" if pb_now else "—",
+        _color_vs_avg(pb_now or None, pb_median_5y), n1, n2)
 
     if is_bank_flag:
-
-        st.info(
-
-            "ℹ️ **P/S và EV/EBITDA không áp dụng cho cổ phiếu ngân hàng** — "
-
-            "khái niệm 'Doanh thu' và 'EBITDA' không phản ánh đúng bản chất kinh doanh "
-
-            "của ngân hàng (thu nhập lãi thuần, chi phí dự phòng rủi ro tín dụng có cấu trúc khác). "
-
-            "Với ngân hàng nên dùng P/B + ROE, NIM, NPL, CAR thay thế."
-
-        )
-
-        e1, e2 = st.columns(2)
-
-        c, n = _card_label(pcf, low_thresh=10, low_msg="Dòng tiền hấp dẫn", high_msg="Bình thường")
-
-        _render_card(e1, "P/CF", f"{pcf:.2f}x" if pcf else "—", c, n)
-
-        e2.markdown(
-
-            "<div style='padding:0.5rem 0;opacity:0.6;'>"
-
-            "<div style='font-size:0.85rem;'>P/S · EV/EBITDA</div>"
-
-            "<div style='font-size:1.3rem;'>Không áp dụng</div></div>",
-
-            unsafe_allow_html=True,
-
-        )
-
+        _mc(c3, "P/S", str(latest_year), "N/A", "#555",
+            "Không áp dụng", "Ngân hàng", bank=True)
     else:
+        ps_color = "#22c55e" if ps and ps < 1.5 else ("#f0f0ff" if ps else "#888")
+        ps_note  = "Cạnh tranh tốt" if ps and ps < 1.5 else ("Bình thường" if ps else "Thiếu dữ liệu")
+        _mc(c3, "P/S", str(latest_year),
+            f"{ps:.2f}x" if ps else "—", ps_color, ps_note, "Vốn hóa / Doanh thu")
 
-        e1, e2, e3 = st.columns(3)
+    pcf_color = "#22c55e" if pcf and pcf < 10 else ("#f0f0ff" if pcf else "#888")
+    pcf_note  = "Dòng tiền hấp dẫn" if pcf and pcf < 10 else ("Bình thường" if pcf else "Thiếu dữ liệu")
+    _mc(c4, "P/CF", str(latest_year),
+        f"{pcf:.1f}x" if pcf else "—", pcf_color, pcf_note, "Vốn hóa / CFO")
 
-        c, n = _card_label(ps, low_thresh=1.5, low_msg="Cạnh tranh tốt", high_msg="Định giá cao")
+    st.markdown("<div style='margin:10px 0'></div>", unsafe_allow_html=True)
 
-        _render_card(e1, "P/S", f"{ps:.2f}x" if ps else "—", c, n)
+    # ── Hàng 2: EV/EBITDA · Graham · DDM ────────────────────────────────────
+    e1, e2, e3 = st.columns([2, 1, 1])
 
-        c, n = _card_label(pcf, low_thresh=10, low_msg="Dòng tiền hấp dẫn", high_msg="Bình thường")
+    if is_bank_flag:
+        e1.markdown("""<div class="mc-card mc-card-bank" style="min-height:140px;">
+  <div class="mc-label">EV/EBITDA</div>
+  <div class="mc-val" style="color:#555;">N/A</div>
+  <div class="mc-note1">Không áp dụng cho ngân hàng</div>
+  <div class="mc-note2">Dùng P/B + ROE, NIM, NPL, CAR thay thế</div>
+</div>""", unsafe_allow_html=True)
+    else:
+        ev_color = "#22c55e" if ev_ebitda and ev_ebitda < 8 else ("#f0f0ff" if ev_ebitda else "#888")
+        ev_note  = "Định giá hợp lý" if ev_ebitda and ev_ebitda < 8 else ("Cao" if ev_ebitda else "Thiếu dữ liệu")
+        _mc(e1, "EV/EBITDA", str(latest_year),
+            f"{ev_ebitda:.1f}x" if ev_ebitda else "—", ev_color, ev_note,
+            "EV = Vốn hóa + Nợ ròng")
 
-        _render_card(e2, "P/CF", f"{pcf:.2f}x" if pcf else "—", c, n)
+    graham_v = valuation_pkg.get('graham_value')
+    if graham_v and current_price > 0:
+        pct_g   = (graham_v / current_price - 1) * 100
+        g_color = "#22c55e" if pct_g > 0 else "#f43f5e"
+        g_lbl   = f"{'Rẻ' if pct_g > 0 else 'Đắt'} {abs(pct_g):.0f}% theo Graham"
+        _mc(e2, "Graham Number", "√(22.5×EPS×BVPS)",
+            f"{graham_v/1000:.1f}K", g_color, g_lbl,
+            f"Giá HT {current_price/1000:.2f}K")
+    else:
+        _mc(e2, "Graham Number", "√(22.5×EPS×BVPS)",
+            "—", "#555",
+            "N/A cho ngân hàng" if is_bank_flag else "Thiếu EPS/BVPS", "")
 
-        c, n = _card_label(ev_ebitda, low_thresh=10, low_msg="Định giá hợp lý", high_msg="Bình thường")
+    ddm_v = valuation_pkg.get('ddm_value')
+    dps_v = metrics.get('dps_latest')
+    if ddm_v and current_price > 0:
+        pct_d   = (ddm_v / current_price - 1) * 100
+        d_color = "#22c55e" if pct_d > 0 else "#f43f5e"
+        _mc(e3, "DDM (Gordon)",
+            f"DPS {dps_v:,.0f}đ" if dps_v else "",
+            f"{ddm_v/1000:.1f}K", d_color,
+            f"{pct_d:+.0f}% vs giá HT", "ke=11%, g=4%")
+    else:
+        reason = "Không chia cổ tức TM" if not dps_v else "Không áp dụng"
+        _mc(e3, "DDM (Gordon)", "",
+            "—", "#555", reason, "DDM chỉ dùng cho mã chia TM đều")
 
-        _render_card(e3, "EV/EBITDA", f"{ev_ebitda:.2f}x" if ev_ebitda else "—", c, n)
+    # ── Reverse DCF ───────────────────────────────────────────────────────────
+    rev_g    = valuation_pkg.get('reverse_dcf_g_pct')
+    wacc_pct = valuation_pkg.get('wacc_base_pct', 10.5)
+    sector_lbl = {'steel':'Thép','bank':'Ngân hàng','retail':'Bán lẻ',
+                  'tech':'Công nghệ','real_estate':'BĐS','oil_gas':'Dầu khí'
+                  }.get(valuation_pkg.get('sector_detected',''), '')
+    if rev_g is not None:
+        rev_color = "#22c55e" if rev_g < 8 else ("#fbbf24" if rev_g < 15 else "#f43f5e")
+        rev_interp = ("Thị trường kỳ vọng tăng trưởng thấp → tiềm năng upside"
+                      if rev_g < 8 else
+                      "Kỳ vọng tăng trưởng vừa phải" if rev_g < 15 else
+                      "Kỳ vọng tăng trưởng rất cao — áp lực thực hiện lớn")
+        st.markdown("---")
+        rc1, rc2 = st.columns([1, 2])
+        rc1.markdown(f"""<div style="border-radius:14px;padding:16px;
+            background:rgba(6,182,212,0.07);border:1px solid rgba(6,182,212,0.2);">
+  <div style="font-size:.7rem;color:#6b6b8a;text-transform:uppercase;letter-spacing:.5px;">🔄 Reverse DCF</div>
+  <div style="font-size:2.2rem;font-weight:800;color:{rev_color};">~{rev_g:.0f}%<span style="font-size:1rem;">/năm</span></div>
+  <div style="font-size:.8rem;color:#a0a0c0;">FCFF ngụ ý tại giá {current_price/1000:.2f}K</div>
+</div>""", unsafe_allow_html=True)
+        rc2.markdown(f"""<div style="padding:16px;font-size:.85rem;color:#a0a0c0;line-height:1.7;">
+  {rev_interp}.<br>
+  WACC tham chiếu: <b style="color:#f0f0ff;">{wacc_pct:.1f}%</b>
+  {f' · Ngành: <b style="color:#a855f7;">{sector_lbl}</b>' if sector_lbl else ''}.
+</div>""", unsafe_allow_html=True)
 
-
-
-        if not (ps and pcf and ev_ebitda):
-
-            st.caption("ℹ️ Một số chỉ số hiển thị '—' do thiếu dữ liệu Doanh thu/Dòng tiền HĐKD/Khấu hao từ nguồn API cho mã này.")
-
+    if not is_bank_flag and not any([ps, pcf, ev_ebitda]):
+        st.caption("ℹ️ P/S, P/CF, EV/EBITDA hiển thị '—' do thiếu dữ liệu Doanh thu/CFO/EBITDA từ nguồn API cho mã này.")
 
 
 with tab_dcf:
