@@ -579,7 +579,7 @@ def render_tab_dcf(valuation_pkg, metrics):
   <div class="dcf-card-sub">WACC {wacc_pct:.0f}% · g {g_pct:.1f}%</div>
   <div class="dcf-card-bottom"><span></span>
     <div style="text-align:right;">
-      <div class="dcf-card-value val-{tone}">{_fmt_k(res['value_per_share'])}</div>
+      <div class="dcf-card-value val-{tone}">{_fmt_k('value_per_share')}</div>
       <div class="dcf-card-pct pct-{tone}">{pct:+.0f}%</div>
     </div>
   </div>
