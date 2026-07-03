@@ -14,7 +14,6 @@ from financial_normalizer import (
 from valuation import (
     dupont_decomposition, dcf_fcff_scenarios, reverse_dcf_implied_growth,
     graham_number, ddm_gordon, nine_methods_valuation, summarize_valuation,
-    detect_stock_dividend_years, normalize_eps_bvps_series, estimate_wacc,
 )
 from cafef_fallback import fetch_cafef_balance_sheet_5y
 
@@ -106,14 +105,10 @@ def _safe_call(fn, key, source, default=None):
         return default if default is not None else pd.DataFrame()
 
 
-def _fetch_income_statement(ticker, source, period='year', limit=DEFAULT_YEAR_LIMIT):
-    # Thử nguồn ĐÃ XÁC ĐỊNH (source_used) TRƯỚC TIÊN — nhanh, đúng ngay lần
-    # đầu trong đa số trường hợp — thay vì luôn thử lại VCI trước cho mọi
-    # field (nguyên nhân chính khiến app load chậm). Chỉ fallback sang
-    # nguồn khác nếu riêng field này rỗng ở nguồn đã chọn.
-    for src in [source] + [s for s in SOURCE_FALLBACK_ORDER if s != source]:
+def _fetch_income_statement(ticker, period='year', limit=DEFAULT_YEAR_LIMIT):
+    for source in SOURCE_FALLBACK_ORDER:
         try:
-            f = Finance(symbol=ticker, source=src, period=period)
+            f = Finance(symbol=ticker, source=source, period=period)
             try:
                 df = f.income_statement(period=period, limit=limit)
             except TypeError:
@@ -125,10 +120,10 @@ def _fetch_income_statement(ticker, source, period='year', limit=DEFAULT_YEAR_LI
     return pd.DataFrame()
 
 
-def _fetch_ratio(ticker, source, period='year', limit=DEFAULT_YEAR_LIMIT):
-    for src in [source] + [s for s in SOURCE_FALLBACK_ORDER if s != source]:
+def _fetch_ratio(ticker, period='year', limit=DEFAULT_YEAR_LIMIT):
+    for source in SOURCE_FALLBACK_ORDER:
         try:
-            f = Finance(symbol=ticker, source=src, period=period)
+            f = Finance(symbol=ticker, source=source, period=period)
             try:
                 df = f.ratio(period=period, limit=limit)
             except TypeError:
@@ -140,10 +135,10 @@ def _fetch_ratio(ticker, source, period='year', limit=DEFAULT_YEAR_LIMIT):
     return pd.DataFrame()
 
 
-def _fetch_cashflow(ticker, source, period='year', limit=DEFAULT_YEAR_LIMIT):
-    for src in [source] + [s for s in SOURCE_FALLBACK_ORDER if s != source]:
+def _fetch_cashflow(ticker, period='year', limit=DEFAULT_YEAR_LIMIT):
+    for source in SOURCE_FALLBACK_ORDER:
         try:
-            f = Finance(symbol=ticker, source=src, period=period)
+            f = Finance(symbol=ticker, source=source, period=period)
             try:
                 df = f.cash_flow(period=period, limit=limit)
             except TypeError:
@@ -155,10 +150,10 @@ def _fetch_cashflow(ticker, source, period='year', limit=DEFAULT_YEAR_LIMIT):
     return pd.DataFrame()
 
 
-def _fetch_balance_sheet(ticker, source, period='year', limit=DEFAULT_YEAR_LIMIT):
-    for src in [source] + [s for s in SOURCE_FALLBACK_ORDER if s != source]:
+def _fetch_balance_sheet(ticker, period='year', limit=DEFAULT_YEAR_LIMIT):
+    for source in SOURCE_FALLBACK_ORDER:
         try:
-            f = Finance(symbol=ticker, source=src, period=period)
+            f = Finance(symbol=ticker, source=source, period=period)
             try:
                 df = f.balance_sheet(period=period, limit=limit)
             except TypeError:
@@ -174,6 +169,8 @@ def _fetch_balance_sheet(ticker, source, period='year', limit=DEFAULT_YEAR_LIMIT
 def execute_equity_research_pipeline(ticker):
     try:
         q_engine, f_engine, c_engine, source_used = _build_engines_with_fallback(ticker)
+        if source_used != 'VCI':
+            st.info(f"ℹ️ Nguồn VCI không khả dụng cho {ticker}, đang dùng: {source_used}")
 
         end_date = datetime.today().strftime('%Y-%m-%d')
         start_date = (datetime.today() - timedelta(days=365 * 3)).strftime('%Y-%m-%d')
@@ -181,13 +178,13 @@ def execute_equity_research_pipeline(ticker):
         tasks = {
             "price":      lambda: q_engine.history(start=start_date, end=end_date, interval='1D'),
             "overview":   lambda: c_engine.overview(),
-            "income_y":   lambda: _fetch_income_statement(ticker, source_used, period='year',    limit=DEFAULT_YEAR_LIMIT),
-            "cashflow_y": lambda: _fetch_cashflow(ticker,          source_used, period='year',    limit=DEFAULT_YEAR_LIMIT),
-            "ratio_y":    lambda: _fetch_ratio(ticker,             source_used, period='year',    limit=DEFAULT_YEAR_LIMIT),
-            "income_q":   lambda: _fetch_income_statement(ticker, source_used, period='quarter', limit=20),
-            "ratio_q":    lambda: _fetch_ratio(ticker,            source_used, period='quarter', limit=20),
-            "balance_y":  lambda: _fetch_balance_sheet(ticker,    source_used, period='year',    limit=DEFAULT_YEAR_LIMIT),
-            "balance_q":  lambda: _fetch_balance_sheet(ticker,    source_used, period='quarter', limit=20),
+            "income_y":   lambda: _fetch_income_statement(ticker, period='year',    limit=DEFAULT_YEAR_LIMIT),
+            "cashflow_y": lambda: _fetch_cashflow(ticker,          period='year',    limit=DEFAULT_YEAR_LIMIT),
+            "ratio_y":    lambda: _fetch_ratio(ticker,             period='year',    limit=DEFAULT_YEAR_LIMIT),
+            "income_q":   lambda: _fetch_income_statement(ticker, period='quarter', limit=20),
+            "ratio_q":    lambda: _fetch_ratio(ticker,            period='quarter', limit=20),
+            "balance_y":  lambda: _fetch_balance_sheet(ticker,    period='year',    limit=DEFAULT_YEAR_LIMIT),
+            "balance_q":  lambda: _fetch_balance_sheet(ticker,    period='quarter', limit=20),
             "news":       lambda: c_engine.news(),
         }
 
@@ -534,33 +531,44 @@ def execute_equity_research_pipeline(ticker):
             if cfo_l is not None:
                 latest_fcff = (cfo_l - abs(capex_l)) * 1e9
 
-        # net_debt_latest đã tính ở mục 5b (Multiples Mở Rộng) — dùng lại
-        # để EV trong DCF chính xác hơn thay vì giả định net_debt=0.
+        st.caption(
+            f"🔍 DEBUG DCF — CFO rỗng: {cfo_series.empty} | "
+            f"CFO gần nhất: {get_latest(cfo_series, default=None) if not cfo_series.empty else 'N/A'} tỷ | "
+            f"CapEx rỗng: {capex_series.empty} | "
+            f"CapEx gần nhất: {get_latest(capex_series, default=None) if not capex_series.empty else 'N/A'} tỷ | "
+            f"FCFF: {latest_fcff} | issue_share: {issue_share} | is_bank: {is_bank}"
+        )
+
         dcf_results = reverse_g = None
         if latest_fcff and latest_fcff > 0 and issue_share > 0:
             dcf_results = dcf_fcff_scenarios(
-                latest_fcff=latest_fcff, shares_outstanding=issue_share,
-                net_debt=net_debt_latest * 1e9, ticker=ticker)
+                latest_fcff=latest_fcff, shares_outstanding=issue_share, net_debt=0.0)
             reverse_g = reverse_dcf_implied_growth(
                 current_price=current_price, shares_outstanding=issue_share,
-                latest_fcff=latest_fcff, wacc=estimate_wacc(ticker),
-                net_debt=net_debt_latest * 1e9)
+                latest_fcff=latest_fcff, wacc=0.105, net_debt=0.0)
 
         graham_value = graham_number(eps_latest, bvps_latest) if eps_latest > 0 and bvps_latest > 0 else None
 
-        # ── Phát hiện pha loãng (cổ tức CP) + điều chỉnh EPS/BVPS lịch sử ──
-        dilution_years = detect_stock_dividend_years(outstanding_shares_series)
-        eps_adj, bvps_adj = normalize_eps_bvps_series(
-            eps_series_filled, bvps_series_filled, outstanding_shares_series)
-
-        # ── DDM (Gordon Growth) — chữ ký mới: nhận cả series, tự kiểm tra
-        # payout ratio 3 năm gần nhất, tự chọn ke theo WACC ngành, trả về
-        # tuple (giá, lý_do_từ_chối_nếu_có).
+        # ── DDM (Gordon Growth) ─────────────────────────────────────────
+        # Chỉ áp dụng khi công ty có DPS tiền mặt > 0 (financial_normalizer
+        # đã lọc đúng 'cổ tức tiền mặt' / 'dividend per share', KHÔNG lẫn
+        # cổ tức cổ phiếu — tránh đúng bẫy HPG/VNM mà bạn nêu: DPS tiền mặt
+        # thấp do trả cổ tức bằng cổ phiếu sẽ khiến DDM ra giá thấp bất
+        # thường nếu tính nhầm từ tổng cổ tức).
+        # ke=11%, g=4% là giả định mặc định hợp lý cho CP VN trả cổ tức đều
+        # (utilities, ngân hàng truyền thống) — có thể tinh chỉnh theo ngành
+        # sau nếu cần.
         dps_series = fin5.get('dps', pd.Series(dtype=float))
         dps_latest = get_latest(dps_series, default=0.0) if not dps_series.empty else 0.0
-        ddm_value, ddm_note = ddm_gordon(dps_series, net_profit_series, ticker=ticker)
+        ddm_value = (ddm_gordon(dps_latest, required_return=0.11, g=0.04)
+                     if dps_latest > 0 else None)
 
         # ── Dividend Yield (Tỷ suất cổ tức) = DPS / Giá hiện tại × 100 ────
+        # Cho phép đối chiếu trực quan các mã CÓ chia cổ tức tiền mặt (VD
+        # ACB) vs mã KHÔNG chia (VD STB đang tái cơ cấu, giữ lại lợi nhuận)
+        # — 2 trường hợp này không "mã nào rẻ hơn", chỉ là DDM không áp
+        # dụng được cho mã không chia cổ tức, cần nhìn thêm 8 phương pháp
+        # định giá còn lại (đặc biệt DCF/PE/PB) để đánh giá đầy đủ.
         dividend_yield_pct = (dps_latest / current_price * 100) if dps_latest > 0 and current_price > 0 else None
         clean_metrics["dividend_yield_pct"] = dividend_yield_pct
         clean_metrics["dps_latest"] = dps_latest if dps_latest > 0 else None
@@ -569,11 +577,7 @@ def execute_equity_research_pipeline(ticker):
             eps_latest=eps_latest, bvps_latest=bvps_latest,
             pe_series=pe_series, pb_series=pb_series,
             current_price=current_price,
-            dcf_results=dcf_results, graham_value=graham_value, ddm_value=ddm_value,
-            eps_adj=eps_adj, bvps_adj=bvps_adj,
-            shares_series=outstanding_shares_series,
-            net_profit_series=net_profit_series,
-            dps_series=dps_series, ticker=ticker)
+            dcf_results=dcf_results, graham_value=graham_value, ddm_value=ddm_value)
 
         valuation_summary = summarize_valuation(valuation_methods, current_price) if valuation_methods else None
 
@@ -584,10 +588,17 @@ def execute_equity_research_pipeline(ticker):
             "reverse_dcf_g_pct":  reverse_g * 100 if reverse_g is not None else None,
             "graham_value":       graham_value,
             "ddm_value":          ddm_value,
-            "ddm_note":           ddm_note,
-            "dilution_years":     dilution_years,
             "pe_series":          pe_series,
             "pb_series":          pb_series,
+            "bvps_series":        bvps_series_filled,
+            "price_series":       (
+                # Giá cuối năm từ df_price (close_vnd cuối tháng 12 mỗi năm)
+                df_price.set_index('time')['close_vnd']
+                .resample('YE').last()
+                .rename(lambda x: x.year)
+                if not df_price.empty and 'time' in df_price.columns and 'close_vnd' in df_price.columns
+                else pd.Series(dtype=float)
+            ),
         }
 
         if 'volume' not in df_price.columns:
