@@ -53,10 +53,10 @@ def _cached_format_table(df_json):
 
 def render_kpi_cards(metrics, fundamentals):
     kpi1, kpi2, kpi3, kpi4, kpi5, kpi6 = st.columns(6)
-    kpi1.metric("Thị Giá Hiện Tại", f"{metrics['current_price']:,.0f} đ")
-    kpi2.metric("Vốn Hóa", format_market_cap_billion(metrics['market_cap_billion']))
-    kpi3.metric("P/E (TTM)", f"{metrics['pe']:.2f} x")
-    kpi4.metric("P/B (TTM)", f"{metrics['pb']:.2f} x")
+    kpi1.metric("Thị Giá Hiện Tại", f"{metrics.get('current_price', 0) or 0:,.0f} đ")
+    kpi2.metric("Vốn Hóa", format_market_cap_billion(metrics.get('market_cap_billion', 0) or 0))
+    kpi3.metric("P/E (TTM)", f"{metrics.get('pe', 0) or 0:.2f} x")
+    kpi4.metric("P/B (TTM)", f"{metrics.get('pb', 0) or 0:.2f} x")
     kpi5.metric("ROE Gần Nhất", fmt(fundamentals['roe_latest'], suffix="%"))
     kpi6.metric("CAGR LNST 5N", fmt(fundamentals['net_profit_cagr_pct'], suffix="%"))
 
@@ -253,15 +253,15 @@ def render_tab_valuation(valuation_pkg, metrics):
         st.markdown("#### Các Kịch Bản Định Giá")
         cols = st.columns(min(len(methods), 4) or 1)
         for i, (name, value) in enumerate(methods.items()):
-            pct = (value / metrics['current_price'] - 1) * 100 if metrics['current_price'] else 0
+            pct = (value / metrics.get('current_price', 0) or 0 - 1) * 100 if metrics.get('current_price', 0) or 0 else 0
             cols[i % len(cols)].metric(name, f"{value:,.0f} đ", delta=f"{pct:+.1f}%")
 
         fig = go.Figure()
         names, values = list(methods.keys()), list(methods.values())
-        colors = ['#10d98a' if v >= metrics['current_price'] else '#ff4d6d' for v in values]
+        colors = ['#10d98a' if v >= metrics.get('current_price', 0) or 0 else '#ff4d6d' for v in values]
         fig.add_trace(go.Bar(x=names, y=values, marker_color=colors))
-        fig.add_hline(y=metrics['current_price'], line_dash='dash', line_color='#fbbf24',
-                      annotation_text=f"Giá hiện tại {metrics['current_price']:,.0f}đ")
+        fig.add_hline(y=metrics.get('current_price', 0) or 0, line_dash='dash', line_color='#fbbf24',
+                      annotation_text=f"Giá hiện tại {metrics.get('current_price', 0) or 0:,.0f}đ")
         fig.update_layout(template='plotly_dark',
                           paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
                           margin=dict(t=20, b=20))
@@ -518,7 +518,7 @@ def render_tab_technical(df_price, tech, metrics):
     v2.metric("KL TB 20 Ngày",    f"{tech['avg_volume_20d']:,.0f} CP")
     v3.metric("So Với TB",        f"{tech['volume_vs_avg_pct']:+.1f}%",
               delta=f"{tech['volume_vs_avg_pct']:+.1f}%")
-    st.caption(f"CP Lưu Hành: **{metrics['issue_share_million']:,.1f} Tr CP**")
+    st.caption(f"CP Lưu Hành: **{metrics.get('issue_share_million', 0) or 0:,.1f} Tr CP**")
 
     if tech.get('oil_correlation', 0.0) != 0.0:
         st.warning(f"🛢️ Tương quan giá dầu: **{tech['oil_correlation']:.2f}** — mã nhạy cảm với biến động dầu thô WTI.")
