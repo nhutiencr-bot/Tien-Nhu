@@ -438,15 +438,17 @@ def execute_equity_research_pipeline(ticker):
             if (y not in roa_series_filled.index or pd.isna(roa_series_filled.get(y))) and has_np and has_ta and total_assets_series[y] != 0:
                 roa_series_filled[y] = net_profit_series[y] / total_assets_series[y] * 100
 
+        # ── BẢNG 5 NĂM (CHUẨN HÓA KIỂU SỐ FLOAT) ──
         df_5y_table = pd.DataFrame({'Năm': years_available})
-        df_5y_table['Doanh thu thuần (tỷ)'] = df_5y_table['Năm'].map(revenue_series).where(pd.notna, None)
-        df_5y_table['LNST (tỷ)']            = df_5y_table['Năm'].map(net_profit_series).where(pd.notna, None)
-        df_5y_table['Vốn CSH (tỷ)']         = df_5y_table['Năm'].map(equity_series).where(pd.notna, None)
-        df_5y_table['Tổng tài sản (tỷ)']    = df_5y_table['Năm'].map(total_assets_series).where(pd.notna, None)
-        df_5y_table['EPS (đ)']              = df_5y_table['Năm'].map(eps_series_filled).where(pd.notna, None)
-        df_5y_table['BVPS (đ)']             = df_5y_table['Năm'].map(bvps_series_filled).where(pd.notna, None)
-        df_5y_table['ROE (%)']              = df_5y_table['Năm'].map(lambda y: roe_series_filled.get(y, None)).where(pd.notna, None)
-        df_5y_table['ROA (%)']              = df_5y_table['Năm'].map(lambda y: roa_series_filled.get(y, None)).where(pd.notna, None)
+        
+        df_5y_table['Doanh thu thuần (tỷ)'] = df_5y_table['Năm'].map(revenue_series).astype(float)
+        df_5y_table['LNST (tỷ)']            = df_5y_table['Năm'].map(net_profit_series).astype(float)
+        df_5y_table['Vốn CSH (tỷ)']         = df_5y_table['Năm'].map(equity_series).astype(float)
+        df_5y_table['Tổng tài sản (tỷ)']    = df_5y_table['Năm'].map(total_assets_series).astype(float)
+        df_5y_table['EPS (đ)']              = df_5y_table['Năm'].map(eps_series_filled).astype(float)
+        df_5y_table['BVPS (đ)']             = df_5y_table['Năm'].map(bvps_series_filled).astype(float)
+        df_5y_table['ROE (%)']              = df_5y_table['Năm'].map(lambda y: roe_series_filled.get(y, np.nan)).astype(float)
+        df_5y_table['ROA (%)']              = df_5y_table['Năm'].map(lambda y: roa_series_filled.get(y, np.nan)).astype(float)
         # ────────────────────────────────────────────────────────────────
 
         revenue_cagr    = cagr(get_latest_n_years(revenue_series,    DEFAULT_YEAR_LIMIT))
