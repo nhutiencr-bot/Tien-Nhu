@@ -250,15 +250,20 @@ def render_tab_valuation(valuation_pkg, metrics):
               delta=f"{summary['upside_median_pct']:+.1f}%")
 
     if methods:
+        # Lọc bỏ key nội bộ (bắt đầu bằng _) — chỉ giữ giá trị là số dương
+        display_methods = {
+            k: float(v) for k, v in methods.items()
+            if not k.startswith('_') and isinstance(v, (int, float)) and v > 0
+        }
         cp = metrics.get('current_price') or 0
         st.markdown("#### Các Kịch Bản Định Giá")
-        cols = st.columns(min(len(methods), 4) or 1)
-        for i, (name, value) in enumerate(methods.items()):
+        cols = st.columns(min(len(display_methods), 4) or 1)
+        for i, (name, value) in enumerate(display_methods.items()):
             pct = ((value / cp) - 1) * 100 if cp else 0
             cols[i % len(cols)].metric(name, f"{value:,.0f} đ", delta=f"{pct:+.1f}%")
 
         fig = go.Figure()
-        names, values = list(methods.keys()), list(methods.values())
+        names, values = list(display_methods.keys()), list(display_methods.values())
         colors = ['#10d98a' if v >= cp else '#ff4d6d' for v in values]
         fig.add_trace(go.Bar(x=names, y=values, marker_color=colors))
         fig.add_hline(y=cp, line_dash='dash', line_color='#fbbf24',
