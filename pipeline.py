@@ -23,7 +23,6 @@ from cafef_fallback import fetch_cafef_balance_sheet_5y, fetch_cafef_yearly_full
 SOURCE_FALLBACK_ORDER = ['KBS', 'VCI', 'DNSE']
 DEFAULT_YEAR_LIMIT = 5
 
-
 def normalize_to_billion_vnd(series):
     if series is None or series.empty:
         return series
@@ -38,7 +37,6 @@ def normalize_to_billion_vnd(series):
         except Exception:
             return None
     return series.map(_to_ty).dropna()
-
 
 def normalize_net_profit_with_anchor(net_profit_raw, equity_series, roe_series):
     base = normalize_to_billion_vnd(net_profit_raw)
@@ -63,7 +61,6 @@ def normalize_net_profit_with_anchor(net_profit_raw, equity_series, roe_series):
         fixed[year] = round(raw_val / divisor, 2)
     return pd.Series(fixed)
 
-
 def _build_engines_with_fallback(ticker):
     last_error = None
     test_end   = datetime.today().strftime('%Y-%m-%d')
@@ -85,7 +82,6 @@ def _build_engines_with_fallback(ticker):
         f"({', '.join(SOURCE_FALLBACK_ORDER)}). Lỗi cuối cùng: {last_error}"
     )
 
-
 def _safe_fetch(fn, default=None):
     try:
         result = fn()
@@ -93,10 +89,7 @@ def _safe_fetch(fn, default=None):
     except Exception:
         return default if default is not None else pd.DataFrame()
 
-
 def _fetch_income_statement(ticker, source, period='year', limit=DEFAULT_YEAR_LIMIT):
-    # Thử nguồn ĐÃ XÁC ĐỊNH (source_used) trước tiên — nhanh, đúng ngay lần
-    # đầu — thay vì luôn thử lại VCI trước cho mọi field (fix tốc độ).
     for src in [source] + [s for s in SOURCE_FALLBACK_ORDER if s != source]:
         try:
             f = Finance(symbol=ticker, source=src, period=period)
@@ -109,7 +102,6 @@ def _fetch_income_statement(ticker, source, period='year', limit=DEFAULT_YEAR_LI
         except Exception:
             continue
     return pd.DataFrame()
-
 
 def _fetch_ratio(ticker, source, period='year', limit=DEFAULT_YEAR_LIMIT):
     for src in [source] + [s for s in SOURCE_FALLBACK_ORDER if s != source]:
@@ -125,7 +117,6 @@ def _fetch_ratio(ticker, source, period='year', limit=DEFAULT_YEAR_LIMIT):
             continue
     return pd.DataFrame()
 
-
 def _fetch_cashflow(ticker, source, period='year', limit=DEFAULT_YEAR_LIMIT):
     for src in [source] + [s for s in SOURCE_FALLBACK_ORDER if s != source]:
         try:
@@ -140,7 +131,6 @@ def _fetch_cashflow(ticker, source, period='year', limit=DEFAULT_YEAR_LIMIT):
             continue
     return pd.DataFrame()
 
-
 def _fetch_balance_sheet(ticker, source, period='year', limit=DEFAULT_YEAR_LIMIT):
     for src in [source] + [s for s in SOURCE_FALLBACK_ORDER if s != source]:
         try:
@@ -154,7 +144,6 @@ def _fetch_balance_sheet(ticker, source, period='year', limit=DEFAULT_YEAR_LIMIT
         except Exception:
             continue
     return pd.DataFrame()
-
 
 @st.cache_data(ttl=1800)
 def execute_equity_research_pipeline(ticker):
@@ -236,47 +225,45 @@ def execute_equity_research_pipeline(ticker):
                     equity_series = (total_assets_series.loc[common_years]
                                      - total_liab_series.loc[common_years])
 
-        if equity_series.empty or total_assets_series.empty:
-            cafef_data = fetch_cafef_balance_sheet_5y(ticker, end_year=datetime.today().year - 1)
-            if equity_series.empty and not cafef_data['equity'].empty:
-                equity_series = cafef_data['equity']
-            if total_assets_series.empty and not cafef_data['total_assets'].empty:
-                total_assets_series = cafef_data['total_assets']
-
-        # ── Fill năm thiếu (2021) từ CafeF cho tất cả 4 chỉ tiêu ───────────
-        # Gọi một lần duy nhất với năm 2021 đến 2025, fill vào chỗ trống
+        # ── SỬA LỖI: Điền dữ liệu 5 năm từ CafeF độc lập & Có Fallback dự phòng ──
         try:
             LAST_DATA_YEAR = datetime.today().year - 1  # 2025
             TARGET_YEARS = list(range(LAST_DATA_YEAR - 4, LAST_DATA_YEAR + 1))
 
-            missing_years = [
-                y for y in TARGET_YEARS
-                if y not in revenue_series.index or y not in net_profit_series.index
-                or y not in equity_series.index or y not in total_assets_series.index
-            ]
+            # Tách riêng điều kiện kiểm tra thay vì gộp chung
+            missing_rev = [y for y in TARGET_YEARS if y not in revenue_series.index]
+            missing_np  = [y for y in TARGET_YEARS if y not in net_profit_series.index]
+            missing_eq  = [y for y in TARGET_YEARS if y not in equity_series.index]
+            missing_ta  = [y for y in TARGET_YEARS if y not in total_assets_series.index]
 
-            if missing_years:
-                # ⚠️ TRƯỚC ĐÂY dùng fetch_cafef_balance_sheet_5y — chỉ trả về
-                # equity + total_assets, KHÔNG có revenue + net_profit. Nên 2021
-                # vẫn thiếu Doanh thu/LNST dù Vốn CSH/Tổng tài sản đã được fill.
-                # Nay dùng fetch_cafef_yearly_full để lấy đủ cả 4 chỉ tiêu một lần.
-                cafef_full = fetch_cafef_yearly_full(
-                    ticker, years=list(range(LAST_DATA_YEAR - 4, LAST_DATA_YEAR + 1)))
+            if missing_rev or missing_np or missing_eq or missing_ta:
+                cafef_full = fetch_cafef_yearly_full(ticker, years=TARGET_YEARS)
 
                 def _fill_missing(target: pd.Series, source: pd.Series) -> pd.Series:
-                    if source.empty: return target
+                    if source is None or source.empty: return target
                     result = target.copy() if not target.empty else pd.Series(dtype=float)
                     for yr, val in source.items():
-                        if val and val == val and val != 0 and yr not in result.index:
-                            result[yr] = val
+                        if pd.notna(val) and val != 0 and yr not in result.index:
+                            result[yr] = float(val)
                     return result.sort_index()
 
                 revenue_series      = _fill_missing(revenue_series,      cafef_full.get('revenue',      pd.Series(dtype=float)))
                 net_profit_series   = _fill_missing(net_profit_series,   cafef_full.get('net_profit',   pd.Series(dtype=float)))
                 equity_series       = _fill_missing(equity_series,       cafef_full.get('equity',       pd.Series(dtype=float)))
                 total_assets_series = _fill_missing(total_assets_series, cafef_full.get('total_assets', pd.Series(dtype=float)))
-        except Exception:
-            pass  # CafeF không accessible — tiếp tục với dữ liệu hiện có
+                
+        except Exception as e:
+            # 💡 Bắt lỗi rõ ràng ra UI thay vì nuốt âm thầm, và xài fallback 
+            st.warning(f"⚠️ Không thể tải dữ liệu CafeF đầy đủ ({str(e)}). Hệ thống sẽ dùng dữ liệu vớt (Fallback).")
+            try:
+                cafef_data = fetch_cafef_balance_sheet_5y(ticker, end_year=LAST_DATA_YEAR)
+                if equity_series.empty and not cafef_data['equity'].empty:
+                    equity_series = cafef_data['equity']
+                if total_assets_series.empty and not cafef_data['total_assets'].empty:
+                    total_assets_series = cafef_data['total_assets']
+            except Exception:
+                pass 
+        # ────────────────────────────────────────────────────────────────────────
 
         market_cap_series_raw = fin5.get('market_cap', pd.Series(dtype=float))
         market_cap_direct = get_latest(market_cap_series_raw, default=0.0)
@@ -318,10 +305,6 @@ def execute_equity_research_pipeline(ticker):
         roa_series = _normalize_pct(roa_series)
 
         # ── Back-calculate EPS/BVPS/ROE/ROA cho năm thiếu từ ratio API ─────
-        # vnstock ratio() bị giới hạn 4 kỳ (2022-2025) dù đã patch vnai.
-        # Với những năm có net_profit + equity + total_assets (từ CafeF)
-        # nhưng thiếu EPS/BVPS/ROE/ROA → tự tính lại.
-        # Dùng issue_share hiện tại làm xấp xỉ (thường sai ≤5% trừ năm có split).
         if issue_share > 0:
             LAST_DATA_YEAR = datetime.today().year - 1
             TARGET_YEARS   = list(range(LAST_DATA_YEAR - 4, LAST_DATA_YEAR + 1))
@@ -546,8 +529,6 @@ def execute_equity_research_pipeline(ticker):
             if cfo_l is not None:
                 latest_fcff = (cfo_l - abs(capex_l)) * 1e9
 
-        # net_debt_latest (tính ở khối Multiples phía trên) dùng lại cho DCF
-        # để EV chính xác hơn thay vì giả định net_debt = 0.
         dcf_results = reverse_g = None
         if latest_fcff and latest_fcff > 0 and issue_share > 0:
             dcf_results = dcf_fcff_scenarios(
@@ -561,16 +542,10 @@ def execute_equity_research_pipeline(ticker):
         graham_value = graham_number(eps_latest, bvps_latest) \
             if eps_latest > 0 and bvps_latest > 0 else None
 
-        # ── Phát hiện pha loãng (cổ tức CP) + điều chỉnh EPS/BVPS lịch sử ──
         dilution_years = detect_stock_dividend_years(outstanding_shares_series)
         eps_adj, bvps_adj = normalize_eps_bvps_series(
             eps_series_filled, bvps_series_filled, outstanding_shares_series)
 
-        # ── DDM (Gordon Growth) — chữ ký ĐÚNG theo valuation.py hiện tại:
-        # nhận cả series, tự kiểm tra payout ratio, trả về tuple (giá, lý_do).
-        # ⚠️ Đây là fix quan trọng nhất — bản cũ gọi ddm_gordon(dps_latest,
-        # required_return=..., g=...) SAI chữ ký, gây crash TOÀN BỘ pipeline
-        # (not just DDM) cho mọi mã chưa có cache.
         dps_series = fin5.get('dps', pd.Series(dtype=float))
         dps_latest = get_latest(dps_series, default=0.0) if not dps_series.empty else 0.0
         ddm_value, ddm_note = ddm_gordon(dps_series, net_profit_series, ticker=ticker)
