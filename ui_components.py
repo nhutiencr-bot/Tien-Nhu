@@ -250,18 +250,19 @@ def render_tab_valuation(valuation_pkg, metrics):
               delta=f"{summary['upside_median_pct']:+.1f}%")
 
     if methods:
+        cp = metrics.get('current_price') or 0
         st.markdown("#### Các Kịch Bản Định Giá")
         cols = st.columns(min(len(methods), 4) or 1)
         for i, (name, value) in enumerate(methods.items()):
-            pct = (value / metrics.get('current_price', 0) or 0 - 1) * 100 if metrics.get('current_price', 0) or 0 else 0
+            pct = ((value / cp) - 1) * 100 if cp else 0
             cols[i % len(cols)].metric(name, f"{value:,.0f} đ", delta=f"{pct:+.1f}%")
 
         fig = go.Figure()
         names, values = list(methods.keys()), list(methods.values())
-        colors = ['#10d98a' if v >= metrics.get('current_price', 0) or 0 else '#ff4d6d' for v in values]
+        colors = ['#10d98a' if v >= cp else '#ff4d6d' for v in values]
         fig.add_trace(go.Bar(x=names, y=values, marker_color=colors))
-        fig.add_hline(y=metrics.get('current_price', 0) or 0, line_dash='dash', line_color='#fbbf24',
-                      annotation_text=f"Giá hiện tại {metrics.get('current_price', 0) or 0:,.0f}đ")
+        fig.add_hline(y=cp, line_dash='dash', line_color='#fbbf24',
+                      annotation_text=f"Giá hiện tại {cp:,.0f}đ")
         fig.update_layout(template='plotly_dark',
                           paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
                           margin=dict(t=20, b=20))
