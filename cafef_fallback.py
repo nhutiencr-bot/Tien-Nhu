@@ -32,8 +32,14 @@ def _cafef_is_reachable() -> bool:
     if _REACHABLE_CACHE["value"] is not None and (now - _REACHABLE_CACHE["ts"]) < _REACHABLE_CACHE_TTL:
         return _REACHABLE_CACHE["value"]
     try:
-        resp = _SESSION.get("https://s.cafef.vn", timeout=REQUEST_TIMEOUT)
-        ok = resp.status_code == 200
+        # Dùng URL data thật thay vì homepage (homepage trả 403 từ một số IP
+        # nhưng URL báo cáo tài chính vẫn accessible từ Streamlit Cloud)
+        resp = _SESSION.get(
+            "https://s.cafef.vn/bao-cao-tai-chinh/VNM/incsta/2024/4/0/0/bao-cao-tai-chinh-vnm.chn",
+            timeout=REQUEST_TIMEOUT)
+        # 200 hoặc 404 = server trả lời = có thể dùng được
+        # 403 từ homepage ≠ 403 từ tất cả URL dữ liệu
+        ok = resp.status_code in (200, 404) and len(resp.text) > 100
     except Exception:
         ok = False
     _REACHABLE_CACHE["ts"] = now
