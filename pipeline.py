@@ -237,11 +237,41 @@ def execute_equity_research_pipeline(ticker):
                                      - total_liab_series.loc[common_years])
 
         if equity_series.empty or total_assets_series.empty:
-            cafef_data = fetch_cafef_balance_sheet_5y(ticker, end_year=datetime.today().year)
+            cafef_data = fetch_cafef_balance_sheet_5y(ticker, end_year=datetime.today().year - 1)
             if equity_series.empty and not cafef_data['equity'].empty:
                 equity_series = cafef_data['equity']
             if total_assets_series.empty and not cafef_data['total_assets'].empty:
                 total_assets_series = cafef_data['total_assets']
+
+        # ── Fill năm thiếu (2021) từ CafeF cho tất cả 4 chỉ tiêu ───────────
+        # Gọi một lần duy nhất với năm 2021 đến 2025, fill vào chỗ trống
+        try:
+            LAST_DATA_YEAR = datetime.today().year - 1  # 2025
+            TARGET_YEARS = list(range(LAST_DATA_YEAR - 4, LAST_DATA_YEAR + 1))
+
+            missing_years = [
+                y for y in TARGET_YEARS
+                if y not in revenue_series.index or y not in net_profit_series.index
+                or y not in equity_series.index or y not in total_assets_series.index
+            ]
+
+            if missing_years:
+                cafef_full = fetch_cafef_balance_sheet_5y(ticker, end_year=LAST_DATA_YEAR)
+
+                def _fill_missing(target: pd.Series, source: pd.Series) -> pd.Series:
+                    if source.empty: return target
+                    result = target.copy() if not target.empty else pd.Series(dtype=float)
+                    for yr, val in source.items():
+                        if val and val == val and val != 0 and yr not in result.index:
+                            result[yr] = val
+                    return result.sort_index()
+
+                revenue_series      = _fill_missing(revenue_series,      cafef_full.get('revenue',      pd.Series(dtype=float)))
+                net_profit_series   = _fill_missing(net_profit_series,   cafef_full.get('net_profit',   pd.Series(dtype=float)))
+                equity_series       = _fill_missing(equity_series,       cafef_full.get('equity',       pd.Series(dtype=float)))
+                total_assets_series = _fill_missing(total_assets_series, cafef_full.get('total_assets', pd.Series(dtype=float)))
+        except Exception:
+            pass  # CafeF không accessible — tiếp tục với dữ liệu hiện có
 
         market_cap_series_raw = fin5.get('market_cap', pd.Series(dtype=float))
         market_cap_direct = get_latest(market_cap_series_raw, default=0.0)
@@ -281,6 +311,39 @@ def execute_equity_research_pipeline(ticker):
 
         roe_series = _normalize_pct(roe_series)
         roa_series = _normalize_pct(roa_series)
+
+        # ── Back-calculate EPS/BVPS/ROE/ROA cho năm thiếu từ ratio API ─────
+        # vnstock ratio() bị giới hạn 4 kỳ (2022-2025) dù đã patch vnai.
+        # Với những năm có net_profit + equity + total_assets (từ CafeF)
+        # nhưng thiếu EPS/BVPS/ROE/ROA → tự tính lại.
+        # Dùng issue_share hiện tại làm xấp xỉ (thường sai ≤5% trừ năm có split).
+        if issue_share > 0:
+            LAST_DATA_YEAR = datetime.today().year - 1
+            TARGET_YEARS   = list(range(LAST_DATA_YEAR - 4, LAST_DATA_YEAR + 1))
+
+            for yr in TARGET_YEARS:
+                has_np = yr in net_profit_series.index and pd.notna(net_profit_series.get(yr))
+                has_eq = yr in equity_series.index and pd.notna(equity_series.get(yr))
+                has_ta = yr in total_assets_series.index and pd.notna(total_assets_series.get(yr))
+
+                if has_np and yr not in eps_series.index:
+                    eps_series[yr] = net_profit_series[yr] * 1e9 / issue_share
+
+                if has_eq and yr not in bvps_series.index:
+                    bvps_series[yr] = equity_series[yr] * 1e9 / issue_share
+
+                if has_np and has_eq and yr not in roe_series.index:
+                    eq_b = equity_series[yr]
+                    if eq_b and eq_b > 0:
+                        roe_series[yr] = net_profit_series[yr] / eq_b * 100
+
+                if has_np and has_ta and yr not in roa_series.index:
+                    ta_b = total_assets_series[yr]
+                    if ta_b and ta_b > 0:
+                        roa_series[yr] = net_profit_series[yr] / ta_b * 100
+
+            for s in [eps_series, bvps_series, roe_series, roa_series]:
+                s.sort_index(inplace=True)
 
         market_cap = market_cap_direct if market_cap_direct > 0 else (
             current_price * issue_share if issue_share > 0 else 0.0)
