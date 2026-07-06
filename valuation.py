@@ -401,7 +401,6 @@ def nine_methods_valuation(
     dcf_results: Optional[dict] = None,
     graham_value: Optional[float] = None,
     ddm_value: Optional[float] = None,
-    # Thêm: dùng cho pha loãng & PEG
     eps_adj: Optional[pd.Series] = None,
     bvps_adj: Optional[pd.Series] = None,
     shares_series: Optional[pd.Series] = None,
@@ -411,41 +410,45 @@ def nine_methods_valuation(
 ) -> dict:
     """
     Tổng hợp ≤ 9 phương pháp định giá. Mỗi kết quả là giá/cp đơn vị đồng VN.
-    Trả về dict {tên_phương_pháp: giá}.
+    Trả về dict {tên_phương_pháp: giá} — chỉ chứa giá trị số dương, KHÔNG chứa
+    key nội bộ (metadata _xxx) để tránh lỗi khi render_tab_valuation chia giá.
     """
     methods = {}
 
-    # Dùng EPS/BVPS đã điều chỉnh pha loãng nếu có
-    _eps_use  = eps_adj  if eps_adj  is not None and not eps_adj.empty  else pe_series  # fallback
+    _eps_use  = eps_adj  if eps_adj  is not None and not eps_adj.empty  else pe_series
     _bvps_use = bvps_adj if bvps_adj is not None and not bvps_adj.empty else pb_series
 
-    # 1–2. PE / PB Median
+    # 1–2. PE / PB Median — lọc metadata key ra ngoài
     pe_pb = pe_pb_valuation(
         _eps_use, _bvps_use, pe_series, pb_series, eps_latest, bvps_latest)
-    methods.update(pe_pb)
+    for k, v in pe_pb.items():
+        if not k.startswith('_') and isinstance(v, (int, float)) and v > 0:
+            methods[k] = v
 
-    # 3. PEG (chỉ áp dụng nếu có EPS history và PE hiện tại)
+    # 3. PEG
     pe_current = (current_price / eps_latest) if eps_latest > 0 else 0
     if _eps_use is not None and not _eps_use.empty and pe_current > 0:
         peg = peg_valuation(_eps_use if not _eps_use.empty else pe_series, pe_current)
-        methods.update(peg)
+        for k, v in peg.items():
+            if not k.startswith('_') and isinstance(v, (int, float)) and v > 0:
+                methods[k] = v
 
-    # 4–6. DCF kịch bản — flatten dict về float để render_tab_valuation dùng được
+    # 4–6. DCF
     if dcf_results:
         for scenario_name, res in dcf_results.items():
             if isinstance(res, dict):
                 price = res.get('value_per_share')
             else:
                 price = res
-            if price and price > 0:
+            if price and isinstance(price, (int, float)) and price > 0:
                 methods[f'DCF {scenario_name}'] = float(price)
 
     # 7. Graham Number
-    if graham_value:
+    if graham_value and isinstance(graham_value, (int, float)) and graham_value > 0:
         methods['Graham Number'] = graham_value
 
     # 8. DDM
-    if ddm_value:
+    if ddm_value and isinstance(ddm_value, (int, float)) and ddm_value > 0:
         methods['DDM Gordon'] = ddm_value
 
     return methods
