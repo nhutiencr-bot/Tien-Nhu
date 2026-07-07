@@ -1,18 +1,22 @@
 """
 financial_normalizer.py
+-----------------------
+FIX:
+  1. normalize_to_billion_vnd: dùng multi-tier threshold thay vì median_abs > 10_000_000
+     (ngưỡng cũ khiến income statement đơn vị tỷ bị chia 1e9 → sai)
+  2. find_row_series: không thay đổi logic, giữ nguyên
+  3. build_financial_table: không thay đổi
 """
 
 import pandas as pd
 import re
 
-# Danh sách mã ngân hàng VN (mở rộng đầy đủ)
 BANK_TICKERS = {
     'VCB', 'BID', 'CTG', 'TCB', 'MBB', 'ACB', 'STB', 'VPB', 'HDB', 'TPB',
     'MSB', 'OCB', 'VIB', 'SHB', 'EIB', 'LPB', 'SSB', 'NAB', 'ABB', 'BAB',
     'BVB', 'KLB', 'PGB', 'VAB', 'VBB', 'SGN', 'NVB', 'SGB', 'CBB', 'SEAB',
 }
 
-# Danh sách mã bảo hiểm/chứng khoán (cũng dùng thu nhập thay doanh thu)
 FINANCIAL_TICKERS = {
     'BVH', 'PVI', 'PTI', 'MIG', 'BMI', 'VNR', 'BIC', 'PRE', 'PGI',
     'SSI', 'VND', 'HCM', 'MBS', 'VCI', 'FTS', 'AGR', 'SBS', 'BSI',
@@ -38,7 +42,6 @@ def _quarter_sort_key(c):
 
 
 def _get_quarter_columns(df: pd.DataFrame):
-    """Nhận diện các cột theo quý, định dạng vnstock trả về: 'YYYY-Q1'..'YYYY-Q4'."""
     meta_cols = {'item', 'item_en', 'item_id'}
     q_cols = []
     for c in df.columns:
@@ -52,10 +55,6 @@ def _get_quarter_columns(df: pd.DataFrame):
 
 def find_row_series(df: pd.DataFrame, keywords, exclude_keywords=None,
                     item_ids=None, prefer_top_level=True, period='year'):
-    """
-    period='year'    -> tìm các cột dạng 'YYYY', key trả về là int năm.
-    period='quarter'  -> tìm các cột dạng 'YYYY-Qn', key trả về là str 'YYYY-Qn'.
-    """
     if df is None or df.empty:
         return pd.Series(dtype=float)
 
@@ -69,7 +68,6 @@ def find_row_series(df: pd.DataFrame, keywords, exclude_keywords=None,
 
     matched = pd.DataFrame()
 
-    # Bước 1: thử khớp chính xác theo item_id
     if item_ids and 'item_id' in df.columns:
         item_id_lower = df['item_id'].astype(str).str.lower().str.strip()
         target_ids = [i.lower().strip() for i in item_ids]
@@ -77,7 +75,6 @@ def find_row_series(df: pd.DataFrame, keywords, exclude_keywords=None,
         if mask_exact.any():
             matched = df[mask_exact]
 
-    # Bước 2: fallback dò từ khoá
     if matched.empty:
         combined_text = df[search_cols].astype(str).agg(' '.join, axis=1).str.lower()
         mask = pd.Series(False, index=df.index)
@@ -126,10 +123,6 @@ def find_row_series(df: pd.DataFrame, keywords, exclude_keywords=None,
 
 
 def _find_revenue_for_bank(df_income, period='year'):
-    """
-    Ngân hàng/bảo hiểm/chứng khoán không có 'doanh thu thuần'.
-    Thử lần lượt các chỉ tiêu thu nhập đặc thù theo thứ tự ưu tiên.
-    """
     bank_revenue_keywords = [
         (['tổng thu nhập hoạt động', 'total operating income', 'net operating income'], ['chi phí', 'expense']),
         (['thu nhập lãi thuần', 'net interest income', 'lãi thuần'], ['chi phí lãi']),
@@ -138,44 +131,31 @@ def _find_revenue_for_bank(df_income, period='year'):
         (['doanh thu hoạt động', 'operating revenue'], []),
         (['thu nhập từ lãi', 'interest income', 'interest and similar income'], ['chi phí']),
     ]
-
     for keywords, excludes in bank_revenue_keywords:
         s = find_row_series(df_income, keywords,
-                           exclude_keywords=excludes if excludes else None, period=period)
+                            exclude_keywords=excludes if excludes else None, period=period)
         if not s.empty:
             return s
-
     return pd.Series(dtype=float)
 
 
 def build_financial_table(df_income, df_balance, df_ratio=None, ticker=None, period='year'):
-    """
-    Tổng hợp các chỉ tiêu BCTC.
-    ticker: dùng để detect ngân hàng/tài chính và chọn logic revenue phù hợp.
-    period: 'year' hoặc 'quarter'.
-    """
     data = {}
     is_bank = ticker in BANK_TICKERS if ticker else False
     is_financial = ticker in FINANCIAL_TICKERS if ticker else False
 
-    # --- Revenue: xử lý riêng cho ngân hàng/tài chính ---
     if is_bank or is_financial:
         data['revenue'] = _find_revenue_for_bank(df_income, period=period)
     else:
-        # Doanh nghiệp thông thường
         data['revenue'] = find_row_series(
             df_income,
-            [
-                'doanh thu thuần', 'net revenue', 'net sales', 'revenue',
-                'doanh thu bán hàng', 'tổng doanh thu', 'total revenue',
-            ],
+            ['doanh thu thuần', 'net revenue', 'net sales', 'revenue',
+             'doanh thu bán hàng', 'tổng doanh thu', 'total revenue'],
             exclude_keywords=['giá vốn', 'cost of', 'chi phí lãi'],
             item_ids=['revenue', 'net_revenue', 'net_sales'], period=period)
-
         if data['revenue'].empty:
             data['revenue'] = _find_revenue_for_bank(df_income, period=period)
 
-    # --- Net profit ---
     data['net_profit'] = find_row_series(
         df_income,
         ['lợi nhuận sau thuế', 'net profit', 'profit after tax', 'net income',
@@ -188,7 +168,6 @@ def build_financial_table(df_income, df_balance, df_ratio=None, ticker=None, per
         ['lãi cơ bản trên cổ phiếu', 'earnings per share', 'eps'],
         item_ids=['eps'], period=period)
 
-    # --- Balance sheet ---
     data['equity'] = find_row_series(
         df_balance,
         ['vốn chủ sở hữu', "owner's equity", 'owners equity', 'total equity',
@@ -199,7 +178,6 @@ def build_financial_table(df_income, df_balance, df_ratio=None, ticker=None, per
         df_balance,
         ['tổng cộng tài sản', 'total assets', 'tổng tài sản'], period=period)
 
-    # --- ĐOẠN RATIO ĐƯỢC KHÂU LẠI VÀO ĐÚNG HÀM CỦA NÓ ---
     if df_ratio is not None and not df_ratio.empty:
         data['eps']    = find_row_series(df_ratio, ['eps', 'earning per share', 'earnings per share'], period=period)
         data['bvps']   = find_row_series(df_ratio, ['book value per share', 'bvps'], period=period)
@@ -232,24 +210,61 @@ def build_financial_table(df_income, df_balance, df_ratio=None, ticker=None, per
     if data['bvps'].empty and not data['equity'].empty and not data['outstanding_shares'].empty:
         common_years = data['equity'].index.intersection(data['outstanding_shares'].index)
         if len(common_years) > 0:
-            data['bvps'] = (data['equity'].loc[common_years] / data['outstanding_shares'].loc[common_years])
+            data['bvps'] = data['equity'].loc[common_years] / data['outstanding_shares'].loc[common_years]
 
     return data
 
 
-# --- CÁC HÀM BỔ TRỢ GỐC CỦA BẠN (Đã được đưa về đúng vị trí) ---
 def build_5y_financial_table(df_income, df_balance, df_ratio=None, ticker=None):
-    """Giữ tương thích ngược: bảng theo năm (hành vi cũ, không đổi)."""
     return build_financial_table(df_income, df_balance, df_ratio, ticker=ticker, period='year')
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# FIX CHÍNH: normalize_to_billion_vnd
+#
+# BUG CŨ:
+#   median_abs = series.abs().median()
+#   if median_abs > 10_000_000:   ← ngưỡng 10 triệu
+#       return series / 1e9
+#
+# VẤN ĐỀ: vnstock KBS trả về theo 3 đơn vị tuỳ bảng:
+#   - Income statement:  TỶ đồng  (val ~ 100..500_000)
+#   - Balance sheet:     ĐỒNG     (val ~ 1e11..1e15)
+#   - Ratio (EPS/BVPS):  ĐỒNG/CP  (val ~ 1_000..100_000)
+#
+# Ngưỡng cũ 10_000_000 (10 triệu) khiến income statement đơn vị TỶ
+# bị nhận nhầm là ĐỒNG và chia thêm 1e9 → ra số cực nhỏ (0.413 tỷ thay vì 413 tỷ).
+#
+# FIX: dùng multi-tier threshold
+#   > 5e10  → đang là ĐỒNG    → chia 1e9 → ra TỶ
+#   > 5e5   → đang là TRIỆU   → chia 1e3 → ra TỶ  (DNSE balance sheet, hiếm)
+#   còn lại → đã là TỶ        → giữ nguyên
+# ══════════════════════════════════════════════════════════════════════════════
 def normalize_to_billion_vnd(series: pd.Series, label=""):
+    """
+    Chuyển series tài chính về đơn vị TỶ VNĐ.
+
+    Multi-tier detection:
+      median > 5e10  → đơn vị ĐỒNG   → chia 1e9
+      median > 5e5   → đơn vị TRIỆU  → chia 1e3
+      còn lại        → đã là TỶ      → giữ nguyên
+
+    Ngưỡng dùng median (không phải từng giá trị riêng lẻ) để tránh bị
+    outlier của 1 năm làm sai cả chuỗi.
+    """
     if series is None or series.empty:
         return series
+
     median_abs = series.abs().median()
-    if median_abs > 10_000_000:
+
+    if median_abs > 5e10:        # đơn vị ĐỒNG (balance sheet VCI/KBS raw)
         return series / 1e9
-    return series
+    if median_abs > 5e5:         # đơn vị TRIỆU (DNSE hoặc CafeF raw)
+        result = series / 1e3
+        # sanity: sau khi chia mà vẫn > 5e7 tỷ thì sai → không chia
+        if result.abs().median() < 5e7:
+            return result
+    return series                # đã là TỶ
 
 
 def get_latest(series: pd.Series, default=0.0):
@@ -280,85 +295,50 @@ def cagr(series: pd.Series, n_years=None):
         return None
 
 
-# ============================================================
-# 4. ĐỊNH GIÁ: DDM VÀ GRAHAM NUMBER (BẢN CẬP NHẬT CÓ BẪY LỖI)
-# ============================================================
-
 def ddm_gordon(dps, required_return=0.11, g=0.04):
-    """
-    Mô hình chiết khấu cổ tức (Gordon Growth Model).
-    Bẫy lỗi: Cổ tức phải dương và ke phải lớn hơn g.
-    """
     if dps is None or dps <= 0 or required_return <= g:
         return None
     return (dps * (1 + g)) / (required_return - g)
 
 
 def graham_number(eps, bvps):
-    """
-    Graham Number: Mức giá hợp lý tối đa cho một cổ phiếu giá trị.
-    Bẫy lỗi: EPS và BVPS bắt buộc phải > 0.
-    """
     if eps is None or bvps is None or eps <= 0 or bvps <= 0:
         return None
     return (22.5 * eps * bvps) ** 0.5
 
 
-# ------------------------------------------------------------
-# DÁN HÀM MỚI VÀO ĐÂY (NGAY DƯỚI PHẦN 4, TRÊN PHẦN 5)
-# ------------------------------------------------------------
-def advanced_multiples_valuation(eps_latest, eps_5y_ago, pe_current, 
-                                 ebitda_latest, cfo_latest, revenue_latest, net_debt_latest, 
-                                 shares_outstanding, 
+def advanced_multiples_valuation(eps_latest, eps_5y_ago, pe_current,
+                                 ebitda_latest, cfo_latest, revenue_latest, net_debt_latest,
+                                 shares_outstanding,
                                  ev_ebitda_median_5y, pcf_median_5y, ps_median_5y):
-    """
-    Port chuẩn xác từ Node.js: Xử lý EV/EBITDA, P/CF, P/S và PEG.
-    """
     methods = {}
-    
-    # Đổi shares ra đơn vị Tỷ Cổ Phiếu
     shares_billion = shares_outstanding / 1e9 if shares_outstanding else 0
     if shares_billion <= 0:
         return methods
 
-    # 1. EV/EBITDA
     if ebitda_latest and ebitda_latest > 0 and ev_ebitda_median_5y:
         fair_ev = ebitda_latest * ev_ebitda_median_5y
         fair_market_cap = fair_ev - net_debt_latest
         if fair_market_cap > 0:
             methods['EV/EBITDA Median 5N'] = fair_market_cap / shares_billion
 
-    # 2. P/CF
     if cfo_latest and cfo_latest > 0 and pcf_median_5y:
         methods['P/CF Median 5N'] = (cfo_latest * pcf_median_5y) / shares_billion
 
-    # 3. P/S
     if revenue_latest and revenue_latest > 0 and ps_median_5y:
         methods['P/S Median 5N'] = (revenue_latest * ps_median_5y) / shares_billion
 
-    # 4. PEG
     if eps_latest and eps_5y_ago and eps_5y_ago > 0 and eps_latest > eps_5y_ago and pe_current:
         eps_growth = ((eps_latest / eps_5y_ago) ** 0.25 - 1) * 100
         if eps_growth > 0:
             peg_ratio = pe_current / max(eps_growth, 1)
             methods['PEG Fair Value'] = eps_latest * max(eps_growth, 1)
-            methods['_PEG_Ratio'] = peg_ratio 
-            
+            methods['_PEG_Ratio'] = peg_ratio
+
     return methods
 
 
-# ============================================================
-# 5. 9 PHƯƠNG PHÁP ĐỊNH GIÁ TỔNG HỢP (dùng PE/PB lịch sử của CHÍNH MÃ)
-# ============================================================
-
 def nine_methods_valuation(eps_latest, bvps_latest, pe_series: pd.Series,
                            pb_series: pd.Series, current_price):
-    """
-    Hàm tổng hợp định giá.
-    Nơi đây bạn có thể gọi DDM, Graham và Advanced Multiples để gom chung thành 1 object.
-    """
     methods = {}
-    
-    # (Bạn có thể bổ sung logic để nhét các kết quả định giá vào dictionary methods này sau)
-    
     return methods
