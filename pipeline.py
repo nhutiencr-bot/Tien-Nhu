@@ -1,6 +1,19 @@
 import pandas as pd
 import numpy as np
 import streamlit as st
+
+# ── PATCH vnai TRƯỚC KHI import vnstock ──────────────────────────────────────
+# vnai.beam.patching cắt kết quả Finance xuống 4 kỳ (community tier = 4 periods).
+# Patch TRƯỚC khi import vnstock để bypass giới hạn này và lấy đủ 5 năm (2021-2025).
+try:
+    import vnai.beam.patching as _vnai_p
+    _vnai_p.limit_vci_periods        = lambda df, max_periods=None: df
+    _vnai_p.limit_periods_by_columns = lambda df, max_periods=None: df
+    _vnai_p.get_max_periods          = lambda: None
+except Exception:
+    pass
+# ─────────────────────────────────────────────────────────────────────────────
+
 from news_fetcher import fetch_news_with_fallback
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -8,7 +21,7 @@ from vnstock.api.quote import Quote
 from vnstock.api.financial import Finance
 from vnstock.api.company import Company
 from financial_normalizer import (
-    find_row_series, build_5y_financial_table,
+    find_row_series, build_5y_financial_table, build_financial_table,
     get_latest, get_latest_n_years, cagr,
 )
 from valuation import (
@@ -22,8 +35,6 @@ from cafef_fallback import fetch_cafef_balance_sheet_5y, fetch_cafef_yearly_full
 # đưa lên đầu gây chờ vô ích trước khi fallback. Đây là fix tốc độ chính.
 SOURCE_FALLBACK_ORDER = ['KBS', 'VCI', 'DNSE']
 DEFAULT_YEAR_LIMIT = 5
-FETCH_YEAR_LIMIT = 10                          # cào dư kỳ để chắc chắn có năm xa nhất (2021)
-TABLE_YEARS = [2021, 2022, 2023, 2024, 2025]   # khung hiển thị CỐ ĐỊNH đúng 5 năm
 
 
 def normalize_to_billion_vnd(series):
@@ -160,6 +171,14 @@ def _fetch_balance_sheet(ticker, source, period='year', limit=DEFAULT_YEAR_LIMIT
 
 @st.cache_data(ttl=1800)
 def execute_equity_research_pipeline(ticker):
+    # Patch vnai ngay trước khi chạy — đảm bảo hoạt động sau mọi lần re-import
+    try:
+        import vnai.beam.patching as _p
+        _p.limit_vci_periods        = lambda df, max_periods=None: df
+        _p.limit_periods_by_columns = lambda df, max_periods=None: df
+        _p.get_max_periods          = lambda: None
+    except Exception:
+        pass
     try:
         q_engine, f_engine, c_engine, source_used = _build_engines_with_fallback(ticker)
 
@@ -169,10 +188,13 @@ def execute_equity_research_pipeline(ticker):
         tasks = {
             "price":      lambda: q_engine.history(start=start_date, end=end_date, interval='1D'),
             "overview":   lambda: c_engine.overview(),
-            "income_y":   lambda: _fetch_income_statement(ticker, source_used, period='year', limit=FETCH_YEAR_LIMIT),
-            "cashflow_y": lambda: _fetch_cashflow(ticker,          source_used, period='year', limit=FETCH_YEAR_LIMIT),
-            "ratio_y":    lambda: _fetch_ratio(ticker,             source_used, period='year', limit=FETCH_YEAR_LIMIT),
-            "balance_y":  lambda: _fetch_balance_sheet(ticker,     source_used, period='year', limit=FETCH_YEAR_LIMIT),
+            "income_y":   lambda: _fetch_income_statement(ticker, source_used, period='year',    limit=DEFAULT_YEAR_LIMIT),
+            "cashflow_y": lambda: _fetch_cashflow(ticker,          source_used, period='year',    limit=DEFAULT_YEAR_LIMIT),
+            "ratio_y":    lambda: _fetch_ratio(ticker,             source_used, period='year',    limit=DEFAULT_YEAR_LIMIT),
+            "income_q":   lambda: _fetch_income_statement(ticker,  source_used, period='quarter', limit=20),
+            "ratio_q":    lambda: _fetch_ratio(ticker,             source_used, period='quarter', limit=20),
+            "balance_y":  lambda: _fetch_balance_sheet(ticker,     source_used, period='year',    limit=DEFAULT_YEAR_LIMIT),
+            "balance_q":  lambda: _fetch_balance_sheet(ticker,     source_used, period='quarter', limit=20),
             "news":       lambda: c_engine.news(),
         }
 
@@ -191,7 +213,10 @@ def execute_equity_research_pipeline(ticker):
         df_income    = results.get("income_y",   pd.DataFrame())
         df_cashflow  = results.get("cashflow_y", pd.DataFrame())
         df_ratio     = results.get("ratio_y",    pd.DataFrame())
+        df_income_q  = results.get("income_q",   pd.DataFrame())
+        df_ratio_q   = results.get("ratio_q",    pd.DataFrame())
         df_balance   = results.get("balance_y",  pd.DataFrame())
+        df_balance_q = results.get("balance_q",  pd.DataFrame())
 
         if df_price is None or df_price.empty:
             st.error(f"Không có dữ liệu giá lịch sử cho mã {ticker}.")
@@ -240,12 +265,14 @@ def execute_equity_research_pipeline(ticker):
                 total_assets_series = cafef_data['total_assets']
 
         # ── BÙ NĂM CÒN THIẾU (thường là năm xa nhất, VD 2021) ──────────────
-        # vnstock (VCI/KBS/DNSE) đôi khi chỉ trả về ít kỳ hơn số limit truyền
-        # vào. 2 khối fallback CafeF phía trên chỉ kích hoạt khi series RỖNG
-        # HOÀN TOÀN, không xử lý trường hợp series có dữ liệu nhưng THIẾU đúng
-        # 1 năm cụ thể — đây là khối xử lý đúng trường hợp đó, dùng
-        # fetch_cafef_yearly_full() cào đủ cả 4 chỉ tiêu cho riêng (các) năm
-        # bị thiếu.
+        # vnstock (VCI/KBS/DNSE) thường chỉ trả về 4 kỳ gần nhất cho
+        # income_statement/ratio (đôi khi cả balance_sheet), BẤT KỂ tham số
+        # limit truyền vào — không phải lỗi allowed_years hay
+        # DEFAULT_YEAR_LIMIT. 2 khối fallback CafeF phía trên chỉ kích hoạt
+        # khi series RỖNG HOÀN TOÀN, không xử lý trường hợp series có dữ
+        # liệu nhưng THIẾU đúng 1 năm cụ thể — đây là khối xử lý đúng
+        # trường hợp đó, dùng fetch_cafef_yearly_full() cào đủ cả 4 chỉ
+        # tiêu cho riêng (các) năm bị thiếu.
         def _merge_missing_years(base_series, extra_series):
             if extra_series is None or extra_series.empty:
                 return base_series
@@ -254,7 +281,16 @@ def execute_equity_research_pipeline(ticker):
             merged = pd.concat([base_series, extra_series]).sort_index()
             return merged[~merged.index.duplicated(keep='first')]  # ưu tiên số liệu gốc
 
-        _expected_years = set(TABLE_YEARS)
+        # ⚠️ FIX: Trước đây `if not is_bank:` loại trừ NGÂN HÀNG khỏi TOÀN BỘ
+        # khối bù năm thiếu — nhưng lý do ban đầu (Doanh thu thuần không có
+        # ý nghĩa kinh tế với ngân hàng) chỉ áp dụng cho riêng field
+        # "revenue", KHÔNG áp dụng cho Vốn CSH/Tổng tài sản/LNST — những
+        # field này hoàn toàn hợp lệ và CẦN được bù cho ngân hàng. Việc
+        # loại trừ cả khối khiến ngân hàng KHÔNG BAO GIỜ được bù năm thiếu
+        # (VD 2021), dù equity/total_assets/net_profit hoàn toàn có thể
+        # cào được từ CafeF bình thường.
+        _current_year_check = datetime.today().year
+        _expected_years = set(range(_current_year_check - DEFAULT_YEAR_LIMIT, _current_year_check))
         _years_have = (set(revenue_series.index) | set(net_profit_series.index)
                        | set(equity_series.index) | set(total_assets_series.index))
         _missing_years = sorted(_expected_years - _years_have)
@@ -399,10 +435,24 @@ def execute_equity_research_pipeline(ticker):
             "excl_extended_multiples": is_bank,
         })
 
-        # ── Bảng 5 năm ───────────────────────────────────────────────────
-        # Khung CỐ ĐỊNH đúng 5 năm 2021–2025 (TABLE_YEARS), bất kể nguồn trả
-        # về nhiều/ít kỳ hơn. Năm nào không có dữ liệu sẽ để trống ("—").
-        years_available = list(TABLE_YEARS)
+                # ── Bảng 5 năm ───────────────────────────────────────────────────
+        current_year_for_table = datetime.today().year
+        allowed_years = set(range(current_year_for_table - DEFAULT_YEAR_LIMIT, current_year_for_table))
+
+        years_available = sorted(
+            (set(revenue_series.index)      |
+             set(net_profit_series.index)   |
+             set(equity_series.index)       |
+             set(total_assets_series.index) |
+             set(eps_series.index)          |
+             set(bvps_series.index)         |
+             set(roe_series.index)          |
+             set(roa_series.index))
+            & allowed_years
+        )
+        # Fix cứng 2021 luôn xuất hiện trong bảng nếu nằm trong khung 5 năm
+        if 2021 in allowed_years:
+            years_available = sorted(set(years_available) | {2021})
         eps_series_filled  = eps_series.copy()  if eps_series  is not None else pd.Series(dtype=float)
         bvps_series_filled = bvps_series.copy() if bvps_series is not None else pd.Series(dtype=float)
         roe_series_filled  = roe_series.copy()  if roe_series  is not None else pd.Series(dtype=float)
@@ -448,6 +498,37 @@ def execute_equity_research_pipeline(ticker):
             "roa_latest":          get_latest(roa_series, default=None),
         }
 
+        # ── Bảng quý ─────────────────────────────────────────────────────
+        df_quarter_table = pd.DataFrame()
+        try:
+            fin_q  = build_financial_table(df_income_q, df_balance_q, df_ratio_q,
+                                           ticker=ticker, period='quarter')
+            rev_q  = normalize_to_billion_vnd(fin_q['revenue'])
+            eq_q   = normalize_to_billion_vnd(fin_q['equity'])
+            ta_q   = normalize_to_billion_vnd(fin_q['total_assets'])
+            np_q   = normalize_net_profit_with_anchor(fin_q['net_profit'], eq_q, fin_q['roe'])
+            eps_q  = fin_q['eps']
+            bvps_q = fin_q['bvps']
+            roe_q  = _normalize_pct(fin_q['roe'])
+            roa_q  = _normalize_pct(fin_q['roa'])
+            quarters = sorted(
+                set(rev_q.index) | set(np_q.index) | set(eq_q.index) | set(ta_q.index),
+                key=lambda c: (int(str(c).split('-Q')[0]), int(str(c).split('-Q')[1])))
+            df_quarter_table = pd.DataFrame({'_p': quarters})
+            df_quarter_table['Quý'] = df_quarter_table['_p'].apply(
+                lambda c: f"Q{str(c).split('-Q')[1]}/{str(c).split('-Q')[0]}")
+            df_quarter_table['Doanh thu thuần (tỷ)'] = df_quarter_table['_p'].map(rev_q)
+            df_quarter_table['LNST (tỷ)']            = df_quarter_table['_p'].map(np_q)
+            df_quarter_table['Vốn CSH (tỷ)']         = df_quarter_table['_p'].map(eq_q)
+            df_quarter_table['Tổng tài sản (tỷ)']    = df_quarter_table['_p'].map(ta_q)
+            df_quarter_table['EPS (đ)']              = df_quarter_table['_p'].map(eps_q)
+            df_quarter_table['BVPS (đ)']             = df_quarter_table['_p'].map(bvps_q)
+            df_quarter_table['ROE (%)'] = df_quarter_table['_p'].map(lambda y: roe_q.get(y, None))
+            df_quarter_table['ROA (%)'] = df_quarter_table['_p'].map(lambda y: roa_q.get(y, None))
+            df_quarter_table = df_quarter_table.drop(columns=['_p'])
+        except Exception:
+            pass
+
         # ── DuPont ────────────────────────────────────────────────────────
         df_dupont = dupont_decomposition(
             revenue_series, net_profit_series, total_assets_series, equity_series)
@@ -490,6 +571,11 @@ def execute_equity_research_pipeline(ticker):
         eps_adj, bvps_adj = normalize_eps_bvps_series(
             eps_series_filled, bvps_series_filled, outstanding_shares_series)
 
+        # ── DDM (Gordon Growth) — chữ ký ĐÚNG theo valuation.py hiện tại:
+        # nhận cả series, tự kiểm tra payout ratio, trả về tuple (giá, lý_do).
+        # ⚠️ Đây là fix quan trọng nhất — bản cũ gọi ddm_gordon(dps_latest,
+        # required_return=..., g=...) SAI chữ ký, gây crash TOÀN BỘ pipeline
+        # (not just DDM) cho mọi mã chưa có cache.
         dps_series = fin5.get('dps', pd.Series(dtype=float))
         dps_latest = get_latest(dps_series, default=0.0) if not dps_series.empty else 0.0
         ddm_value, ddm_note = ddm_gordon(dps_series, net_profit_series, ticker=ticker)
@@ -571,4 +657,15 @@ def execute_equity_research_pipeline(ticker):
                 "title":  "Không có sự kiện bất thường trong 30 ngày.",
                 "source": "Hệ thống tự động", "url": "#", "pub_date": "—"}]
 
-        reports_pk
+        reports_pkg = None
+
+        return (
+            df_price, df_5y_table, df_quarter_table, df_balance,
+            clean_metrics, technical_summary,
+            news_list, fundamentals_summary, df_dupont, valuation_package,
+            reports_pkg,
+        )
+
+    except Exception as e:
+        st.error(f"Lỗi Pipeline: {str(e)}")
+        return None
