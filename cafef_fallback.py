@@ -192,6 +192,13 @@ def fetch_cafef_balance_sheet_5y(
     try:
         data = _scrape_cafef_balance(ticker, year=0)
 
+        # CafeF default trả 5 năm gần nhất (2022–2026 khi đang ở 2026).
+        # Merge thêm trang year=2021 để đảm bảo có đủ 2021–2025.
+        data_old = _scrape_cafef_balance(ticker, year=2021)
+        for k in ('equity', 'total_assets'):
+            for yr, val in data_old.get(k, {}).items():
+                data.setdefault(k, {})[yr] = data[k].get(yr) or val
+
         eq_series = pd.Series(data.get('equity', {}), dtype=float).sort_index()
         ta_series = pd.Series(data.get('total_assets', {}), dtype=float).sort_index()
 
@@ -276,6 +283,20 @@ def fetch_cafef_yearly_full(ticker: str, years: list = None, debug: bool = False
     try:
         bs  = _scrape_cafef_balance(ticker, year=0)
         inc = _scrape_cafef_income(ticker, year=0)
+
+        # CafeF default (year=0) trả về 5 năm gần nhất — trong 2026 đó là
+        # 2022–2026. Nếu caller yêu cầu năm 2021 thì phải fetch thêm trang
+        # cũ hơn bằng cách truyền year=2021 vào URL.
+        if years and any(y <= 2021 for y in years):
+            bs_old  = _scrape_cafef_balance(ticker, year=2021)
+            inc_old = _scrape_cafef_income(ticker, year=2021)
+            for k in ('equity', 'total_assets'):
+                for yr, val in bs_old.get(k, {}).items():
+                    bs.setdefault(k, {})[yr] = bs[k].get(yr) or val
+            for k in ('revenue', 'net_profit'):
+                for yr, val in inc_old.get(k, {}).items():
+                    inc.setdefault(k, {})[yr] = inc[k].get(yr) or val
+
         result = {
             'equity':       pd.Series(bs.get('equity', {}),       dtype=float).sort_index(),
             'total_assets': pd.Series(bs.get('total_assets', {}), dtype=float).sort_index(),
