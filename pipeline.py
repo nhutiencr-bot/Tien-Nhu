@@ -1,19 +1,6 @@
 import pandas as pd
 import numpy as np
 import streamlit as st
-
-# ── PATCH vnai TRƯỚC KHI import vnstock ──────────────────────────────────────
-# vnai.beam.patching cắt kết quả Finance xuống 4 kỳ (community tier = 4 periods).
-# Patch TRƯỚC khi import vnstock để bypass giới hạn này và lấy đủ 5 năm (2021-2025).
-try:
-    import vnai.beam.patching as _vnai_p
-    _vnai_p.limit_vci_periods        = lambda df, max_periods=None: df
-    _vnai_p.limit_periods_by_columns = lambda df, max_periods=None: df
-    _vnai_p.get_max_periods          = lambda: None
-except Exception:
-    pass
-# ─────────────────────────────────────────────────────────────────────────────
-
 from news_fetcher import fetch_news_with_fallback
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -171,14 +158,6 @@ def _fetch_balance_sheet(ticker, source, period='year', limit=DEFAULT_YEAR_LIMIT
 
 @st.cache_data(ttl=1800)
 def execute_equity_research_pipeline(ticker):
-    # Patch vnai ngay trước khi chạy — đảm bảo hoạt động sau mọi lần re-import
-    try:
-        import vnai.beam.patching as _p
-        _p.limit_vci_periods        = lambda df, max_periods=None: df
-        _p.limit_periods_by_columns = lambda df, max_periods=None: df
-        _p.get_max_periods          = lambda: None
-    except Exception:
-        pass
     try:
         q_engine, f_engine, c_engine, source_used = _build_engines_with_fallback(ticker)
 
@@ -290,10 +269,18 @@ def execute_equity_research_pipeline(ticker):
         # (VD 2021), dù equity/total_assets/net_profit hoàn toàn có thể
         # cào được từ CafeF bình thường.
         _current_year_check = datetime.today().year
-        _expected_years = set(range(_current_year_check - DEFAULT_YEAR_LIMIT, _current_year_check))
-        _years_have = (set(revenue_series.index) | set(net_profit_series.index)
-                       | set(equity_series.index) | set(total_assets_series.index))
-        _missing_years = sorted(_expected_years - _years_have)
+        _expected_years = set(range(2021, _current_year_check))   # cố định 2021→năm hiện tại, tránh drift
+
+        # ⚠️ BUG CŨ: dùng OR (union) → 2021 bị coi là "đã có" ngay khi
+        # equity_series có 2021 (từ fetch_cafef_balance_sheet_5y ở trên),
+        # dù revenue + net_profit vẫn thiếu 2021 → _missing_years = [] →
+        # fetch_cafef_yearly_full không được gọi → Doanh thu/LNST/EPS 2021
+        # mãi hiển thị "—".
+        # FIX: chỉ coi năm Y là "đã đủ" khi CẢ 2 chỉ tiêu chính (revenue
+        # VÀ net_profit) đều có — equity/total_assets đã được fill riêng ở
+        # khối trên nên không cần tính vào điều kiện này nữa.
+        _years_have_income = set(revenue_series.index) & set(net_profit_series.index)
+        _missing_years = sorted(_expected_years - _years_have_income)
 
         if _missing_years:
             st.info(f"ℹ️ {ticker}: bổ sung dữ liệu năm {_missing_years} từ CafeF...")
@@ -435,7 +422,7 @@ def execute_equity_research_pipeline(ticker):
             "excl_extended_multiples": is_bank,
         })
 
-                # ── Bảng 5 năm ───────────────────────────────────────────────────
+        # ── Bảng 5 năm ───────────────────────────────────────────────────
         current_year_for_table = datetime.today().year
         allowed_years = set(range(current_year_for_table - DEFAULT_YEAR_LIMIT, current_year_for_table))
 
@@ -450,9 +437,7 @@ def execute_equity_research_pipeline(ticker):
              set(roa_series.index))
             & allowed_years
         )
-        # Fix cứng 2021 luôn xuất hiện trong bảng nếu nằm trong khung 5 năm
-        if 2021 in allowed_years:
-            years_available = sorted(set(years_available) | {2021})
+
         eps_series_filled  = eps_series.copy()  if eps_series  is not None else pd.Series(dtype=float)
         bvps_series_filled = bvps_series.copy() if bvps_series is not None else pd.Series(dtype=float)
         roe_series_filled  = roe_series.copy()  if roe_series  is not None else pd.Series(dtype=float)
