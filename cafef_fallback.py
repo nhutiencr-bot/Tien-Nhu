@@ -1,292 +1,205 @@
-"""
-cafef_fallback.py
------------------
-Scrape bảng cân đối kế toán (Vốn CSH + Tổng tài sản) từ CafeF
-khi vnstock không có dữ liệu năm cũ (2021).
-
-ĐƠN VỊ CafeF: Triệu đồng (VNĐ)
-→ Hàm này trả về Series theo đơn vị TỶ (chia 1e3 từ triệu).
-→ pipeline.py gọi hàm này rồi dùng trực tiếp, KHÔNG normalize thêm.
-
-QUAN TRỌNG: Không gọi normalize_to_billion_vnd() trên kết quả của hàm này,
-vì đã convert trong _parse_cafef_value().
-"""
-
 import re
-import requests
+import time
 import pandas as pd
-from bs4 import BeautifulSoup
+import requests
+import concurrent.futures
 
-
-_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0 Safari/537.36"
-    ),
-    "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8",
+    "Referer": "https://s.cafef.vn/",
 }
 
+REQUEST_TIMEOUT = 6
+
 _SESSION = requests.Session()
-_SESSION.headers.update(_HEADERS)
+_SESSION.headers.update(HEADERS)
+
+_REACHABLE_CACHE = {"ts": 0.0, "value": None}
+_REACHABLE_CACHE_TTL = 30
 
 
-def _parse_cafef_value(raw: str) -> float | None:
-    """
-    Parse số CafeF → float (đơn vị TỶ VNĐ).
-
-    CafeF hiển thị số theo TRIỆU ĐỒNG, dùng dấu ',' phân cách nghìn
-    và '.' cho thập phân (format quốc tế).
-
-    VD:  "30,058,172"  → 30058172 triệu → chia 1e3 → 30,058.172 tỷ
-         "544,654.40"  → 544654.40 triệu → chia 1e3 → 544.654 tỷ
-         "1.234"       → ambiguous; nếu không có dấu phẩy → xét ngữ cảnh
-    """
-    if not raw or not isinstance(raw, str):
-        return None
-    raw = raw.strip().replace('\xa0', '').replace(' ', '')
-    if raw in ('', '-', '—', 'N/A', 'n/a'):
-        return None
+def _cafef_is_reachable() -> bool:
+    now = time.time()
+    if _REACHABLE_CACHE["value"] is not None and (now - _REACHABLE_CACHE["ts"]) < _REACHABLE_CACHE_TTL:
+        return _REACHABLE_CACHE["value"]
     try:
-        # Xác định format: nếu có cả ',' và '.' thì ',' là phân cách nghìn
-        if ',' in raw and '.' in raw:
-            # VD: "30,058,172.50" → bỏ ',' → "30058172.50"
-            cleaned = raw.replace(',', '')
-        elif ',' in raw and '.' not in raw:
-            # VD: "30,058,172" → dấu phẩy là phân cách nghìn
-            cleaned = raw.replace(',', '')
-        elif '.' in raw and ',' not in raw:
-            # VD: "544654.40" → dấu chấm là thập phân
-            # VD: "1.234" → ambiguous, nhưng trong ngữ cảnh CafeF (tỷ số lớn)
-            # nếu chỉ có 3 số sau dấu chấm và không có dấu phẩy → thập phân
-            cleaned = raw
-        else:
-            cleaned = raw
-
-        val_million = float(cleaned)
-
-        # Sanity check: CafeF báo triệu đồng
-        # Vốn CSH ngân hàng lớn ~500,000 triệu = 500 tỷ → giá trị raw ≈ 500000
-        # Nếu val_million > 1e9 → có thể đã là đồng → chia thêm 1e6
-        if abs(val_million) > 1e9:
-            return round(val_million / 1e9, 2)  # đồng → tỷ
-
-        # Triệu → tỷ: chia 1e3
-        return round(val_million / 1e3, 2)
-
-    except (ValueError, TypeError):
-        return None
-
-
-def _build_cafef_url(ticker: str, report_type: int = 1, year: int = 0) -> str:
-    """
-    report_type: 1=Quý, 2=Năm
-    year: 0=mới nhất, hoặc năm cụ thể
-    """
-    return (
-        f"https://s.cafef.vn/bao-cao-tai-chinh/{ticker.upper()}"
-        f"/CDKT/{year}/{report_type}/0/0/0/bao-cao-tai-chinh-.chn"
-    )
-
-
-def _scrape_cafef_balance(ticker: str, year: int = 0) -> dict[str, dict[int, float]]:
-    """
-    Scrape bảng CĐKT từ CafeF. Trả về dict:
-    {
-      'equity':       {năm: giá_trị_tỷ},
-      'total_assets': {năm: giá_trị_tỷ},
-    }
-    """
-    url = _build_cafef_url(ticker, report_type=2, year=year)
-    try:
-        resp = _SESSION.get(url, timeout=15)
-        resp.raise_for_status()
+        resp = _SESSION.get("https://s.cafef.vn", timeout=REQUEST_TIMEOUT)
+        ok = resp.status_code == 200
     except Exception:
-        return {'equity': {}, 'total_assets': {}}
-
-    soup = BeautifulSoup(resp.text, 'html.parser')
-
-    # Tìm bảng tài chính
-    table = soup.find('table', {'id': re.compile(r'tblGridData|tableContent|Grid', re.I)})
-    if table is None:
-        # Fallback: tìm bảng đầu tiên có nhiều cột
-        tables = soup.find_all('table')
-        table = next((t for t in tables if len(t.find_all('th')) >= 3), None)
-    if table is None:
-        return {'equity': {}, 'total_assets': {}}
-
-    # Parse header để lấy danh sách năm
-    years = []
-    header_row = table.find('tr')
-    if header_row:
-        cells = header_row.find_all(['th', 'td'])
-        for cell in cells[1:]:
-            txt = cell.get_text(strip=True)
-            m = re.search(r'20\d{2}', txt)
-            if m:
-                years.append(int(m.group()))
-
-    if not years:
-        return {'equity': {}, 'total_assets': {}}
-
-    # Keywords để tìm dòng cần thiết
-    EQUITY_KEYS = [
-        'vốn chủ sở hữu', 'tổng vốn chủ sở hữu',
-        'b. vốn chủ sở hữu', 'ii. vốn chủ sở hữu',
-        "equity", "owner's equity", "shareholders' equity",
-    ]
-    TOTAL_ASSETS_KEYS = [
-        'tổng cộng tài sản', 'tổng tài sản',
-        'a+b', 'tổng cộng nguồn vốn',
-        'total assets',
-    ]
-
-    equity_vals = {}
-    total_assets_vals = {}
-
-    rows = table.find_all('tr')[1:]
-    for row in rows:
-        cells = row.find_all(['td', 'th'])
-        if not cells:
-            continue
-        label = cells[0].get_text(strip=True).lower()
-        data_cells = cells[1:]
-
-        is_equity = any(k in label for k in EQUITY_KEYS)
-        is_ta     = any(k in label for k in TOTAL_ASSETS_KEYS)
-
-        if not is_equity and not is_ta:
-            continue
-
-        for i, cell in enumerate(data_cells):
-            if i >= len(years):
-                break
-            val = _parse_cafef_value(cell.get_text(strip=True))
-            if val is None:
-                continue
-            y = years[i]
-            if is_equity and y not in equity_vals:
-                equity_vals[y] = val
-            if is_ta and y not in total_assets_vals:
-                total_assets_vals[y] = val
-
-    return {'equity': equity_vals, 'total_assets': total_assets_vals}
+        ok = False
+    _REACHABLE_CACHE["ts"] = now
+    _REACHABLE_CACHE["value"] = ok
+    return ok
 
 
-def fetch_cafef_balance_sheet_5y(
-    ticker: str,
-    end_year: int | None = None,
-) -> dict[str, pd.Series]:
-    """
-    Public API: lấy Vốn CSH + Tổng TS từ CafeF cho ~5 năm gần nhất.
-
-    Trả về:
-    {
-      'equity':       pd.Series (index=năm, values=tỷ VNĐ),
-      'total_assets': pd.Series (index=năm, values=tỷ VNĐ),
-    }
-
-    Nếu lỗi → trả về 2 Series rỗng (không crash pipeline).
-    """
-    empty = {'equity': pd.Series(dtype=float), 'total_assets': pd.Series(dtype=float)}
-    try:
-        data = _scrape_cafef_balance(ticker, year=0)
-
-        eq_series = pd.Series(data.get('equity', {}), dtype=float).sort_index()
-        ta_series = pd.Series(data.get('total_assets', {}), dtype=float).sort_index()
-
-        # Sanity check: loại bỏ giá trị bất thường (< 0 hoặc > 50,000 tỷ cho từng chỉ số)
-        eq_series = eq_series[(eq_series > 0) & (eq_series < 5e7)]
-        ta_series = ta_series[(ta_series > 0) & (ta_series < 5e7)]
-
-        return {'equity': eq_series, 'total_assets': ta_series}
-
-    except Exception:
-        return empty
+def _find_company_slug(ticker: str) -> str:
+    return f"bao-cao-tai-chinh-{ticker.lower()}"
 
 
-def _scrape_cafef_income(ticker: str, year: int = 0) -> dict:
-    """Scrape KQKD từ CafeF — trả về revenue + net_profit theo năm (đơn vị: tỷ VNĐ)."""
-    url = _build_cafef_url(ticker, report_type=2, year=year).replace('/CDKT/', '/KQKD/')
-    try:
-        resp = _SESSION.get(url, timeout=15)
-        resp.raise_for_status()
-    except Exception:
-        return {'revenue': {}, 'net_profit': {}}
-
-    soup = BeautifulSoup(resp.text, 'html.parser')
-    table = soup.find('table', {'id': re.compile(r'tblGridData|tableContent|Grid', re.I)})
-    if table is None:
-        tables = soup.find_all('table')
-        table = next((t for t in tables if len(t.find_all('th')) >= 3), None)
-    if table is None:
-        return {'revenue': {}, 'net_profit': {}}
-
-    years_list = []
-    header_row = table.find('tr')
-    if header_row:
-        for cell in header_row.find_all(['th', 'td'])[1:]:
-            m = re.search(r'20\d{2}', cell.get_text(strip=True))
-            if m:
-                years_list.append(int(m.group()))
-    if not years_list:
-        return {'revenue': {}, 'net_profit': {}}
-
-    REVENUE_KEYS = [
-        'doanh thu thuần', 'doanh thu bán hàng', 'tổng doanh thu',
-        'tổng thu nhập hoạt động', 'thu nhập lãi thuần',
-    ]
-    PROFIT_KEYS = [
-        'lợi nhuận sau thuế thu nhập doanh nghiệp',
-        'lợi nhuận sau thuế', 'lnst', 'lãi sau thuế',
-    ]
-
-    rev_vals, np_vals = {}, {}
-    for row in table.find_all('tr')[1:]:
-        cells = row.find_all(['td', 'th'])
-        if not cells:
-            continue
-        label = cells[0].get_text(strip=True).lower()
-        data_cells = cells[1:]
-        is_rev = any(k in label for k in REVENUE_KEYS)
-        is_np  = any(k in label for k in PROFIT_KEYS)
-        if not is_rev and not is_np:
-            continue
-        for i, cell in enumerate(data_cells):
-            if i >= len(years_list):
-                break
-            val = _parse_cafef_value(cell.get_text(strip=True))
-            if val is None:
-                continue
-            y = years_list[i]
-            if is_rev and y not in rev_vals:
-                rev_vals[y] = val
-            if is_np and y not in np_vals:
-                np_vals[y] = val
-
-    return {'revenue': rev_vals, 'net_profit': np_vals}
+def _parse_vn_number(raw: str):
+    raw = raw.strip()
+    if not raw: return None
+    raw = raw.replace('.', '').replace(',', '.')
+    try: return float(raw)
+    except ValueError: return None
 
 
-def fetch_cafef_yearly_full(ticker: str, years: list = None, debug: bool = False) -> dict:
-    """
-    Lấy đủ 4 chỉ tiêu (equity, total_assets, revenue, net_profit) từ CafeF.
-    Trả về dict: mỗi key là pd.Series(index=năm, values=tỷ VNĐ).
-    """
-    empty_s = pd.Series(dtype=float)
-    try:
-        bs  = _scrape_cafef_balance(ticker, year=0)
-        inc = _scrape_cafef_income(ticker, year=0)
-        result = {
-            'equity':       pd.Series(bs.get('equity', {}),       dtype=float).sort_index(),
-            'total_assets': pd.Series(bs.get('total_assets', {}), dtype=float).sort_index(),
-            'revenue':      pd.Series(inc.get('revenue', {}),     dtype=float).sort_index(),
-            'net_profit':   pd.Series(inc.get('net_profit', {}),  dtype=float).sort_index(),
+def _extract_row_values(html_text: str, row_label_pattern: str):
+    plain_text = re.sub(r'<[^>]+>', ' ', html_text)
+    plain_text = re.sub(r'&nbsp;', ' ', plain_text)
+    plain_text = re.sub(r'\s+', ' ', plain_text)
+    pattern = re.compile(row_label_pattern + r'\s*((?:-?[\d.,]+\s*){1,40})', re.IGNORECASE)
+    match = pattern.search(plain_text)
+    if not match: return []
+    numbers_blob = match.group(1)
+    raw_numbers = re.findall(r'-?[\d][\d.,]*', numbers_blob)
+    return [_parse_vn_number(n) for n in raw_numbers]
+
+
+def _fetch_one_period(ticker: str, year: int, quarter: int, slug: str):
+    out = {}
+    bsheet_url = f"https://s.cafef.vn/bao-cao-tai-chinh/{ticker.upper()}/bsheet/{year}/{quarter}/0/0/{slug}.chn"
+    incsta_url = f"https://s.cafef.vn/bao-cao-tai-chinh/{ticker.upper()}/incsta/{year}/{quarter}/0/0/{slug}.chn"
+
+    def _get(url):
+        try:
+            resp = _SESSION.get(url, timeout=REQUEST_TIMEOUT)
+            return resp.text if resp.status_code == 200 else ""
+        except Exception:
+            return ""
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pair_executor:
+        fut_bs = pair_executor.submit(_get, bsheet_url)
+        fut_is = pair_executor.submit(_get, incsta_url)
+        text_bs = fut_bs.result()
+        text_is = fut_is.result()
+
+    if text_bs:
+        equity_vals = (_extract_row_values(text_bs, r'D\.\s*VỐN CHỦ SỞ HỮU') or
+                       _extract_row_values(text_bs, r'VỐN CHỦ SỞ HỮU') or
+                       _extract_row_values(text_bs, r'I\.\s*Vốn chủ sở hữu') or
+                       _extract_row_values(text_bs, r'Vốn chủ sở hữu'))
+        assets_vals = (_extract_row_values(text_bs, r'TỔNG CỘNG TÀI SẢN') or
+                       _extract_row_values(text_bs, r'TỔNG TÀI SẢN') or
+                       _extract_row_values(text_bs, r'Tổng cộng tài sản'))
+        if equity_vals and equity_vals[-1] is not None: out['equity'] = equity_vals[-1] / 1e9
+        if assets_vals and assets_vals[-1] is not None: out['total_assets'] = assets_vals[-1] / 1e9
+
+    if text_is:
+        revenue_vals = (_extract_row_values(text_is, r'Doanh thu thuần') or
+                        _extract_row_values(text_is, r'TỔNG THU NHẬP HOẠT ĐỘNG') or
+                        _extract_row_values(text_is, r'Tổng thu nhập hoạt động') or
+                        _extract_row_values(text_is, r'Thu nhập lãi thuần') or
+                        _extract_row_values(text_is, r'Doanh thu hoạt động') or
+                        _extract_row_values(text_is, r'Tổng doanh thu hoạt động') or
+                        _extract_row_values(text_is, r'Tổng doanh thu') or
+                        _extract_row_values(text_is, r'Doanh thu bán hàng và cung cấp dịch vụ') or
+                        _extract_row_values(text_is, r'Doanh thu'))
+        profit_vals = (_extract_row_values(text_is, r'Lợi nhuận sau thuế thu nhập doanh nghiệp') or
+                       _extract_row_values(text_is, r'LỢI NHUẬN SAU THUẾ') or
+                       _extract_row_values(text_is, r'Lợi nhuận sau thuế') or
+                       _extract_row_values(text_is, r'Lãi/\s*\(lỗ\) thuần sau thuế') or
+                       _extract_row_values(text_is, r'Lợi nhuận thuần sau thuế'))
+        if revenue_vals and revenue_vals[-1] is not None: out['revenue'] = revenue_vals[-1] / 1e9
+        if profit_vals and profit_vals[-1] is not None: out['net_profit'] = profit_vals[-1] / 1e9
+
+    return out
+
+
+def fetch_cafef_balance_sheet_5y(ticker: str, end_year: int):
+    slug = _find_company_slug(ticker)
+    equity_by_year, total_assets_by_year = {}, {}
+
+    if not _cafef_is_reachable():
+        return {"equity": pd.Series(dtype=float), "total_assets": pd.Series(dtype=float)}
+
+    def fetch_task(year):
+        return year, _fetch_one_period(ticker, year, 4, slug)
+
+    # ── FIX: range(end_year - 4, end_year + 1) cào 2022-2026, bỏ 2021 ──────
+    # Đổi thành range(end_year - 5, end_year) → cào đúng 2021-2025
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        future_to_y = {
+            executor.submit(fetch_task, y): y
+            for y in range(end_year - 5, end_year)   # 2021, 2022, 2023, 2024, 2025
         }
-        if years:
-            for k in result:
-                s = result[k]
-                result[k] = s[s.index.isin(years)] if not s.empty else s
-        return result
-    except Exception:
-        return {'equity': empty_s, 'total_assets': empty_s,
-                'revenue': empty_s, 'net_profit': empty_s}
+        for future in concurrent.futures.as_completed(future_to_y):
+            try:
+                year, data = future.result()
+                if 'equity'       in data: equity_by_year[year]      = data['equity']
+                if 'total_assets' in data: total_assets_by_year[year] = data['total_assets']
+            except Exception:
+                pass
+
+    return {
+        "equity":       pd.Series(equity_by_year).sort_index(),
+        "total_assets": pd.Series(total_assets_by_year).sort_index(),
+    }
+
+
+def fetch_cafef_yearly_full(ticker: str, years: list, debug: bool = False):
+    slug = _find_company_slug(ticker)
+    revenue, net_profit, equity, total_assets = {}, {}, {}, {}
+    empty = pd.Series(dtype=float)
+
+    if not _cafef_is_reachable() or not years:
+        return {"revenue": empty, "net_profit": empty, "equity": empty,
+                "total_assets": empty, "roe": empty, "roa": empty}
+
+    def fetch_task(year):
+        return year, _fetch_one_period(ticker, year, 4, slug)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(years), 6)) as executor:
+        future_to_y = {executor.submit(fetch_task, y): y for y in years}
+        for future in concurrent.futures.as_completed(future_to_y):
+            try:
+                year, data = future.result()
+                if 'revenue'      in data: revenue[year]      = data['revenue']
+                if 'net_profit'   in data: net_profit[year]   = data['net_profit']
+                if 'equity'       in data: equity[year]        = data['equity']
+                if 'total_assets' in data: total_assets[year]  = data['total_assets']
+            except Exception:
+                pass
+
+    revenue_s, profit_s = pd.Series(revenue).sort_index(), pd.Series(net_profit).sort_index()
+    equity_s,  assets_s = pd.Series(equity).sort_index(),  pd.Series(total_assets).sort_index()
+
+    roe = (profit_s / equity_s.replace(0, float('nan')) * 100) if not equity_s.empty else empty
+    roa = (profit_s / assets_s.replace(0, float('nan')) * 100) if not assets_s.empty else empty
+
+    return {
+        "revenue":       revenue_s,  "net_profit":   profit_s,
+        "equity":        equity_s,   "total_assets": assets_s,
+        "roe":           roe.dropna(), "roa":         roa.dropna(),
+    }
+
+
+def fetch_cafef_quarterly_full(ticker: str, quarters: list, debug: bool = False):
+    slug = _find_company_slug(ticker)
+    revenue, net_profit, equity, total_assets = {}, {}, {}, {}
+
+    if not _cafef_is_reachable() or not quarters:
+        return {"revenue": {}, "net_profit": {}, "equity": {}, "total_assets": {}}
+
+    def fetch_task(q_tuple):
+        year, q = q_tuple
+        return f"{year}-Q{q}", _fetch_one_period(ticker, year, q, slug)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(quarters), 6)) as executor:
+        future_to_q = {executor.submit(fetch_task, qt): qt for qt in quarters}
+        for future in concurrent.futures.as_completed(future_to_q):
+            try:
+                key, data = future.result()
+                if 'revenue'      in data: revenue[key]      = data['revenue']
+                if 'net_profit'   in data: net_profit[key]   = data['net_profit']
+                if 'equity'       in data: equity[key]        = data['equity']
+                if 'total_assets' in data: total_assets[key]  = data['total_assets']
+            except Exception:
+                pass
+
+    return {
+        "revenue":       revenue,    "net_profit":   net_profit,
+        "equity":        equity,     "total_assets": total_assets,
+    }
