@@ -203,3 +203,90 @@ def fetch_cafef_balance_sheet_5y(
 
     except Exception:
         return empty
+
+
+def _scrape_cafef_income(ticker: str, year: int = 0) -> dict:
+    """Scrape KQKD từ CafeF — trả về revenue + net_profit theo năm (đơn vị: tỷ VNĐ)."""
+    url = _build_cafef_url(ticker, report_type=2, year=year).replace('/CDKT/', '/KQKD/')
+    try:
+        resp = _SESSION.get(url, timeout=15)
+        resp.raise_for_status()
+    except Exception:
+        return {'revenue': {}, 'net_profit': {}}
+
+    soup = BeautifulSoup(resp.text, 'html.parser')
+    table = soup.find('table', {'id': re.compile(r'tblGridData|tableContent|Grid', re.I)})
+    if table is None:
+        tables = soup.find_all('table')
+        table = next((t for t in tables if len(t.find_all('th')) >= 3), None)
+    if table is None:
+        return {'revenue': {}, 'net_profit': {}}
+
+    years_list = []
+    header_row = table.find('tr')
+    if header_row:
+        for cell in header_row.find_all(['th', 'td'])[1:]:
+            m = re.search(r'20\d{2}', cell.get_text(strip=True))
+            if m:
+                years_list.append(int(m.group()))
+    if not years_list:
+        return {'revenue': {}, 'net_profit': {}}
+
+    REVENUE_KEYS = [
+        'doanh thu thuần', 'doanh thu bán hàng', 'tổng doanh thu',
+        'tổng thu nhập hoạt động', 'thu nhập lãi thuần',
+    ]
+    PROFIT_KEYS = [
+        'lợi nhuận sau thuế thu nhập doanh nghiệp',
+        'lợi nhuận sau thuế', 'lnst', 'lãi sau thuế',
+    ]
+
+    rev_vals, np_vals = {}, {}
+    for row in table.find_all('tr')[1:]:
+        cells = row.find_all(['td', 'th'])
+        if not cells:
+            continue
+        label = cells[0].get_text(strip=True).lower()
+        data_cells = cells[1:]
+        is_rev = any(k in label for k in REVENUE_KEYS)
+        is_np  = any(k in label for k in PROFIT_KEYS)
+        if not is_rev and not is_np:
+            continue
+        for i, cell in enumerate(data_cells):
+            if i >= len(years_list):
+                break
+            val = _parse_cafef_value(cell.get_text(strip=True))
+            if val is None:
+                continue
+            y = years_list[i]
+            if is_rev and y not in rev_vals:
+                rev_vals[y] = val
+            if is_np and y not in np_vals:
+                np_vals[y] = val
+
+    return {'revenue': rev_vals, 'net_profit': np_vals}
+
+
+def fetch_cafef_yearly_full(ticker: str, years: list = None, debug: bool = False) -> dict:
+    """
+    Lấy đủ 4 chỉ tiêu (equity, total_assets, revenue, net_profit) từ CafeF.
+    Trả về dict: mỗi key là pd.Series(index=năm, values=tỷ VNĐ).
+    """
+    empty_s = pd.Series(dtype=float)
+    try:
+        bs  = _scrape_cafef_balance(ticker, year=0)
+        inc = _scrape_cafef_income(ticker, year=0)
+        result = {
+            'equity':       pd.Series(bs.get('equity', {}),       dtype=float).sort_index(),
+            'total_assets': pd.Series(bs.get('total_assets', {}), dtype=float).sort_index(),
+            'revenue':      pd.Series(inc.get('revenue', {}),     dtype=float).sort_index(),
+            'net_profit':   pd.Series(inc.get('net_profit', {}),  dtype=float).sort_index(),
+        }
+        if years:
+            for k in result:
+                s = result[k]
+                result[k] = s[s.index.isin(years)] if not s.empty else s
+        return result
+    except Exception:
+        return {'equity': empty_s, 'total_assets': empty_s,
+                'revenue': empty_s, 'net_profit': empty_s}
