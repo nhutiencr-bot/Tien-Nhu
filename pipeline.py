@@ -414,11 +414,11 @@ def execute_equity_research_pipeline(ticker):
             "excl_extended_multiples": is_bank,
         })
 
-        # ── Bảng 5 năm ───────────────────────────────────────────────────
+                # ── Bảng 5 năm ───────────────────────────────────────────────────
         current_year_for_table = datetime.today().year
         allowed_years = set(range(current_year_for_table - DEFAULT_YEAR_LIMIT, current_year_for_table))
 
-                years_available = sorted(
+        years_available = sorted(
             (set(revenue_series.index)      |
              set(net_profit_series.index)   |
              set(equity_series.index)       |
