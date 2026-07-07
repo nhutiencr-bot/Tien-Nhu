@@ -12,6 +12,8 @@ Các sửa đổi chính so với bản trước:
      tổng quát ra số vô lý (thay vì "Tổng thu nhập hoạt động"/"Thu nhập lãi
      thuần" đúng bản chất kinh doanh ngân hàng).
   7. BỎ HOÀN TOÀN xử lý theo quý — hệ thống chỉ còn dữ liệu theo NĂM (2021-2025).
+  8. FIX: _get_year_columns chấp nhận cột dạng 2021.0 (float) từ KBS/DNSE.
+  9. FIX: find_row_series dùng regex extract thay vì int(str()) để không crash.
 """
 
 import pandas as pd
@@ -45,9 +47,13 @@ def _get_year_columns(df: pd.DataFrame):
         if c in meta_cols:
             continue
         c_str = str(c).strip()
-        if re.fullmatch(r'\d{4}', c_str):
+        # Chấp nhận '2021', '2021.0', 2021 (int), 2021.0 (float)
+        if re.match(r'^20\d{2}(\.0+)?$', c_str):
             year_cols.append(c)
-    return sorted(year_cols, key=lambda x: int(str(x).strip()))
+    def _col_to_year(x):
+        m = re.match(r'^(20\d{2})', str(x).strip())
+        return int(m.group(1)) if m else 0
+    return sorted(year_cols, key=_col_to_year)
 
 
 def find_row_series(df: pd.DataFrame, keywords, exclude_keywords=None,
@@ -100,8 +106,9 @@ def find_row_series(df: pd.DataFrame, keywords, exclude_keywords=None,
     for yc in year_cols:
         val = pd.to_numeric(pd.Series([row[yc]]), errors='coerce').iloc[0]
         if pd.notna(val):
-            yr = int(str(yc).strip())
-            result[yr] = float(val)
+            m = re.match(r'^(20\d{2})', str(yc).strip())
+            if m:
+                result[int(m.group(1))] = float(val)
 
     return pd.Series(result).sort_index()
 
@@ -301,12 +308,6 @@ def cagr(series: pd.Series, n_years=None):
     except Exception:
         return None
 
-
-# NOTE: các hàm dưới đây (ddm_gordon/graham_number/nine_methods_valuation)
-# CHỈ giữ lại để tương thích ngược nếu có nơi nào khác lỡ import từ
-# financial_normalizer. pipeline.py hiện tại import các hàm cùng tên này
-# từ valuation.py (bản đầy đủ hơn) — KHÔNG phải từ đây. Hai module định
-# nghĩa trùng tên không xung đột (namespace tách biệt theo module import).
 
 def ddm_gordon(dps, required_return=0.11, g=0.04):
     if dps is None or dps <= 0 or required_return <= g:
