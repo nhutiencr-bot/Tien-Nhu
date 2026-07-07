@@ -418,7 +418,7 @@ def execute_equity_research_pipeline(ticker):
         current_year_for_table = datetime.today().year
         allowed_years = set(range(current_year_for_table - DEFAULT_YEAR_LIMIT, current_year_for_table))
 
-        years_available = sorted(
+                years_available = sorted(
             (set(revenue_series.index)      |
              set(net_profit_series.index)   |
              set(equity_series.index)       |
@@ -429,7 +429,9 @@ def execute_equity_research_pipeline(ticker):
              set(roa_series.index))
             & allowed_years
         )
-
+        # Fix cứng 2021 luôn xuất hiện trong bảng nếu nằm trong khung 5 năm
+        if 2021 in allowed_years:
+            years_available = sorted(set(years_available) | {2021})
         eps_series_filled  = eps_series.copy()  if eps_series  is not None else pd.Series(dtype=float)
         bvps_series_filled = bvps_series.copy() if bvps_series is not None else pd.Series(dtype=float)
         roe_series_filled  = roe_series.copy()  if roe_series  is not None else pd.Series(dtype=float)
