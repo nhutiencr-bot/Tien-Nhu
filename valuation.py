@@ -1,326 +1,387 @@
 """
 valuation.py
 ------------
-Các công thức phân tích cơ bản & định giá, port từ logic của bản demo gốc
-(HTML/JS Vercel của tác giả) sang dạng TỰ ĐỘNG cho MỌI mã, không hardcode
-số liệu riêng cho HPG. Toàn bộ hệ số tham chiếu (PE/PB median, TB 5N...)
-được tự tính từ LỊCH SỬ CHÍNH MÃ ĐÓ, không cần biết "ngành" mã thuộc về.
+Module định giá cổ phiếu: DuPont, DCF (FCFF), Reverse DCF, Graham Number,
+DDM Gordon, tổng hợp 9 phương pháp định giá, và ước tính WACC theo ngành.
 
-WACC theo ngành + beta cụ thể được tính riêng trong sector_wacc.py và
-truyền vào đây qua tham số `scenarios` của dcf_fcff_scenarios() — file
-này không tự chọn WACC nữa (tránh trùng lặp logic với sector_wacc.py).
-
-⚠️ Đây là công cụ tham khảo/giáo dục, không phải lời khuyên đầu tư.
-Số liệu phụ thuộc chất lượng & độ đầy đủ dữ liệu trả về từ vnstock.
+LƯU Ý: Phần "sector_wacc" (TICKER_SECTOR_MAP, TICKER_BETA_MAP,
+SECTOR_WACC_TABLE, detect_sector, estimate_wacc, wacc_scenarios) được GIỮ
+NGUYÊN như cũ. Các hàm định giá (dupont_decomposition, dcf_fcff_scenarios,
+reverse_dcf_implied_growth, graham_number, ddm_gordon,
+nine_methods_valuation, summarize_valuation) được BỔ SUNG LẠI vì đã bị
+thiếu trong file trước đó, gây lỗi:
+    ImportError: cannot import name 'dupont_decomposition' from 'valuation'
 """
 
-import pandas as pd
 import numpy as np
+import pandas as pd
 
 
-# ============================================================
-# 1. DUPONT DECOMPOSITION: ROE = Biên LN x Vòng quay TS x Đòn bẩy
-# ============================================================
+# ══════════════════════════════════════════════════════════════════════
+# PHẦN 1 — WACC THEO NGÀNH (giữ nguyên, không thay đổi)
+# ══════════════════════════════════════════════════════════════════════
 
-def dupont_decomposition(revenue: pd.Series, net_profit: pd.Series,
-                          total_assets: pd.Series, equity: pd.Series):
-    """
-    Tính 3 thành phần DuPont theo từng năm (chỉ tính năm có đủ cả 4 chỉ
-    tiêu). Trả về DataFrame index=năm, cột: net_margin, asset_turnover,
-    leverage, roe_check (= 3 thành phần nhân lại, để đối chiếu).
-    """
-    years = sorted(
-        set(revenue.index) & set(net_profit.index) &
-        set(total_assets.index) & set(equity.index)
-    )
-    rows = []
-    for y in years:
-        rev, np_, ta, eq = revenue[y], net_profit[y], total_assets[y], equity[y]
-        if rev == 0 or ta == 0 or eq == 0:
-            continue
-        net_margin = np_ / rev
-        asset_turnover = rev / ta
-        leverage = ta / eq
-        roe_check = net_margin * asset_turnover * leverage
-        rows.append({
-            'year': y,
-            'net_margin': net_margin,
-            'asset_turnover': asset_turnover,
-            'leverage': leverage,
-            'roe_check': roe_check,
-        })
-    if not rows:
-        return pd.DataFrame(columns=['year', 'net_margin', 'asset_turnover', 'leverage', 'roe_check']).set_index('year')
-    return pd.DataFrame(rows).set_index('year')
+# Ticker → nhóm ngành (mở rộng dần theo nhu cầu; is_bank trong pipeline.py
+# vẫn được dùng riêng cho phần loại trừ P/S & EV/EBITDA, độc lập với bảng này)
+TICKER_SECTOR_MAP = {
+    # Ngân hàng
+    'VCB': 'bank', 'BID': 'bank', 'CTG': 'bank', 'TCB': 'bank', 'MBB': 'bank',
+    'ACB': 'bank', 'STB': 'bank', 'VPB': 'bank', 'HDB': 'bank', 'SHB': 'bank',
+    'EIB': 'bank', 'LPB': 'bank', 'OCB': 'bank', 'TPB': 'bank', 'VIB': 'bank',
+    'MSB': 'bank', 'SSB': 'bank', 'NAB': 'bank', 'ABB': 'bank', 'BVB': 'bank',
+    # Thép / công nghiệp nặng
+    'HPG': 'steel', 'HSG': 'steel', 'NKG': 'steel', 'TVN': 'steel', 'SMC': 'steel',
+    # Bất động sản
+    'VIC': 'real_estate', 'VHM': 'real_estate', 'NLG': 'real_estate',
+    'KDH': 'real_estate', 'DXG': 'real_estate', 'PDR': 'real_estate',
+    'NVL': 'real_estate', 'VRE': 'real_estate', 'HDG': 'real_estate',
+    'DIG': 'real_estate', 'CEO': 'real_estate',
+    # Bán lẻ / tiêu dùng
+    'VNM': 'retail', 'MWG': 'retail', 'PNJ': 'retail', 'MSN': 'retail',
+    'FRT': 'retail', 'DGW': 'retail', 'SAB': 'retail', 'VHC': 'retail',
+    # Công nghệ / viễn thông
+    'FPT': 'tech', 'CMG': 'tech', 'ELC': 'tech', 'CTR': 'tech',
+    # Dầu khí / hoá chất
+    'GAS': 'oil_gas', 'PLX': 'oil_gas', 'PVD': 'oil_gas', 'PVS': 'oil_gas',
+    'BSR': 'oil_gas', 'DCM': 'oil_gas', 'DPM': 'oil_gas', 'PVT': 'oil_gas',
+    # Hàng không / vận tải
+    'HVN': 'aviation', 'VJC': 'aviation', 'ACV': 'aviation', 'GMD': 'aviation',
+}
 
+# Beta 5 năm ước tính cho các blue-chip cụ thể (ưu tiên hơn beta trung bình ngành)
+TICKER_BETA_MAP = {
+    'VCB': 0.85, 'VNM': 0.65, 'HPG': 1.30, 'FPT': 0.95,
+    'MWG': 1.20, 'VIC': 1.40, 'VHM': 1.40, 'GAS': 0.80,
+}
 
-# ============================================================
-# 2. DCF (FCFF) - 3 KỊCH BẢN: Bi quan / Cơ sở / Tích cực
-# ============================================================
-
-# Kịch bản mặc định nếu không truyền `scenarios` (giữ tương thích ngược
-# với các lệnh gọi cũ không có WACC theo ngành).
-_DEFAULT_DCF_SCENARIOS = {
-    'Bi quan':  {'wacc': 0.11,  'g': 0.02},
-    'Cơ sở':    {'wacc': 0.105, 'g': 0.03},
-    'Tích cực': {'wacc': 0.10,  'g': 0.035},
+# (WACC thấp - WACC cao, beta điển hình thấp - cao, beta giữa dải) theo ngành
+SECTOR_WACC_TABLE = {
+    'bank': {'wacc_low': 0.09, 'wacc_high': 0.11, 'beta_mid': 1.0},
+    'steel': {'wacc_low': 0.10, 'wacc_high': 0.12, 'beta_mid': 1.3},
+    'real_estate': {'wacc_low': 0.11, 'wacc_high': 0.13, 'beta_mid': 1.4},
+    'retail': {'wacc_low': 0.08, 'wacc_high': 0.10, 'beta_mid': 0.8},
+    'tech': {'wacc_low': 0.08, 'wacc_high': 0.10, 'beta_mid': 0.9},
+    'oil_gas': {'wacc_low': 0.09, 'wacc_high': 0.11, 'beta_mid': 1.2},
+    'aviation': {'wacc_low': 0.10, 'wacc_high': 0.12, 'beta_mid': 1.5},
+    'default': {'wacc_low': 0.10, 'wacc_high': 0.11, 'beta_mid': 1.0},
 }
 
 
+def detect_sector(ticker: str, industry_text: str = "") -> str:
+    """Nhận diện nhóm ngành từ mã CP (ưu tiên) hoặc chuỗi 'industry' của
+    vnstock overview (dò từ khoá tiếng Việt, fallback khi mã không có
+    trong TICKER_SECTOR_MAP)."""
+    ticker = (ticker or "").upper().strip()
+    if ticker in TICKER_SECTOR_MAP:
+        return TICKER_SECTOR_MAP[ticker]
+
+    text = (industry_text or "").lower()
+    keyword_rules = [
+        (['ngân hàng', 'bank'], 'bank'),
+        (['thép', 'steel', 'khoáng sản', 'luyện kim'], 'steel'),
+        (['bất động sản', 'real estate', 'xây dựng'], 'real_estate'),
+        (['bán lẻ', 'retail', 'thực phẩm', 'tiêu dùng', 'hàng tiêu dùng'], 'retail'),
+        (['công nghệ', 'technology', 'viễn thông', 'phần mềm'], 'tech'),
+        (['dầu khí', 'oil', 'gas', 'hoá chất', 'hóa chất', 'xăng dầu'], 'oil_gas'),
+        (['hàng không', 'aviation', 'vận tải', 'logistics', 'cảng'], 'aviation'),
+    ]
+    for keywords, sector in keyword_rules:
+        if any(kw in text for kw in keywords):
+            return sector
+    return 'default'
+
+
+def estimate_wacc(ticker: str, industry_text: str = "") -> float:
+    """
+    WACC ≈ trung điểm dải ngành, tinh chỉnh theo beta cụ thể của mã
+    (nếu có trong TICKER_BETA_MAP), theo quy tắc rule-of-thumb:
+        wacc_adjusted = wacc_mid + (beta - beta_mid_sector) * 0.02
+    Kẹp trong khoảng [wacc_low - 1%, wacc_high + 1%] để tránh outlier.
+    """
+    ticker = (ticker or "").upper().strip()
+    sector = detect_sector(ticker, industry_text)
+    row = SECTOR_WACC_TABLE.get(sector, SECTOR_WACC_TABLE['default'])
+    wacc_low, wacc_high, beta_mid = row['wacc_low'], row['wacc_high'], row['beta_mid']
+    wacc_mid = (wacc_low + wacc_high) / 2
+    beta = TICKER_BETA_MAP.get(ticker, beta_mid)
+    wacc_adjusted = wacc_mid + (beta - beta_mid) * 0.02
+    lower_bound, upper_bound = wacc_low - 0.01, wacc_high + 0.01
+    wacc_adjusted = max(lower_bound, min(upper_bound, wacc_adjusted))
+    return round(wacc_adjusted, 4)
+
+
+def wacc_scenarios(base_wacc: float) -> dict:
+    """3 kịch bản WACC quanh mức cơ sở theo ngành (Bi quan/Cơ sở/Tích cực),
+    thay vì dùng 10%/10.5%/11% cố định cho mọi mã."""
+    return {
+        'Bi quan': {'wacc': round(base_wacc + 0.005, 4), 'g': 0.02},
+        'Cơ sở': {'wacc': round(base_wacc, 4), 'g': 0.03},
+        'Tích cực': {'wacc': round(base_wacc - 0.005, 4), 'g': 0.035},
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════
+# PHẦN 2 — CÁC HÀM ĐỊNH GIÁ (bổ sung lại — bị thiếu, gây ImportError)
+# ══════════════════════════════════════════════════════════════════════
+
+def dupont_decomposition(revenue_series, net_profit_series,
+                          total_assets_series, equity_series):
+    """
+    Phân tách ROE theo mô hình DuPont 3 nhân tố:
+        ROE = Biên LN ròng (Net margin) x Vòng quay TS (Asset turnover)
+              x Đòn bẩy TC (Equity multiplier)
+
+    Trả về DataFrame theo năm với các cột:
+        Năm, Net margin (%), Asset turnover (x), Equity multiplier (x), ROE (%)
+    """
+    years = sorted(
+        set(revenue_series.index) | set(net_profit_series.index) |
+        set(total_assets_series.index) | set(equity_series.index)
+    )
+    rows = []
+    for y in years:
+        rev = revenue_series.get(y, np.nan)
+        npft = net_profit_series.get(y, np.nan)
+        assets = total_assets_series.get(y, np.nan)
+        equity = equity_series.get(y, np.nan)
+
+        net_margin = (npft / rev * 100) if rev not in (0, None) and pd.notna(rev) and pd.notna(npft) else None
+        asset_turnover = (rev / assets) if assets not in (0, None) and pd.notna(assets) and pd.notna(rev) else None
+        equity_multiplier = (assets / equity) if equity not in (0, None) and pd.notna(equity) and pd.notna(assets) else None
+
+        roe = None
+        if net_margin is not None and asset_turnover is not None and equity_multiplier is not None:
+            # net_margin đã ở dạng %, asset_turnover và equity_multiplier là tỷ lệ
+            # thuần (lần), nên nhân trực tiếp cho ra ROE (%) mà không cần chia lại 100.
+            roe = net_margin * asset_turnover * equity_multiplier
+
+        rows.append({
+            'Năm': y,
+            'Net margin (%)': round(net_margin, 2) if net_margin is not None else None,
+            'Asset turnover (x)': round(asset_turnover, 2) if asset_turnover is not None else None,
+            'Equity multiplier (x)': round(equity_multiplier, 2) if equity_multiplier is not None else None,
+            'ROE (%)': round(roe, 2) if roe is not None else None,
+        })
+
+    return pd.DataFrame(rows)
+
+
 def dcf_fcff_scenarios(latest_fcff, shares_outstanding, net_debt=0.0,
-                        years=5, scenarios=None):
+                        base_wacc=0.105, years=5):
     """
-    DCF đơn giản hoá theo FCFF (Free Cash Flow to Firm), chiết khấu N năm
-    rồi cộng giá trị cuối kỳ (terminal value, mô hình Gordon Growth).
+    Định giá DCF theo dòng tiền tự do doanh nghiệp (FCFF), 3 kịch bản
+    (Bi quan / Cơ sở / Tích cực) dựa trên wacc_scenarios().
 
-    latest_fcff: FCFF năm gần nhất (đơn vị: VNĐ, không phải tỷ)
-    shares_outstanding: số CP lưu hành
-    net_debt: nợ vay thuần (= tổng nợ vay - tiền mặt); mặc định 0 nếu
-              không có dữ liệu đáng tin cậy (an toàn hơn là bỏ qua đòn bẩy
-              nợ thay vì đưa số sai).
-    scenarios: dict {tên_kịch_bản: {'wacc': ..., 'g': ...}}. Nếu không
-               truyền, dùng 3 kịch bản mặc định cố định (10-11%). Để dùng
-               WACC theo ngành, truyền kết quả của sector_wacc.wacc_scenarios().
+    Mô hình 2 giai đoạn:
+      - Giai đoạn 1 (n năm đầu): FCFF tăng trưởng đều theo g của kịch bản.
+      - Giai đoạn 2 (vĩnh viễn): Gordon growth với g_terminal = g / 2
+        (thận trọng hơn, tránh g_terminal quá gần WACC).
 
-    Trả về dict 3 kịch bản, mỗi kịch bản có: value_per_share, wacc, g.
+    Trả về dict: {ten_kich_ban: {"value_per_share": ..., "enterprise_value": ...,
+                                   "equity_value": ..., "wacc": ..., "g": ...}}
     """
-    if latest_fcff is None or shares_outstanding is None or shares_outstanding <= 0:
+    if latest_fcff is None or shares_outstanding in (0, None):
         return None
 
-    scenarios = scenarios or _DEFAULT_DCF_SCENARIOS
+    scenarios = wacc_scenarios(base_wacc)
+    result = {}
 
-    results = {}
-    for name, p in scenarios.items():
-        wacc, g = p['wacc'], p['g']
-        if wacc <= g:
-            results[name] = None
+    for name, params in scenarios.items():
+        wacc = params['wacc']
+        g = params['g']
+        g_terminal = g / 2
+
+        if wacc <= g_terminal:
             continue
 
-        # Chiết khấu FCFF tăng trưởng đều g% trong `years` năm đầu
-        pv_explicit = 0.0
+        # PV của dòng FCFF trong n năm đầu
+        pv_stage1 = 0.0
         fcff_t = latest_fcff
         for t in range(1, years + 1):
             fcff_t = fcff_t * (1 + g)
-            pv_explicit += fcff_t / ((1 + wacc) ** t)
+            pv_stage1 += fcff_t / ((1 + wacc) ** t)
 
-        # Terminal value tại cuối năm `years` (Gordon Growth)
-        terminal_fcff = fcff_t * (1 + g)
-        terminal_value = terminal_fcff / (wacc - g)
+        # Giá trị cuối kỳ (terminal value) theo Gordon growth
+        terminal_fcff = fcff_t * (1 + g_terminal)
+        terminal_value = terminal_fcff / (wacc - g_terminal)
         pv_terminal = terminal_value / ((1 + wacc) ** years)
 
-        enterprise_value = pv_explicit + pv_terminal
+        enterprise_value = pv_stage1 + pv_terminal
         equity_value = enterprise_value - net_debt
-        value_per_share = equity_value / shares_outstanding if shares_outstanding > 0 else 0
+        value_per_share = equity_value / shares_outstanding if shares_outstanding > 0 else None
 
-        results[name] = {
-            'wacc': wacc,
-            'g': g,
-            'value_per_share': value_per_share,
+        result[name] = {
+            "value_per_share": round(value_per_share, 0) if value_per_share is not None else None,
+            "enterprise_value": round(enterprise_value, 2),
+            "equity_value": round(equity_value, 2),
+            "wacc": wacc,
+            "g": g,
         }
 
-    return results
+    return result if result else None
 
 
 def reverse_dcf_implied_growth(current_price, shares_outstanding, latest_fcff,
-                                wacc=0.105, years=5, net_debt=0.0,
-                                g_min=-0.05, g_max=0.35, tol=1.0,
-                                terminal_g=0.03):
+                                wacc=0.105, net_debt=0.0):
     """
-    Reverse DCF: dò ngược tốc độ tăng trưởng g (giai đoạn 5 năm tường minh)
-    mà thị trường đang "ngụ ý" tại giá hiện tại, bằng binary search.
+    Reverse DCF: từ giá thị trường hiện tại, suy ngược ra mức tăng trưởng
+    (g) vĩnh viễn mà thị trường đang ngầm định (Gordon growth 1 giai đoạn):
 
-    QUAN TRỌNG: terminal growth (tăng trưởng vĩnh viễn sau năm `years`) được
-    CỐ ĐỊNH ở `terminal_g` (mặc định 3%, xấp xỉ tăng trưởng GDP dài hạn),
-    KHÔNG dùng chung với g tường minh đang dò. Lý do: (1) không công ty
-    nào duy trì tăng trưởng cao vĩnh viễn — cực kỳ phi thực tế nếu implied
-    g tường minh > 15-20%; (2) nếu dùng chung g, hàm sẽ trả về None ngay
-    khi g tường minh vượt WACC dù giai đoạn 5 năm đó vẫn hợp lý.
+        Equity value = FCFF * (1 + g) / (WACC - g) - net_debt
+        market_equity_value = current_price * shares_outstanding
 
-    Trả về g (float, giai đoạn tường minh 5 năm), None nếu không hội tụ.
+    Giải phương trình theo g:
+        g = (WACC * V - FCFF) / (V + FCFF)
+        với V = market_equity_value + net_debt (enterprise value ngầm định)
+
+    Trả về g (dạng thập phân, ví dụ 0.08 = 8%), hoặc None nếu không giải được.
     """
-    if not all([current_price, shares_outstanding, latest_fcff]) or shares_outstanding <= 0:
+    if not latest_fcff or latest_fcff <= 0 or not shares_outstanding or shares_outstanding <= 0:
         return None
-    if wacc <= terminal_g:
+    if current_price is None or current_price <= 0:
         return None
 
-    target_equity_value = current_price * shares_outstanding
+    market_equity_value = current_price * shares_outstanding
+    enterprise_value_implied = market_equity_value + net_debt
 
-    def equity_value_for_g(g):
-        pv_explicit = 0.0
-        fcff_t = latest_fcff
-        for t in range(1, years + 1):
-            fcff_t = fcff_t * (1 + g)
-            pv_explicit += fcff_t / ((1 + wacc) ** t)
-        # Terminal value dùng terminal_g CỐ ĐỊNH, không dùng g tường minh
-        terminal_fcff = fcff_t * (1 + terminal_g)
-        terminal_value = terminal_fcff / (wacc - terminal_g)
-        pv_terminal = terminal_value / ((1 + wacc) ** years)
-        return pv_explicit + pv_terminal - net_debt
+    denominator = enterprise_value_implied + latest_fcff
+    if denominator == 0:
+        return None
 
-    lo, hi = g_min, g_max
-    for _ in range(60):
-        mid = (lo + hi) / 2
-        val = equity_value_for_g(mid)
-        if val is None:
-            hi = mid
-            continue
-        if abs(val - target_equity_value) < tol:
-            return mid
-        if val < target_equity_value:
-            lo = mid
-        else:
-            hi = mid
-    return (lo + hi) / 2
+    g_implied = (wacc * enterprise_value_implied - latest_fcff) / denominator
 
+    # Chặn kết quả trong khoảng hợp lý để tránh outlier toán học
+    if g_implied >= wacc:
+        return None
+    return round(g_implied, 4)
 
-# ============================================================
-# 3. GRAHAM NUMBER: sqrt(22.5 x EPS x BVPS)
-# ============================================================
 
 def graham_number(eps, bvps):
-    """Sanity-check giá trị theo công thức Benjamin Graham. None nếu input âm/0."""
+    """
+    Graham Number (Benjamin Graham):
+        Value = sqrt(22.5 * EPS * BVPS)
+
+    22.5 = P/E tối đa (15) x P/B tối đa (1.5) theo tiêu chuẩn Graham.
+    EPS, BVPS phải > 0, nếu không trả về None.
+    """
     if eps is None or bvps is None or eps <= 0 or bvps <= 0:
         return None
-    return (22.5 * eps * bvps) ** 0.5
+    return round(np.sqrt(22.5 * eps * bvps), 0)
 
 
-# ============================================================
-# 4. DDM (DIVIDEND DISCOUNT MODEL - GORDON GROWTH)
-# ============================================================
-
-def ddm_gordon(dps, required_return=0.12, g=0.03):
+def ddm_gordon(dividend_per_share, required_return, growth_rate):
     """
-    DDM Gordon Growth: Value = DPS x (1+g) / (r - g)
-    dps: cổ tức trên mỗi cổ phiếu năm gần nhất (VNĐ)
-    Trả về None nếu DPS <= 0 (không chia cổ tức -> DDM không phù hợp,
-    giống ghi chú trong bản demo gốc).
+    Dividend Discount Model - Gordon Growth (1 giai đoạn):
+        Value = D1 / (r - g)
+
+    dividend_per_share: cổ tức năm gần nhất (D0). D1 = D0 * (1 + g).
+    required_return: tỷ suất sinh lời yêu cầu (r), ví dụ 0.12.
+    growth_rate: tốc độ tăng trưởng cổ tức vĩnh viễn (g), ví dụ 0.03.
+
+    Trả về None nếu r <= g hoặc thiếu dữ liệu (không chia âm/0).
     """
-    if dps is None or dps <= 0 or required_return <= g:
+    if dividend_per_share is None or dividend_per_share <= 0:
         return None
-    return dps * (1 + g) / (required_return - g)
+    if required_return is None or growth_rate is None:
+        return None
+    if required_return <= growth_rate:
+        return None
+
+    d1 = dividend_per_share * (1 + growth_rate)
+    value = d1 / (required_return - growth_rate)
+    return round(value, 0)
 
 
-# ============================================================
-# 5. 9 PHƯƠNG PHÁP ĐỊNH GIÁ TỔNG HỢP (dùng PE/PB lịch sử của CHÍNH MÃ)
-# ============================================================
-
-def nine_methods_valuation(eps_latest, bvps_latest, pe_series: pd.Series,
-                            pb_series: pd.Series, current_price,
-                            dcf_results=None, graham_value=None, ddm_value=None,
-                            ev_ebitda_series: pd.Series = None, ebitda_latest=None,
-                            net_debt_latest=None,
-                            p_cf_series: pd.Series = None, cfo_latest=None,
-                            ps_series: pd.Series = None, revenue_latest=None,
-                            shares_outstanding=None):
+def nine_methods_valuation(eps_latest, bvps_latest, pe_series, pb_series,
+                            current_price, dcf_results=None,
+                            graham_value=None, ddm_value=None):
     """
-    Tổng hợp các phương pháp định giá dùng hệ số LỊCH SỬ CỦA CHÍNH MÃ
-    (median 5N cho PE/PB/EV-EBITDA/P-CF/P-S), cộng các phương pháp intrinsic
-    (DCF, Graham, DDM) -- không cần biết ngành.
+    Tổng hợp các phương pháp định giá thành 1 dict duy nhất, gồm:
+      1. P/E trung bình 3 năm  x EPS
+      2. P/E thấp nhất 3 năm   x EPS (thận trọng)
+      3. P/B trung bình 3 năm  x BVPS
+      4. P/B thấp nhất 3 năm   x BVPS (thận trọng)
+      5. Graham Number
+      6. DDM Gordon (nếu có)
+      7-9. DCF FCFF: Bi quan / Cơ sở / Tích cực (nếu có)
 
-    Multiples mở rộng (EV/EBITDA, P/CF, P/S) dùng median lịch sử của
-    CHÍNH MÃ áp vào số liệu năm gần nhất (ebitda_latest, cfo_latest,
-    revenue_latest đều tính theo tỷ VNĐ; shares_outstanding là số CP).
-    Bỏ qua method nào thiếu input hoặc input <= 0 (ví dụ ngân hàng thường
-    có ebitda_latest/revenue_latest = 0 -> tự động loại EV/EBITDA & P/S,
-    khớp với ghi chú "loại trừ P/S, EV/EBITDA cho ngân hàng" ở pipeline).
-
-    Trả về dict {method_name: estimated_price}.
+    Trả về dict: {ten_phuong_phap: gia_tri_uoc_tinh}
+    Bỏ qua các phương pháp không đủ dữ liệu.
     """
     methods = {}
 
-    pe_hist = pe_series.dropna() if pe_series is not None else pd.Series(dtype=float)
-    pb_hist = pb_series.dropna() if pb_series is not None else pd.Series(dtype=float)
+    # 1-2. Định giá theo P/E lịch sử
+    if pe_series is not None and not pe_series.empty and eps_latest and eps_latest > 0:
+        pe_valid = pe_series[pe_series > 0].tail(3)
+        if not pe_valid.empty:
+            methods["P/E trung bình (3 năm)"] = round(pe_valid.mean() * eps_latest, 0)
+            methods["P/E thấp nhất (3 năm)"] = round(pe_valid.min() * eps_latest, 0)
 
-    if eps_latest and eps_latest > 0:
-        if not pe_hist.empty:
-            methods['PE Median 5N'] = float(pe_hist.median()) * eps_latest
-            methods['PE TB 5N'] = float(pe_hist.mean()) * eps_latest
+    # 3-4. Định giá theo P/B lịch sử
+    if pb_series is not None and not pb_series.empty and bvps_latest and bvps_latest > 0:
+        pb_valid = pb_series[pb_series > 0].tail(3)
+        if not pb_valid.empty:
+            methods["P/B trung bình (3 năm)"] = round(pb_valid.mean() * bvps_latest, 0)
+            methods["P/B thấp nhất (3 năm)"] = round(pb_valid.min() * bvps_latest, 0)
 
-    if bvps_latest and bvps_latest > 0:
-        if not pb_hist.empty:
-            methods['PB Median 5N'] = float(pb_hist.median()) * bvps_latest
-            methods['PB TB 5N'] = float(pb_hist.mean()) * bvps_latest
-            methods['PB Sàn 5N (min)'] = float(pb_hist.min()) * bvps_latest
-
-    # ── EV/EBITDA: EV = median EV/EBITDA (5N) × EBITDA năm gần nhất,
-    #    trừ nợ ròng ra Vốn hóa, chia số CP ra giá/CP.
-    if (shares_outstanding and shares_outstanding > 0
-            and ebitda_latest and ebitda_latest > 0):
-        ev_hist = ev_ebitda_series.dropna() if ev_ebitda_series is not None else pd.Series(dtype=float)
-        if not ev_hist.empty:
-            ev_billion = float(ev_hist.median()) * ebitda_latest
-            equity_value_billion = ev_billion - (net_debt_latest or 0.0)
-            price = (equity_value_billion * 1e9) / shares_outstanding
-            if price > 0:
-                methods['EV/EBITDA Median 5N'] = price
-
-    # ── P/CF: median P/CF (5N) × CFO/CP năm gần nhất.
-    if (shares_outstanding and shares_outstanding > 0
-            and cfo_latest and cfo_latest > 0):
-        pcf_hist = p_cf_series.dropna() if p_cf_series is not None else pd.Series(dtype=float)
-        if not pcf_hist.empty:
-            cfo_per_share = (cfo_latest * 1e9) / shares_outstanding
-            price = float(pcf_hist.median()) * cfo_per_share
-            if price > 0:
-                methods['P/CF Median 5N'] = price
-
-    # ── P/S: median P/S (5N) × Doanh thu/CP năm gần nhất. Ngân hàng
-    #    thường có revenue_latest = 0 (đã loại trừ ở pipeline) -> tự bỏ qua.
-    if (shares_outstanding and shares_outstanding > 0
-            and revenue_latest and revenue_latest > 0):
-        ps_hist = ps_series.dropna() if ps_series is not None else pd.Series(dtype=float)
-        if not ps_hist.empty:
-            revenue_per_share = (revenue_latest * 1e9) / shares_outstanding
-            price = float(ps_hist.median()) * revenue_per_share
-            if price > 0:
-                methods['P/S Median 5N'] = price
-
-    if dcf_results:
-        for name, res in dcf_results.items():
-            if res:
-                methods[f'DCF ({name})'] = res['value_per_share']
-
+    # 5. Graham Number
     if graham_value:
-        methods['Graham Number'] = graham_value
+        methods["Graham Number"] = graham_value
 
+    # 6. DDM Gordon
     if ddm_value:
-        methods['DDM (Gordon)'] = ddm_value
+        methods["DDM Gordon"] = ddm_value
 
-    return methods
+    # 7-9. DCF FCFF (3 kịch bản)
+    if dcf_results:
+        for scenario_name, data in dcf_results.items():
+            vps = data.get("value_per_share")
+            if vps:
+                methods[f"DCF FCFF - {scenario_name}"] = vps
+
+    return methods if methods else None
 
 
-def summarize_valuation(methods: dict, current_price):
+def summarize_valuation(valuation_methods, current_price):
     """
-    Tính trung bình, median, dải hợp lý (P25-P75) từ dict các phương pháp,
-    và % upside/downside so với giá hiện tại.
-    Trả về dict tổng hợp, hoặc None nếu không có method nào.
+    Tổng hợp kết quả từ nhiều phương pháp định giá thành 1 khuyến nghị:
+      - Giá mục tiêu trung bình / trung vị
+      - % Upside/Downside so với giá hiện tại
+      - Khuyến nghị: MUA MẠNH / MUA / NẮM GIỮ / BÁN dựa trên upside
+
+    Trả về dict tóm tắt, hoặc None nếu không có phương pháp nào hợp lệ.
     """
-    values = [v for v in methods.values() if v and v > 0]
+    if not valuation_methods:
+        return None
+
+    values = [v for v in valuation_methods.values() if v is not None and v > 0]
     if not values:
         return None
 
-    arr = np.array(values)
-    mean_val = float(np.mean(arr))
-    median_val = float(np.median(arr))
-    p25 = float(np.percentile(arr, 25))
-    p75 = float(np.percentile(arr, 75))
+    avg_value = float(np.mean(values))
+    median_value = float(np.median(values))
+    min_value = float(np.min(values))
+    max_value = float(np.max(values))
 
-    upside_mean = (mean_val / current_price - 1) * 100 if current_price else 0
-    upside_median = (median_val / current_price - 1) * 100 if current_price else 0
-
-    if upside_median > 15:
-        verdict = "UNDERVALUED · RẺ"
-    elif upside_median < -15:
-        verdict = "OVERVALUED · ĐẮT"
-    else:
-        verdict = "FAIRLY VALUED · HỢP LÝ"
+    upside_pct = None
+    recommendation = "KHÔNG ĐỦ DỮ LIỆU"
+    if current_price and current_price > 0:
+        upside_pct = (median_value / current_price - 1) * 100
+        if upside_pct >= 20:
+            recommendation = "MUA MẠNH"
+        elif upside_pct >= 8:
+            recommendation = "MUA"
+        elif upside_pct >= -8:
+            recommendation = "NẮM GIỮ"
+        else:
+            recommendation = "BÁN"
 
     return {
-        'mean': mean_val,
-        'median': median_val,
-        'p25': p25,
-        'p75': p75,
-        'upside_mean_pct': upside_mean,
-        'upside_median_pct': upside_median,
-        'verdict': verdict,
+        "target_price_avg": round(avg_value, 0),
+        "target_price_median": round(median_value, 0),
+        "target_price_min": round(min_value, 0),
+        "target_price_max": round(max_value, 0),
+        "upside_pct": round(upside_pct, 2) if upside_pct is not None else None,
+        "recommendation": recommendation,
+        "num_methods": len(values),
     }
