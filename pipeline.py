@@ -26,7 +26,14 @@ KQKD_START_YEAR = 2021   # năm đầu cố định
 
 
 def normalize_to_billion_vnd(series):
-    """Chuẩn hoá Series về đơn vị tỷ VNĐ."""
+    """
+    Chuẩn hoá Series về đơn vị TỶ VNĐ.
+    Quy tắc detect đơn vị gốc:
+      >= 1e9  (>= 1 tỷ đồng)  → đơn vị ĐỒNG  → chia 1e9
+      >= 1e6  (>= 1 triệu)    → đơn vị TRIỆU → chia 1e3
+      < 1e6                   → đã là TỶ, giữ nguyên
+    Ngưỡng cũ 1e11 bỏ sót vnstock trả ~2.35e10 (đồng).
+    """
     if series is None or series.empty:
         return series
 
@@ -35,8 +42,10 @@ def normalize_to_billion_vnd(series):
             if pd.isna(val):
                 return None
             val = float(val)
-            if abs(val) > 1e11:
+            if abs(val) >= 1e9:
                 return round(val / 1e9, 2)
+            if abs(val) >= 1e6:
+                return round(val / 1e3, 2)
             return round(val, 2)
         except Exception:
             return None
@@ -228,10 +237,20 @@ def execute_equity_research_pipeline(ticker):
 
         # ── 4d. Fallback CafeF cho revenue & net_profit (Tab 1 KQKD) ─────
         # all_years: 2021 → năm trước (năm hiện tại chưa có Q4 đầy đủ).
-        # Ví dụ chạy năm 2026 → all_years = [2021,2022,2023,2024,2025].
+        # Luôn bao gồm current_year - 1 (năm gần nhất có đủ Q4).
+        # Ví dụ: chạy năm 2026 → kqkd_end_year = 2025 → all_years = [2021..2025].
         current_year  = datetime.today().year
-        kqkd_end_year = current_year - 1          # năm gần nhất có đủ Q4
-        all_years = list(range(KQKD_START_YEAR, kqkd_end_year + 1))
+        kqkd_end_year = current_year - 1
+        all_years = list(range(KQKD_START_YEAR, kqkd_end_year + 1))  # 2021..2025
+
+        # Nếu vnstock đã có data năm hiện tại (Q4 vừa công bố), thêm vào
+        has_current_year_data = any(
+            current_year in s.index
+            for s in [revenue_series, net_profit_series, equity_series, total_assets_series]
+            if not s.empty
+        )
+        if has_current_year_data:
+            all_years.append(current_year)
 
         missing_revenue = [y for y in all_years
                            if y not in revenue_series.index
