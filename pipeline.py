@@ -16,14 +16,12 @@ from valuation import (
     graham_number, ddm_gordon, nine_methods_valuation, summarize_valuation,
     detect_stock_dividend_years, normalize_eps_bvps_series, estimate_wacc,
 )
-from cafef_fallback import fetch_cafef_balance_sheet_5y, fetch_cafef_yearly_full
+from cafef_fallback import fetch_cafef_balance_sheet_5y
 
 # Thử KBS trước (hoạt động ổn định qua mọi lần test) — VCI hay fail/timeout,
 # đưa lên đầu gây chờ vô ích trước khi fallback. Đây là fix tốc độ chính.
 SOURCE_FALLBACK_ORDER = ['KBS', 'VCI', 'DNSE']
-DEFAULT_YEAR_LIMIT = 6   # truyền limit=6 vào Finance → vnai (tier 4 kỳ) vẫn trả 5 kỳ thật
-# Giải thích: vnai community = max 4 kỳ, nhưng khi limit > 4 thì trả toàn bộ data có sẵn
-# (thường là 5 năm 2021-2025). Đặt 6 để chắc chắn không bị cắt mất 2021.
+DEFAULT_YEAR_LIMIT = 5
 
 
 def normalize_to_billion_vnd(series):
@@ -98,46 +96,31 @@ def _safe_fetch(fn, default=None):
 
 def _merge_financial_dataframes(dfs: list):
     """
-    Ghép nhiều DataFrame BCTC (từ VCI/KBS/DNSE) thành 1 bảng duy nhất, LẤY
-    HỢP các cột năm từ tất cả nguồn — thay vì chỉ dùng nguồn đầu tiên trả
-    về non-empty (cách cũ khiến nếu nguồn đó thiếu 1 năm, VD 2021, thì
-    năm đó mất luôn dù nguồn khác có sẵn).
+    Gộp DataFrame BCTC từ nhiều nguồn (VCI/KBS/DNSE) bằng cách XẾP CHỒNG
+    (concat) các dòng — KHÔNG merge theo cột — để tránh lỗi "tích Descartes"
+    (nhân dòng, làm giá trị bị nhân sai hàng triệu lần) khi 1 nguồn có
+    nhiều dòng cùng tên chỉ tiêu (VD "Lợi nhuận sau thuế" xuất hiện cả ở
+    dòng "công ty mẹ" và "hợp nhất" — merge theo key text trùng nhau sẽ
+    tạo ra tổ hợp sai).
 
-    Ghép theo cột 'item' (đã chuẩn hoá lowercase/strip) — các dòng chỉ tiêu
-    cùng tên ở các nguồn khác nhau sẽ được nối thêm cột năm còn thiếu.
-    Ưu tiên giữ nguyên dữ liệu của DataFrame đầu tiên (nhiều cột năm nhất)
-    khi trùng năm.
+    Sau khi concat, mọi dòng từ cả 3 nguồn đều nằm trong cùng 1 bảng.
+    find_row_series() ở financial_normalizer.py đã có sẵn logic: nếu có
+    nhiều dòng cùng khớp từ khoá, chọn dòng có NHIỀU NĂM DỮ LIỆU NHẤT —
+    logic này tự động chọn được dòng đầy đủ nhất (kể cả từ nguồn khác)
+    mà không cần merge cột nguy hiểm.
     """
     dfs = [d for d in dfs if d is not None and not d.empty]
     if not dfs:
         return pd.DataFrame()
     if len(dfs) == 1:
         return dfs[0]
-
-    def _year_cols(df):
-        return [c for c in df.columns if re_fullmatch_year(c)]
-
-    def re_fullmatch_year(c):
-        c_str = str(c).strip()
-        return c_str.replace('-', '').replace('Q', '').isdigit() and len(c_str) >= 4
-
-    dfs_sorted = sorted(dfs, key=lambda d: len(_year_cols(d)), reverse=True)
-    merged = dfs_sorted[0].copy()
-    key_col = 'item' if 'item' in merged.columns else merged.columns[0]
-    merged['_key_norm'] = merged[key_col].astype(str).str.lower().str.strip()
-
-    for other in dfs_sorted[1:]:
-        other_key_col = 'item' if 'item' in other.columns else other.columns[0]
-        other_year_cols = [c for c in _year_cols(other) if c not in merged.columns]
-        if not other_year_cols:
-            continue
-        other = other.copy()
-        other['_key_norm'] = other[other_key_col].astype(str).str.lower().str.strip()
-        sub = other[['_key_norm'] + other_year_cols]
-        merged = merged.merge(sub, on='_key_norm', how='left')
-
-    merged = merged.drop(columns=['_key_norm'])
-    return merged
+    try:
+        combined = pd.concat(dfs, axis=0, ignore_index=True, sort=False)
+        return combined
+    except Exception:
+        # Nếu concat lỗi vì cấu trúc cột quá khác nhau giữa các nguồn,
+        # an toàn nhất là dùng DataFrame đầu tiên (nguồn source_used).
+        return dfs[0]
 
 
 def _fetch_income_statement(ticker, source, period='year', limit=DEFAULT_YEAR_LIMIT):
@@ -299,40 +282,23 @@ def execute_equity_research_pipeline(ticker):
             if total_assets_series.empty and not cafef_data['total_assets'].empty:
                 total_assets_series = cafef_data['total_assets']
 
-        # ── Bù năm còn thiếu từ CafeF (nguồn độc lập, không phụ thuộc vnstock) ─
-        # 3 nguồn VCI/KBS/DNSE đã được merge ở tầng fetch, nhưng một số mã
-        # (VD TPB 2021) thực sự không có trong API vnstock → CafeF là nguồn
-        # duy nhất có thể bù được. Dùng intersection (AND) để chỉ trigger khi
-        # CẢ revenue lẫn net_profit đều thiếu năm đó — tránh skip khi chỉ
-        # equity đã có (bug cũ dùng union/OR).
+        # ── Kiểm tra còn thiếu năm nào không (chỉ để cảnh báo — KHÔNG còn
+        # dùng CafeF để bù nữa) ─────────────────────────────────────────────
+        # Trước đây dùng fetch_cafef_yearly_full() để bù năm thiếu, nhưng
+        # việc cào CafeF không ổn định (đã xác nhận sai với nhiều loại mã
+        # khác nhau: ngân hàng, CTCK, vận tải...). Thay vào đó, 3 nguồn
+        # vnstock (VCI/KBS/DNSE) giờ đã tự backup lẫn nhau NGAY Ở TẦNG FETCH
+        # (xem _fetch_income_statement/_fetch_ratio/_fetch_cashflow/
+        # _fetch_balance_sheet — gọi cả 3 nguồn rồi merge cột năm), nên
+        # revenue_series/net_profit_series/equity_series/total_assets_series
+        # ở đây ĐÃ bao gồm dữ liệu ghép từ cả 3 nguồn, không cần bù thêm.
         _current_year_check = datetime.today().year
-        _expected_years = set(range(2021, _current_year_check))
-        _years_have_income = set(revenue_series.index) & set(net_profit_series.index)
-        _missing_years = sorted(_expected_years - _years_have_income)
+        _expected_years = set(range(_current_year_check - DEFAULT_YEAR_LIMIT, _current_year_check))
+        _years_have = (set(revenue_series.index) | set(net_profit_series.index)
+                       | set(equity_series.index) | set(total_assets_series.index))
+        _missing_years = sorted(_expected_years - _years_have)
         if _missing_years:
-            try:
-                cafef_full = fetch_cafef_yearly_full(ticker, years=_missing_years)
-                def _fill(target, source_series):
-                    if source_series is None or source_series.empty:
-                        return target
-                    result = target.copy() if not target.empty else pd.Series(dtype=float)
-                    for yr, val in source_series.items():
-                        if val and not pd.isna(val) and val != 0 and yr not in result.index:
-                            result[yr] = val
-                    return result.sort_index()
-                revenue_series     = _fill(revenue_series,     cafef_full.get('revenue'))
-                net_profit_series  = _fill(net_profit_series,  cafef_full.get('net_profit'))
-                equity_series      = _fill(equity_series,      cafef_full.get('equity'))
-                total_assets_series= _fill(total_assets_series,cafef_full.get('total_assets'))
-            except Exception as _e:
-                pass  # CafeF không accessible, tiếp tục với dữ liệu hiện có
-
-        # Cảnh báo nếu vẫn còn thiếu sau khi đã bù từ cả CafeF
-        _years_have_final = (set(revenue_series.index) | set(net_profit_series.index)
-                             | set(equity_series.index) | set(total_assets_series.index))
-        _still_missing = sorted(_expected_years - _years_have_final)
-        if _still_missing:
-            st.warning(f"⚠️ {ticker}: cả 3 nguồn VCI/KBS/DNSE đều không có dữ liệu năm {_still_missing}.")
+            st.warning(f"⚠️ {ticker}: cả 3 nguồn VCI/KBS/DNSE đều không có dữ liệu năm {_missing_years}.")
 
         market_cap_series_raw = fin5.get('market_cap', pd.Series(dtype=float))
         market_cap_direct = get_latest(market_cap_series_raw, default=0.0)
