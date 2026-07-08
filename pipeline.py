@@ -269,10 +269,11 @@ def execute_equity_research_pipeline(ticker):
                 total_assets_series = cafef_data['total_assets']
 
         # ── Fill năm thiếu từ CafeF ────────────────────────────────────────
-        # vnstock (VCI/KBS/DNSE) chỉ trả tối đa 4 năm gần nhất → năm đầu
-        # của chuỗi 5 năm (VD: 2021) bị mất. Dùng CafeF để bù.
-        _current_year   = datetime.today().year
-        _expected_years = list(range(_current_year - DEFAULT_YEAR_LIMIT + 1, _current_year + 1))  # [2021..2025]
+        # Dùng năm trước (last_full_year) làm mốc vì năm hiện tại (2026)
+        # chưa có BCTC đầy đủ → tránh warning "không có dữ liệu năm 2026"
+        _last_full_year = datetime.today().year - 1                              # 2025
+        _expected_years = list(range(
+            _last_full_year - DEFAULT_YEAR_LIMIT + 1, _last_full_year + 1))     # [2021..2025]
 
         _years_have  = (set(revenue_series.index)      |
                         set(net_profit_series.index)   |
@@ -282,7 +283,7 @@ def execute_equity_research_pipeline(ticker):
 
         if _missing_years:
             try:
-                _cafef_income = fetch_cafef_income_5y(ticker, end_year=_current_year)
+                _cafef_income = fetch_cafef_income_5y(ticker, years=_missing_years)
 
                 def _merge_missing(main_s, cafef_s):
                     if cafef_s is None or cafef_s.empty:
@@ -293,9 +294,9 @@ def execute_equity_research_pipeline(ticker):
                         return main_s
                     return pd.concat([main_s, new_vals]).sort_index()
 
-                revenue_series    = _merge_missing(revenue_series,    _cafef_income.get('revenue',    pd.Series(dtype=float)))
-                net_profit_series = _merge_missing(net_profit_series, _cafef_income.get('net_profit', pd.Series(dtype=float)))
-                equity_series     = _merge_missing(equity_series,     _cafef_income.get('equity',     pd.Series(dtype=float)))
+                revenue_series      = _merge_missing(revenue_series,      _cafef_income.get('revenue',      pd.Series(dtype=float)))
+                net_profit_series   = _merge_missing(net_profit_series,   _cafef_income.get('net_profit',   pd.Series(dtype=float)))
+                equity_series       = _merge_missing(equity_series,       _cafef_income.get('equity',       pd.Series(dtype=float)))
                 total_assets_series = _merge_missing(total_assets_series, _cafef_income.get('total_assets', pd.Series(dtype=float)))
 
                 _filled = sorted(set(_missing_years) & (
