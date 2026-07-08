@@ -433,10 +433,38 @@ def execute_equity_research_pipeline(ticker):
             "excl_extended_multiples": is_bank,
         })
 
-        # ── Bảng 5 năm ───────────────────────────────────────────────────
-        current_year_for_table = datetime.today().year
-        allowed_years = set(range(current_year_for_table - DEFAULT_YEAR_LIMIT, current_year_for_table))
+        # ── 6. Bảng KQKD theo Năm ─────────────────────────────────────────
+# FIX: fill năm 2021 bị thiếu từ CafeF nếu vnstock không trả về
+_current_year = datetime.today().year
+_expected_years = list(range(_current_year - 4, _current_year + 1))  # 2021→2025
 
+def _fill_missing_years(main_series, cafef_series):
+    if cafef_series is None or cafef_series.empty:
+        return main_series
+    missing = [y for y in _expected_years if y not in main_series.index]
+    if not missing:
+        return main_series
+    extra = cafef_series[cafef_series.index.isin(missing)]
+    if not extra.empty:
+        return pd.concat([main_series, extra]).sort_index()
+    return main_series
+
+# Kiểm tra có thiếu năm nào không
+_missing = [y for y in _expected_years if y not in revenue_series.index]
+if _missing:
+    try:
+        from cafef_fallback import fetch_cafef_income_5y
+        _cafef_income = fetch_cafef_income_5y(ticker, end_year=_current_year)
+        revenue_series    = _fill_missing_years(revenue_series,    _cafef_income.get('revenue',    pd.Series(dtype=float)))
+        net_profit_series = _fill_missing_years(net_profit_series, _cafef_income.get('net_profit', pd.Series(dtype=float)))
+    except Exception:
+        pass  # Không crash nếu CafeF fail
+
+# equity và total_assets đã được fill bởi fetch_cafef_balance_sheet_5y bên trên
+
+years_available = sorted(
+    set(revenue_series.index) | set(net_profit_series.index) |
+    set(equity_series.index) | set(total_assets_series.index))
         years_available = sorted(
             (set(revenue_series.index)      |
              set(net_profit_series.index)   |
@@ -494,36 +522,6 @@ def execute_equity_research_pipeline(ticker):
             "roa_latest":          get_latest(roa_series, default=None),
         }
 
-        # ── Bảng quý ─────────────────────────────────────────────────────
-        df_quarter_table = pd.DataFrame()
-        try:
-            fin_q  = build_financial_table(df_income_q, df_balance_q, df_ratio_q,
-                                           ticker=ticker, period='quarter')
-            rev_q  = normalize_to_billion_vnd(fin_q['revenue'])
-            eq_q   = normalize_to_billion_vnd(fin_q['equity'])
-            ta_q   = normalize_to_billion_vnd(fin_q['total_assets'])
-            np_q   = normalize_net_profit_with_anchor(fin_q['net_profit'], eq_q, fin_q['roe'])
-            eps_q  = fin_q['eps']
-            bvps_q = fin_q['bvps']
-            roe_q  = _normalize_pct(fin_q['roe'])
-            roa_q  = _normalize_pct(fin_q['roa'])
-            quarters = sorted(
-                set(rev_q.index) | set(np_q.index) | set(eq_q.index) | set(ta_q.index),
-                key=lambda c: (int(str(c).split('-Q')[0]), int(str(c).split('-Q')[1])))
-            df_quarter_table = pd.DataFrame({'_p': quarters})
-            df_quarter_table['Quý'] = df_quarter_table['_p'].apply(
-                lambda c: f"Q{str(c).split('-Q')[1]}/{str(c).split('-Q')[0]}")
-            df_quarter_table['Doanh thu thuần (tỷ)'] = df_quarter_table['_p'].map(rev_q)
-            df_quarter_table['LNST (tỷ)']            = df_quarter_table['_p'].map(np_q)
-            df_quarter_table['Vốn CSH (tỷ)']         = df_quarter_table['_p'].map(eq_q)
-            df_quarter_table['Tổng tài sản (tỷ)']    = df_quarter_table['_p'].map(ta_q)
-            df_quarter_table['EPS (đ)']              = df_quarter_table['_p'].map(eps_q)
-            df_quarter_table['BVPS (đ)']             = df_quarter_table['_p'].map(bvps_q)
-            df_quarter_table['ROE (%)'] = df_quarter_table['_p'].map(lambda y: roe_q.get(y, None))
-            df_quarter_table['ROA (%)'] = df_quarter_table['_p'].map(lambda y: roa_q.get(y, None))
-            df_quarter_table = df_quarter_table.drop(columns=['_p'])
-        except Exception:
-            pass
 
         # ── DuPont ────────────────────────────────────────────────────────
         df_dupont = dupont_decomposition(
