@@ -227,10 +227,11 @@ def execute_equity_research_pipeline(ticker):
                 st.info(f"ℹ️ Đã lấy 'Tổng tài sản' cho {ticker} từ CafeF.")
 
         # ── 4d. Fallback CafeF cho revenue & net_profit (Tab 1 KQKD) ─────
-        # FIX: all_years luôn bắt đầu từ KQKD_START_YEAR (2021), kết thúc
-        # tại current_year (bao gồm năm hiện tại).
-        current_year = datetime.today().year
-        all_years = list(range(KQKD_START_YEAR, current_year + 1))  # 2021..2026
+        # all_years: 2021 → năm trước (năm hiện tại chưa có Q4 đầy đủ).
+        # Ví dụ chạy năm 2026 → all_years = [2021,2022,2023,2024,2025].
+        current_year  = datetime.today().year
+        kqkd_end_year = current_year - 1          # năm gần nhất có đủ Q4
+        all_years = list(range(KQKD_START_YEAR, kqkd_end_year + 1))
 
         missing_revenue = [y for y in all_years
                            if y not in revenue_series.index
@@ -254,27 +255,27 @@ def execute_equity_research_pipeline(ticker):
         if missing_years:
             cafef_full = fetch_cafef_yearly_full(ticker, years=missing_years)
 
-            # Bù revenue
+            # Bù revenue (chỉ cần notna và > 0, không loại val nhỏ)
             for yr, val in cafef_full['revenue'].items():
-                if yr in missing_revenue and pd.notna(val) and val != 0:
+                if yr in missing_revenue and pd.notna(val) and val > 0:
                     revenue_series[yr] = val
             revenue_series = revenue_series.sort_index()
 
-            # Bù net_profit
+            # Bù net_profit (có thể âm nếu lỗ — chỉ cần notna)
             for yr, val in cafef_full['net_profit'].items():
-                if yr in missing_profit and pd.notna(val) and val != 0:
+                if yr in missing_profit and pd.notna(val):
                     net_profit_series[yr] = val
             net_profit_series = net_profit_series.sort_index()
 
-            # Bù equity
+            # Bù equity (chỉ cần notna và > 0)
             for yr, val in cafef_full['equity'].items():
-                if yr in missing_equity and pd.notna(val) and val != 0:
+                if yr in missing_equity and pd.notna(val) and val > 0:
                     equity_series[yr] = val
             equity_series = equity_series.sort_index()
 
-            # Bù total_assets
+            # Bù total_assets (chỉ cần notna và > 0)
             for yr, val in cafef_full['total_assets'].items():
-                if yr in missing_assets and pd.notna(val) and val != 0:
+                if yr in missing_assets and pd.notna(val) and val > 0:
                     total_assets_series[yr] = val
             total_assets_series = total_assets_series.sort_index()
 
