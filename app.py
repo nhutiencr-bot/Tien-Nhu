@@ -8,7 +8,7 @@ from symbols_loader import load_all_symbols, build_display_options
 from ui_components import (
     render_kpi_cards, render_tab_kqkd, render_tab_valuation,
     render_tab_dcf, render_tab_dupont, render_tab_technical,
-    render_tab_forecast, render_tab_multiples, fmt,
+    render_tab_forecast, fmt,
 )
 
 st.set_page_config(page_title="Equity Research AI", layout="wide")
@@ -31,6 +31,7 @@ def fmt_price(v):
 st.title("🎯 AI Equity Research Terminal")
 st.caption("Khởi chạy hệ thống tự động 7 bước kết hợp cơ chế kiểm toán vượt 7 bẫy BCTC đặc thù thị trường Việt Nam.")
 
+# --- Cache pipeline ---
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_cached_pipeline(ticker):
     return execute_equity_research_pipeline(ticker)
@@ -51,7 +52,8 @@ if display_list:
 else:
     ticker_input_raw = st.text_input(
         "Nhập mã cổ phiếu (VD: FPT, HPG, VCB, TCB):",
-        value="", placeholder="Nhập mã...",
+        value="",
+        placeholder="Nhập mã...",
     ).strip().upper()
     ticker_input = ticker_input_raw if ticker_input_raw else None
 
@@ -60,45 +62,28 @@ if not ticker_input:
     st.stop()
 
 # --- Pipeline ---
-with st.spinner(f"⏳ Đang tải dữ liệu {ticker_input}... Lần đầu có thể mất 10-15s!"):
+with st.spinner(f"⏳ Đang tải dữ liệu {ticker_input}... Lần đầu có thể mất 10-15s, các lần sau sẽ mượt ngay lập tức!"):
     pipeline_output = get_cached_pipeline(ticker_input)
 
 if pipeline_output is None:
     st.error(f"Không thể tải dữ liệu cho mã {ticker_input}. Vui lòng thử mã khác.")
     st.stop()
 
-# Guard: kiểm tra pipeline trả về đủ dữ liệu trước khi unpack
-if not isinstance(pipeline_output, (tuple, list)) or len(pipeline_output) != 10:
-    st.error(
-        f"Pipeline trả về dữ liệu không hợp lệ cho mã **{ticker_input}** "
-        f"(nhận được {type(pipeline_output).__name__} "
-        f"{'với ' + str(len(pipeline_output)) + ' phần tử' if isinstance(pipeline_output, (tuple,list)) else ''}).\n\n"
-        "Có thể vnstock không có dữ liệu cho mã này. Thử lại hoặc chọn mã khác."
-    )
-    st.stop()
-
-# Unpack đúng 10 giá trị theo thứ tự pipeline.py return:
-# df_price, df_5y_table, df_quarter_table, df_balance,
-# clean_metrics, technical_summary,
-# news_list, fundamentals_summary, df_dupont, valuation_package
-(df_price_clean, df_5y_table, df_quarter_table, df_balance_table,
- metrics, tech,
- news_cards, fundamentals, df_dupont,
- valuation_pkg) = pipeline_output
-
-# reports_pkg không nằm trong pipeline output — dùng dict rỗng
-reports_pkg = {}
+# FIX: unpack 11 giá trị (reports_pkg = None placeholder từ pipeline)
+(df_price_clean, df_5y_table, df_quarter_table, df_balance_table, metrics, tech,
+ news_cards, fundamentals, df_dupont, valuation_pkg, reports_pkg) = pipeline_output
 
 # --- Header ---
 st.markdown(f"## Báo Cáo Định Giá Toàn Diện: {ticker_input}")
 st.caption(
     f"Nguồn: vnstock API ({metrics.get('source_used', 'N/A')}) · "
-    "Tham khảo/giáo dục — không phải lời khuyên đầu tư · Đầu tư cổ phiếu có rủi ro mất vốn."
+    f"Tham khảo/giáo dục — không phải lời khuyên đầu tư · Đầu tư cổ phiếu có rủi ro mất vốn."
 )
 
+# --- KPI Cards ---
 render_kpi_cards(metrics, fundamentals)
 
-# --- Tabs ---
+# --- Tabs (giữ nguyên đủ 10 tabs) ---
 (tab_kqkd, tab_valuation, tab_multiples, tab_dcf, tab_dupont,
  tab_insights, tab_forecast, tab_technical, tab_news, tab_report) = st.tabs([
     "📋 KQKD 5 Năm",
@@ -113,56 +98,137 @@ render_kpi_cards(metrics, fundamentals)
     "📑 Báo Cáo Phân Tích",
 ])
 
-# ── Tab 1: KQKD ──────────────────────────────────────────────────────────────
 with tab_kqkd:
-    # Toggle Năm / Quý
-    view_mode = st.radio(
-        "Chế độ xem:", ["📅 Theo Năm", "📆 Theo Quý"],
-        horizontal=True, label_visibility="collapsed",
+    che_do_xem = st.selectbox(
+        "Xem dữ liệu theo:",
+        options=["Theo Năm", "Theo Quý"],
+        index=0,
+        key="che_do_xem_kqkd",
     )
-    if view_mode == "📅 Theo Năm":
+    if che_do_xem == "Theo Năm":
         render_tab_kqkd(df_5y_table, fundamentals, period_col="Năm")
     else:
-        if df_quarter_table is not None and not df_quarter_table.empty:
-            render_tab_kqkd(df_quarter_table, fundamentals, period_col="Quý")
-        else:
-            st.info("Chưa có dữ liệu theo quý cho mã này.")
+        render_tab_kqkd(df_quarter_table, fundamentals, period_col="Quý")
 
-# ── Tab 2: Định giá PE/PB ─────────────────────────────────────────────────────
 with tab_valuation:
     render_tab_valuation(valuation_pkg, metrics)
 
-# ── Tab 3: Multiples Mở Rộng — CARD UI ĐẸP ──────────────────────────────────
 with tab_multiples:
+    st.markdown("### Multiples Mở Rộng")
+
+    market_cap_b = metrics.get('market_cap_billion', 0) or 0
+    revenue_b    = metrics.get('revenue_latest_billion', 0) or 0
+    cfo_b        = metrics.get('cfo_latest_billion', 0) or 0
+    ebitda_b     = metrics.get('ebitda_latest_billion', 0) or 0
+    net_debt_b   = metrics.get('net_debt_billion', 0) or 0
+    ev_b         = market_cap_b + net_debt_b
+
+    ps       = (market_cap_b / revenue_b)  if revenue_b  > 0 else None
+    pcf      = (market_cap_b / cfo_b)      if cfo_b      > 0 else None
+    ev_ebitda = (ev_b / ebitda_b)          if ebitda_b   > 0 else None
+    pe_now   = metrics.get('pe', 0) or 0
+    pb_now   = metrics.get('pb', 0) or 0
+
+    pe_hist_series = valuation_pkg.get('pe_series')
+    pb_hist_series = valuation_pkg.get('pb_series')
+    pe_median_5y = float(pe_hist_series.dropna().median()) \
+        if pe_hist_series is not None and not pe_hist_series.dropna().empty else None
+    pb_median_5y = float(pb_hist_series.dropna().median()) \
+        if pb_hist_series is not None and not pb_hist_series.dropna().empty else None
+
+    bvps_mismatch = metrics.get('bvps_mismatch_pct')
+    if bvps_mismatch is not None and bvps_mismatch > 5:
+        st.caption(
+            f"⚠️ BVPS gốc từ nguồn dữ liệu lệch {bvps_mismatch:.1f}% so với BVPS tự tính lại "
+            f"(Vốn CSH / Số CP hiện tại) — có thể do số CP lưu hành trong bảng ratio đã cũ "
+            f"(trước đợt chia cổ tức/tăng vốn gần nhất). Đã dùng số tự tính lại (mới hơn) cho P/B."
+        )
+
+    def _card_label(value, avg=None, low_note="Dưới TB 5N", high_note="Trên TB 5N",
+                    low_thresh=None, low_msg=None, high_msg=None):
+        if value is None:
+            return "#888", "Thiếu dữ liệu"
+        if avg is not None and avg > 0:
+            if value < avg:
+                return "#22c55e", f"{low_note} ({avg:.2f}x)"
+            return "#ef4444", f"{high_note} ({avg:.2f}x)"
+        if low_thresh is not None:
+            if value < low_thresh:
+                return "#22c55e", low_msg or "Hấp dẫn"
+            return "#eab308", high_msg or "Bình thường"
+        return "#e5e7eb", ""
+
+    def _render_card(col, title, value_str, color, note):
+        col.markdown(
+            f"""<div style="padding:0.5rem 0;">
+<div style="opacity:0.7;font-size:0.85rem;">{title}</div>
+<div style="font-size:1.9rem;font-weight:700;color:{color};">{value_str}</div>
+<div style="opacity:0.75;font-size:0.8rem;">{note}</div>
+</div>""",
+            unsafe_allow_html=True,
+        )
+
+    m1, m2, m3, m4 = st.columns(4)
+    c, n = _card_label(pe_now if pe_now else None, avg=pe_median_5y,
+                       low_note="Rẻ hơn TB 5N", high_note="Đắt hơn TB 5N")
+    _render_card(m1, "P/E", f"{pe_now:.2f}x" if pe_now else "—", c, n)
+    c, n = _card_label(pb_now if pb_now else None, avg=pb_median_5y,
+                       low_note="Rẻ hơn TB 5N", high_note="Đắt hơn TB 5N")
+    _render_card(m2, "P/B", f"{pb_now:.2f}x" if pb_now else "—", c, n)
+    m3.metric("EPS", fmt(fundamentals.get('eps_latest', 0), suffix=" đ", decimals=0))
+    m4.metric("BVPS", fmt(fundamentals.get('bvps_latest', 0), suffix=" đ", decimals=0))
+
+    # Hiển thị cảnh báo pha loãng
     dilution_years = valuation_pkg.get('dilution_years', [])
     if dilution_years:
         st.warning(
             f"⚠️ **Lưu ý pha loãng:** {ticker_input} phát hành thêm CP trong "
             f"năm **{', '.join(str(y) for y in dilution_years)}** "
-            "(cổ tức CP hoặc phát hành quyền). "
-            "EPS/BVPS lịch sử đã được điều chỉnh để so sánh chuẩn hơn."
+            f"(cổ tức CP hoặc phát hành quyền). "
+            f"EPS/BVPS lịch sử đã được điều chỉnh để so sánh chuẩn hơn."
         )
-    bvps_mismatch = metrics.get('bvps_mismatch_pct')
-    if bvps_mismatch is not None and bvps_mismatch > 5:
-        st.caption(
-            f"⚠️ BVPS gốc lệch {bvps_mismatch:.1f}% so với BVPS tự tính lại "
-            "(Vốn CSH / Số CP hiện tại) — đã dùng số tự tính lại cho P/B."
-        )
+
+    # DDM note
     ddm_note = valuation_pkg.get('ddm_note')
     if ddm_note:
         st.info(f"ℹ️ **DDM:** {ddm_note}")
 
-    render_tab_multiples(metrics, fundamentals, valuation_pkg)
+    st.markdown("---")
 
-# ── Tab 4: DCF & Graham ───────────────────────────────────────────────────────
+    is_bank_flag = metrics.get('excl_extended_multiples', False) or metrics.get('is_bank', False)
+    if is_bank_flag:
+        st.info(
+            "ℹ️ **P/S và EV/EBITDA không áp dụng cho cổ phiếu ngân hàng** — "
+            "khái niệm 'Doanh thu' và 'EBITDA' không phản ánh đúng bản chất kinh doanh "
+            "của ngân hàng (thu nhập lãi thuần, chi phí dự phòng rủi ro tín dụng có cấu trúc khác). "
+            "Với ngân hàng nên dùng P/B + ROE, NIM, NPL, CAR thay thế."
+        )
+        e1, e2 = st.columns(2)
+        c, n = _card_label(pcf, low_thresh=10, low_msg="Dòng tiền hấp dẫn", high_msg="Bình thường")
+        _render_card(e1, "P/CF", f"{pcf:.2f}x" if pcf else "—", c, n)
+        e2.markdown(
+            "<div style='padding:0.5rem 0;opacity:0.6;'>"
+            "<div style='font-size:0.85rem;'>P/S · EV/EBITDA</div>"
+            "<div style='font-size:1.3rem;'>Không áp dụng</div></div>",
+            unsafe_allow_html=True,
+        )
+    else:
+        e1, e2, e3 = st.columns(3)
+        c, n = _card_label(ps, low_thresh=1.5, low_msg="Cạnh tranh tốt", high_msg="Định giá cao")
+        _render_card(e1, "P/S", f"{ps:.2f}x" if ps else "—", c, n)
+        c, n = _card_label(pcf, low_thresh=10, low_msg="Dòng tiền hấp dẫn", high_msg="Bình thường")
+        _render_card(e2, "P/CF", f"{pcf:.2f}x" if pcf else "—", c, n)
+        c, n = _card_label(ev_ebitda, low_thresh=10, low_msg="Định giá hợp lý", high_msg="Bình thường")
+        _render_card(e3, "EV/EBITDA", f"{ev_ebitda:.2f}x" if ev_ebitda else "—", c, n)
+        if not (ps and pcf and ev_ebitda):
+            st.caption("ℹ️ Một số chỉ số hiển thị '—' do thiếu dữ liệu từ nguồn API cho mã này.")
+
 with tab_dcf:
     render_tab_dcf(valuation_pkg, metrics)
 
-# ── Tab 5: DuPont ─────────────────────────────────────────────────────────────
 with tab_dupont:
     render_tab_dupont(df_dupont)
 
-# ── Tab 6: Special Insights ──────────────────────────────────────────────────
 with tab_insights:
     box_bull, box_bear = st.columns(2)
     box_bull.success(
@@ -172,39 +238,23 @@ with tab_insights:
         f"- ROE: {fmt(fundamentals.get('roe_latest', 0), suffix='%')}"
     )
     box_bear.error(
-        "**🔴 BEAR CASE**\n"
-        "- Rủi ro vĩ mô ảnh hưởng biên lợi nhuận\n"
-        "- Cần kiểm tra số CP lưu hành thay đổi\n"
-        "- DCF/Graham chỉ mang tính tham khảo"
+        f"**🔴 BEAR CASE**\n"
+        f"- Rủi ro vĩ mô ảnh hưởng biên lợi nhuận\n"
+        f"- Cần kiểm tra số CP lưu hành thay đổi\n"
+        f"- DCF/Graham chỉ mang tính tham khảo"
     )
     if tech.get('oil_correlation', 0.0) != 0.0:
         st.warning(
             f"🛢️ Tương quan giá dầu: **{tech['oil_correlation']:.2f}** "
-            "— mã nhạy cảm với biến động dầu thô WTI."
+            f"— mã nhạy cảm với biến động dầu thô WTI."
         )
-    reports_inline = reports_pkg.get("reports", []) if reports_pkg else []
-    if reports_inline:
-        st.markdown("---")
-        st.markdown("### 📄 Báo Cáo Phân Tích (CafeF)")
-        for rpt in reports_inline[:5]:
-            title = rpt.get("title", "")
-            url   = rpt.get("url", "#")
-            src   = rpt.get("source", "CafeF")
-            date  = rpt.get("date", "")
-            st.markdown(
-                f"[{title}]({url}) — <small style='color:#9a9aab;'>{src} · {date}</small>",
-                unsafe_allow_html=True,
-            )
 
-# ── Tab 7: Dự Phóng ───────────────────────────────────────────────────────────
 with tab_forecast:
     render_tab_forecast(df_5y_table, fundamentals, metrics, tech, valuation_pkg, period_col="Năm")
 
-# ── Tab 8: Technical Analysis ─────────────────────────────────────────────────
 with tab_technical:
     render_tab_technical(df_price_clean, tech, metrics)
 
-# ── Tab 9: Tin Tức ───────────────────────────────────────────────────────────
 with tab_news:
     st.subheader("📰 Tin Tức & Sự Kiện Nổi Bật")
     if news_cards and len(news_cards) > 0:
@@ -217,31 +267,29 @@ with tab_news:
                 st.info(title)
                 continue
             st.markdown(
-                f'<h5><a href="{link}" target="_blank" '
-                f'style="color:white;text-decoration:none;">{title}</a></h5>',
-                unsafe_allow_html=True,
+                f'<h5><a href="{link}" target="_blank" style="color: white; text-decoration: none;">{title}</a></h5>',
+                unsafe_allow_html=True
             )
             st.markdown(
-                f'<p style="color:#a0a0a0;font-size:14px;">'
-                f'<span style="color:#8B5CF6;font-weight:bold;">{source}</span> | '
+                f'<p style="color: #a0a0a0; font-size: 14px;">'
+                f'<span style="color: #8B5CF6; font-weight: bold;">{source}</span> | '
                 f'Ngày cập nhật: {pub_date}</p>',
-                unsafe_allow_html=True,
+                unsafe_allow_html=True
             )
             st.divider()
     else:
         st.info("Không có tin tức nào trong thời gian qua.")
 
-# ── Tab 10: Báo Cáo Phân Tích ────────────────────────────────────────────────
+# ── Tab Báo Cáo Phân Tích ─────────────────────────────────────────────────
 def fetch_tcbs_reports(ticker):
+    """Lấy danh sách báo cáo phân tích từ API ngầm TCBS."""
     url = (f"https://apipubaws.tcbs.com.vn/tcanalysis/v1/ticker/"
            f"{ticker}/analysis-reports?page=0&size=15")
     headers = {
         "Accept": "application/json",
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
-        ),
+        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                       "AppleWebKit/537.36 (KHTML, like Gecko) "
+                       "Chrome/120.0.0.0 Safari/537.36"),
     }
     reports = []
     try:
@@ -250,12 +298,12 @@ def fetch_tcbs_reports(ticker):
             data = res.json().get('listAnalysisReports', [])
             for item in data:
                 reports.append({
-                    "ticker":         ticker.upper(),
-                    "report_date":    item.get('publishDate', '').split('T')[0],
-                    "recommendation": item.get('recommendation') or "—",
-                    "target_price":   item.get('targetPrice'),
-                    "source":         item.get('source', 'Tổng hợp'),
-                    "url":            item.get('url', '#'),
+                    "ticker":          ticker.upper(),
+                    "report_date":     item.get('publishDate', '').split('T')[0],
+                    "recommendation":  item.get('recommendation') or "—",
+                    "target_price":    item.get('targetPrice'),
+                    "source":          item.get('source', 'Tổng hợp'),
+                    "url":             item.get('url', '#'),
                 })
     except Exception:
         pass
@@ -265,7 +313,7 @@ with tab_report:
     st.markdown("### 📑 Báo Cáo Phân Tích & Khuyến Nghị")
     st.caption(
         f"Tổng hợp khuyến nghị mới nhất cho mã {ticker_input.upper()} "
-        "— Dữ liệu lấy trực tiếp không cần đăng nhập."
+        f"— Dữ liệu lấy trực tiếp không cần đăng nhập."
     )
 
     cafef_url     = f"https://s.cafef.vn/bao-cao-phan-tich/{ticker_input.lower()}.chn"
@@ -293,46 +341,47 @@ with tab_report:
         for r in reports_list:
             tp = r.get("target_price")
             if tp and current_price > 0:
-                upside_pct   = (tp - current_price) / current_price * 100
-                upside_str   = f"{upside_pct:+.0f}%"
+                upside_pct  = (tp - current_price) / current_price * 100
+                upside_str  = f"{upside_pct:+.0f}%"
                 upside_color = "#22C55E" if upside_pct >= 0 else "#EF4444"
             else:
                 upside_str, upside_color = "—", "#888"
             tp_str = f"{tp:,.0f}" if tp else "—"
             rows_html += f"""
-<tr style="border-bottom:1px solid rgba(255,255,255,0.08);">
-  <td style="padding:10px 14px;font-weight:bold;">{r['ticker']}</td>
+<tr style="border-bottom: 1px solid rgba(255,255,255,0.08);">
+  <td style="padding:10px 14px; font-weight:bold;">{r['ticker']}</td>
   <td style="padding:10px 14px;">{r['report_date']}</td>
-  <td style="padding:10px 14px;font-weight:bold;">{r['recommendation']}</td>
-  <td style="padding:10px 14px;text-align:right;">{tp_str}</td>
-  <td style="padding:10px 14px;text-align:right;color:{upside_color};font-weight:bold;">{upside_str}</td>
+  <td style="padding:10px 14px; font-weight:bold;">{r['recommendation']}</td>
+  <td style="padding:10px 14px; text-align:right;">{tp_str}</td>
+  <td style="padding:10px 14px; text-align:right; color:{upside_color}; font-weight:bold;">{upside_str}</td>
   <td style="padding:10px 14px;">{r['source']}</td>
   <td style="padding:10px 14px;">
     <a href="{r['url']}" target="_blank"
-       style="color:#8B5CF6;font-weight:bold;text-decoration:none;
-              padding:4px 8px;border:1px solid #8B5CF6;border-radius:4px;">
+       style="color:#8B5CF6; font-weight:bold; text-decoration:none;
+              padding:4px 8px; border:1px solid #8B5CF6; border-radius:4px;">
       Xem BCPT →
     </a>
   </td>
 </tr>"""
 
-        st.markdown(f"""
+        table_html = f"""
 <div style="overflow-x:auto;">
-<table style="width:100%;border-collapse:collapse;font-size:14px;">
+<table style="width:100%; border-collapse:collapse; font-size:14px;">
   <thead>
-    <tr style="border-bottom:2px solid rgba(255,255,255,0.25);text-align:left;">
+    <tr style="border-bottom: 2px solid rgba(255,255,255,0.25); text-align:left;">
       <th style="padding:10px 14px;">Mã</th>
-      <th style="padding:10px 14px;">Ngày</th>
+      <th style="padding:10px 14px;">Ngày khuyến nghị</th>
       <th style="padding:10px 14px;">Khuyến nghị</th>
-      <th style="padding:10px 14px;text-align:right;">Giá mục tiêu</th>
-      <th style="padding:10px 14px;text-align:right;">% upside</th>
+      <th style="padding:10px 14px; text-align:right;">Giá mục tiêu</th>
+      <th style="padding:10px 14px; text-align:right;">% upside</th>
       <th style="padding:10px 14px;">CTCK</th>
-      <th style="padding:10px 14px;">Link</th>
+      <th style="padding:10px 14px;">Link BCPT</th>
     </tr>
   </thead>
   <tbody>{rows_html}</tbody>
 </table>
-</div>""", unsafe_allow_html=True)
+</div>"""
+        st.markdown(table_html, unsafe_allow_html=True)
 
     st.divider()
     st.caption(
