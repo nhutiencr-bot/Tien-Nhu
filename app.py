@@ -67,12 +67,26 @@ if pipeline_output is None:
     st.error(f"Không thể tải dữ liệu cho mã {ticker_input}. Vui lòng thử mã khác.")
     st.stop()
 
-# Unpack đúng 10 giá trị từ pipeline (df_quarter_table nằm ở vị trí thứ 3)
+# Guard: kiểm tra pipeline trả về đủ dữ liệu trước khi unpack
+if not isinstance(pipeline_output, (tuple, list)) or len(pipeline_output) != 10:
+    st.error(
+        f"Pipeline trả về dữ liệu không hợp lệ cho mã **{ticker_input}** "
+        f"(nhận được {type(pipeline_output).__name__} "
+        f"{'với ' + str(len(pipeline_output)) + ' phần tử' if isinstance(pipeline_output, (tuple,list)) else ''}).\n\n"
+        "Có thể vnstock không có dữ liệu cho mã này. Thử lại hoặc chọn mã khác."
+    )
+    st.stop()
+
+# Unpack đúng 10 giá trị theo thứ tự pipeline.py return:
+# df_price, df_5y_table, df_quarter_table, df_balance,
+# clean_metrics, technical_summary,
+# news_list, fundamentals_summary, df_dupont, valuation_package
 (df_price_clean, df_5y_table, df_quarter_table, df_balance_table,
- metrics, tech, news_cards, fundamentals, df_dupont,
+ metrics, tech,
+ news_cards, fundamentals, df_dupont,
  valuation_pkg) = pipeline_output
 
-# reports_pkg là optional — lấy từ valuation_pkg nếu pipeline không trả riêng
+# reports_pkg không nằm trong pipeline output — dùng dict rỗng
 reports_pkg = {}
 
 # --- Header ---
