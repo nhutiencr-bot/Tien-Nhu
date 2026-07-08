@@ -4,8 +4,9 @@ cafef_fallback.py
 Lấy BCTC (Vốn CSH, Tổng tài sản, Doanh thu, LNST) từ CafeF
 khi vnstock (VCI/KBS/DNSE) không có dữ liệu năm cũ (thường là 2021).
 
-ĐƠN VỊ: CafeF trả về TRIỆU đồng → hàm này chuyển sang TỶ (÷ 1,000).
-KHÔNG gọi normalize_to_billion_vnd() trên kết quả — đã convert sẵn.
+ĐƠN VỊ: CafeF trả về VNĐ NGUYÊN (không phải triệu) → hàm này chia 1e9
+để ra TỶ VNĐ. KHÔNG gọi normalize_to_billion_vnd() trên kết quả — đã
+convert sẵn.
 
 URL pattern đúng (đã kiểm tra thực tế trên repo):
   bsheet  → Bảng cân đối kế toán (equity + total_assets)
@@ -66,20 +67,40 @@ def _find_company_slug(ticker: str) -> str:
 
 
 def _parse_vn_number(raw: str):
-    """Parse số CafeF (đơn vị triệu) → float triệu. Trả None nếu không parse được."""
+    """
+    Parse số theo định dạng CafeF (VNĐ nguyên, dùng dấu '.' làm phân cách
+    hàng nghìn — VD "37.623.298.590.000", đôi khi có dấu ',' làm phân cách
+    thập phân kiểu VN). Trả về float (đơn vị: VNĐ), None nếu không parse được.
+
+    FIX QUAN TRỌNG: bản cũ chỉ replace dấu ',' rồi float() thẳng chuỗi còn
+    lại — với số có NHIỀU dấu '.' (VD "37.623.298.590.000"), float() ném
+    ValueError → bị nuốt bởi except → trả về None âm thầm. Đây là nguyên
+    nhân khiến TOÀN BỘ dữ liệu năm lấy từ CafeF (thường là 2021) biến mất,
+    không riêng gì bank.
+    """
     if not raw:
         return None
     raw = raw.strip().replace('\xa0', '').replace(' ', '').replace('%', '')
     if raw in ('', '-', '—', 'N/A', 'n/a', '..'):
         return None
     try:
-        if ',' in raw and '.' in raw:
-            cleaned = raw.replace(',', '')
-        elif ',' in raw:
-            cleaned = raw.replace(',', '')
+        neg = raw.startswith('-')
+        if neg:
+            raw = raw[1:]
+        if ',' in raw:
+            # Quy ước VN: ',' = thập phân, '.' = phân cách nghìn
+            cleaned = raw.replace('.', '').replace(',', '.')
         else:
-            cleaned = raw
-        return float(cleaned)
+            # Chỉ có '.': nếu MỌI nhóm sau dấu đầu tiên đều đúng 3 chữ số
+            # → đó là phân cách hàng nghìn (kiểu "37.623.298.590.000"),
+            # không phải số thập phân thật.
+            parts = raw.split('.')
+            if len(parts) > 1 and all(len(p) == 3 for p in parts[1:]):
+                cleaned = ''.join(parts)
+            else:
+                cleaned = raw  # số thập phân thật, VD "4.58" (%)
+        val = float(cleaned)
+        return -val if neg else val
     except (ValueError, TypeError):
         return None
 
@@ -142,9 +163,9 @@ def _fetch_one_period(ticker: str, year: int, quarter: int, slug: str) -> dict:
             _extract_row_values(text_bs, r'Tổng cộng tài sản')
         )
         if eq_vals and eq_vals[-1] not in (None, 0.0, 0):
-            out['equity'] = round(eq_vals[-1] / 1_000, 2)
+            out['equity'] = round(eq_vals[-1] / 1_000_000_000, 2)
         if ta_vals and ta_vals[-1] not in (None, 0.0, 0):
-            out['total_assets'] = round(ta_vals[-1] / 1_000, 2)
+            out['total_assets'] = round(ta_vals[-1] / 1_000_000_000, 2)
 
     # ── Income statement ──────────────────────────────────────────────────────
     if text_is:
@@ -169,9 +190,9 @@ def _fetch_one_period(ticker: str, year: int, quarter: int, slug: str) -> dict:
             _extract_row_values(text_is, r'Lãi sau thuế')
         )
         if rev_vals and rev_vals[-1] not in (None, 0.0, 0):
-            out['revenue'] = round(rev_vals[-1] / 1_000, 2)
+            out['revenue'] = round(rev_vals[-1] / 1_000_000_000, 2)
         if np_vals and np_vals[-1] not in (None, 0.0, 0):
-            out['net_profit'] = round(np_vals[-1] / 1_000, 2)
+            out['net_profit'] = round(np_vals[-1] / 1_000_000_000, 2)
 
     return out
 
