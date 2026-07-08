@@ -307,28 +307,28 @@ def execute_equity_research_pipeline(ticker):
         # (VD 2021), dù equity/total_assets/net_profit hoàn toàn có thể
         # cào được từ CafeF bình thường.
         _expected_years = set(TABLE_YEARS)
-        _years_have = (set(revenue_series.index) | set(net_profit_series.index)
-                       | set(equity_series.index) | set(total_assets_series.index))
-        _missing_years = sorted(_expected_years - _years_have)
 
-        if _missing_years:
-            st.info(f"ℹ️ {ticker}: bổ sung dữ liệu năm {_missing_years} từ CafeF...")
-            _cafef_full = fetch_cafef_yearly_full(ticker, _missing_years)
+        # Kiểm tra từng series riêng — KHÔNG dùng union vì nếu equity có 2021
+        # nhưng revenue/net_profit thiếu, union sẽ bỏ qua 2021 và không cào CafeF.
+        def _yr_missing(s):
+            if s is None or s.empty:
+                return _expected_years
+            return _expected_years - set(s.dropna().index)
+
+        _cafef_needed = sorted(
+            _yr_missing(net_profit_series)
+            | _yr_missing(equity_series)
+            | _yr_missing(total_assets_series)
+            | (_yr_missing(revenue_series) if not is_bank else set())
+        )
+
+        if _cafef_needed:
+            _cafef_full = fetch_cafef_yearly_full(ticker, _cafef_needed)
             if not is_bank:
-                # Chỉ bù "revenue" cho DN thường — bỏ qua cho ngân hàng vì
-                # "Doanh thu thuần" không phản ánh đúng bản chất kinh doanh
-                # ngân hàng (nên vnstock/find_row_series cũng không dùng
-                # field này cho ngân hàng, tránh xung đột 2 chuẩn khác nhau).
                 revenue_series = _merge_missing_years(revenue_series, _cafef_full.get('revenue'))
             net_profit_series   = _merge_missing_years(net_profit_series,   _cafef_full.get('net_profit'))
             equity_series       = _merge_missing_years(equity_series,       _cafef_full.get('equity'))
             total_assets_series = _merge_missing_years(total_assets_series, _cafef_full.get('total_assets'))
-
-            _still_missing = sorted(_expected_years - (
-                set(revenue_series.index) | set(net_profit_series.index)
-                | set(equity_series.index) | set(total_assets_series.index)))
-            if _still_missing:
-                st.warning(f"⚠️ CafeF cũng không có dữ liệu năm {_still_missing} cho {ticker}.")
 
         market_cap_series_raw = fin5.get('market_cap', pd.Series(dtype=float))
         market_cap_direct = get_latest(market_cap_series_raw, default=0.0)

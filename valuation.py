@@ -2,26 +2,6 @@
 valuation.py
 ============
 Tổng hợp TẤT CẢ hàm định giá + DuPont cho Equity Research Terminal.
-
-FIX QUAN TRỌNG — Cổ tức cổ phiếu (stock dividend) & pha loãng:
-────────────────────────────────────────────────────────────────
-Khi DN chia cổ tức cổ phiếu (VD: 30% = phát hành thêm 30% CP),
-số lượng CP lưu hành tăng → EPS/BVPS lịch sử bị pha loãng so với
-hiện tại → chuỗi EPS/BVPS qua các năm KHÔNG thể so trực tiếp.
-
-Biểu hiện bug:
-  • BVPS tăng giả tạo một số năm rồi giảm mạnh
-  • PE median bị lệch vì giá/EPS dùng số CP khác nhau qua các năm
-  • DDM cho giá thấp bất thường với mã chỉ chia cổ tức cổ phiếu (DPS ≈ 0)
-
-Cách xử lý trong code này:
-  1. detect_stock_dividend_years(): phát hiện năm nào có khả năng phát hành
-     thêm CP (shares tăng đột biến > 5%) → gán flag để cảnh báo ở UI
-  2. normalize_eps_bvps_series(): chia EPS/BVPS lịch sử theo tỷ lệ điều chỉnh
-     (tương tự split-adjustment) để so sánh được qua các năm
-  3. DDM: chỉ áp dụng khi DPS tiền mặt > 0 VÀ payout ratio > 10% TẤT CẢ
-     3 năm gần nhất — nếu không, trả về None kèm lý do
-  4. PE/PB median: loại bỏ outlier (năm PE < 3 hoặc > 60) trước khi tính median
 """
 
 import math
@@ -35,10 +15,6 @@ from typing import Optional
 # ════════════════════════════════════════════════════════════════════════════
 
 def detect_stock_dividend_years(shares_series: pd.Series, threshold: float = 0.05) -> list:
-    """
-    Phát hiện các năm DN phát hành thêm CP (cổ tức CP hoặc phát hành quyền).
-    Trả về list năm mà số CP lưu hành tăng > threshold (mặc định 5%).
-    """
     if shares_series is None or len(shares_series) < 2:
         return []
     dilution_years = []
@@ -55,48 +31,29 @@ def normalize_eps_bvps_series(
     bvps_series: pd.Series,
     shares_series: pd.Series,
 ) -> tuple[pd.Series, pd.Series]:
-    """
-    Điều chỉnh EPS/BVPS lịch sử theo tỷ lệ số CP lưu hành hiện tại /
-    số CP tại thời điểm đó — giống split-adjusted price.
-
-    Ví dụ: năm 2021 có 1 tỷ CP, năm 2024 có 1.5 tỷ CP (chia 50% cổ tức CP).
-    EPS 2021 gốc = 3,000đ → EPS 2021 điều chỉnh = 3,000 × (1/1.5) = 2,000đ
-    → so sánh được với EPS 2024.
-
-    Lưu ý: CHỈ điều chỉnh nếu shares_series có đủ dữ liệu lịch sử.
-    Nếu không đủ, trả về series gốc để tránh làm sai thêm.
-    """
     if shares_series is None or shares_series.empty:
         return eps_series, bvps_series
-
     s = shares_series.dropna().sort_index()
     if len(s) < 2:
         return eps_series, bvps_series
-
     current_shares = float(s.iloc[-1])
     if current_shares <= 0:
         return eps_series, bvps_series
-
     dilution_years = detect_stock_dividend_years(s, threshold=0.05)
     if not dilution_years:
-        return eps_series, bvps_series   # Không có pha loãng → không cần điều chỉnh
-
+        return eps_series, bvps_series
     adj_eps  = eps_series.copy()  if eps_series  is not None else pd.Series(dtype=float)
     adj_bvps = bvps_series.copy() if bvps_series is not None else pd.Series(dtype=float)
-
     for year in s.index:
         hist_shares = float(s.loc[year])
         if hist_shares <= 0:
             continue
-        ratio = hist_shares / current_shares   # < 1 nếu sau này phát hành thêm
+        ratio    = hist_shares / current_shares
         int_year = int(year)
-        # Điều chỉnh EPS: EPS_adj = EPS_gốc × (CP_lúc_đó / CP_hiện_tại)
-        # = EPS_gốc × ratio  (< 1 → EPS giảm về nền chung)
         if adj_eps is not None and int_year in adj_eps.index and ratio != 1:
             adj_eps[int_year] = round(float(adj_eps[int_year]) * ratio, 2)
         if adj_bvps is not None and int_year in adj_bvps.index and ratio != 1:
             adj_bvps[int_year] = round(float(adj_bvps[int_year]) * ratio, 2)
-
     return adj_eps, adj_bvps
 
 
@@ -111,44 +68,30 @@ def dcf_fcff_scenarios(
     ticker: str = "",
     industry_text: str = "",
 ) -> Optional[dict]:
-    """
-    DCF FCFF 3 kịch bản, dùng WACC theo ngành (estimate_wacc).
-    Trả về dict {'Bi quan': price, 'Cơ sở': price, 'Tích cực': price}
-    hoặc None nếu đầu vào không hợp lệ.
-
-    FIX: WACC không còn cố định 10.5% — dùng estimate_wacc(ticker) theo ngành.
-    """
     if not latest_fcff or latest_fcff <= 0 or not shares_outstanding or shares_outstanding <= 0:
         return None
-
-    base_wacc = estimate_wacc(ticker, industry_text)
+    base_wacc  = estimate_wacc(ticker, industry_text)
     scenarios  = wacc_scenarios(base_wacc)
     results    = {}
-
     for name, params in scenarios.items():
         wacc = params['wacc']
         g    = params['g']
         if wacc <= g:
             continue
         try:
-            # Dự phóng FCFF 5 năm (tốc độ tăng trưởng theo kịch bản)
             growth_map = {'Bi quan': 0.03, 'Cơ sở': 0.06, 'Tích cực': 0.10}
             fcff_g = growth_map.get(name, 0.06)
-
             pv_explicit = sum(
                 latest_fcff * ((1 + fcff_g) ** t) / ((1 + wacc) ** t)
                 for t in range(1, 6)
             )
-            fcff_y5 = latest_fcff * ((1 + fcff_g) ** 5)
-            terminal_value = fcff_y5 * (1 + g) / (wacc - g)
-            pv_terminal    = terminal_value / ((1 + wacc) ** 5)
+            fcff_y5          = latest_fcff * ((1 + fcff_g) ** 5)
+            terminal_value   = fcff_y5 * (1 + g) / (wacc - g)
+            pv_terminal      = terminal_value / ((1 + wacc) ** 5)
             enterprise_value = pv_explicit + pv_terminal
             equity_value     = enterprise_value - net_debt
             fair_price       = equity_value / shares_outstanding
-
             if fair_price > 0:
-                # Trả về dict có đầy đủ key mà render_tab_dcf cần:
-                # res['value_per_share'], res.get('wacc'), res.get('g')
                 results[name] = {
                     'value_per_share': round(fair_price, 0),
                     'wacc':            wacc,
@@ -157,7 +100,6 @@ def dcf_fcff_scenarios(
                 }
         except Exception:
             continue
-
     return results if results else None
 
 
@@ -173,13 +115,8 @@ def reverse_dcf_implied_growth(
     net_debt: float = 0.0,
     g_terminal: float = 0.03,
 ) -> Optional[float]:
-    """
-    Binary search tìm tốc độ tăng trưởng FCFF ngụ ý bởi giá thị trường hiện tại.
-    Trả về g (float, dạng thập phân) hoặc None.
-    """
     if not all([current_price > 0, shares_outstanding > 0, latest_fcff > 0]):
         return None
-
     target_eq = current_price * shares_outstanding + net_debt
 
     def calc_ev(g_fcff):
@@ -199,8 +136,7 @@ def reverse_dcf_implied_growth(
             lo = mid
         else:
             hi = mid
-    implied_g = (lo + hi) / 2
-    return round(implied_g, 4)
+    return round((lo + hi) / 2, 4)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -208,10 +144,6 @@ def reverse_dcf_implied_growth(
 # ════════════════════════════════════════════════════════════════════════════
 
 def graham_number(eps: float, bvps: float) -> Optional[float]:
-    """
-    √(22.5 × EPS × BVPS). Graham đề xuất mua khi PE×PB ≤ 22.5.
-    Trả về None nếu eps hoặc bvps ≤ 0.
-    """
     if eps and bvps and eps > 0 and bvps > 0:
         return round(math.sqrt(22.5 * eps * bvps), 0)
     return None
@@ -228,26 +160,13 @@ def ddm_gordon(
     ke: Optional[float] = None,
     g: float = 0.04,
 ) -> tuple[Optional[float], Optional[str]]:
-    """
-    DDM Gordon = DPS₀ × (1+g) / (ke - g).
-
-    FIX 1: Không áp dụng DDM cho DN chia cổ tức cổ phiếu (DPS tiền mặt ≈ 0).
-    FIX 2: Kiểm tra payout ratio có ổn định 3 năm gần nhất không.
-    FIX 3: ke lấy từ estimate_wacc nếu không truyền vào.
-
-    Trả về (fair_price, None) hoặc (None, lý_do_từ_chối).
-    """
-    # Lấy DPS gần nhất
     if dps_series is None or dps_series.empty:
         return None, "Không có dữ liệu DPS tiền mặt"
-
     dps_latest = float(dps_series.dropna().iloc[-1]) if not dps_series.dropna().empty else 0.0
     if dps_latest <= 0:
-        return None, "DN không chia cổ tức tiền mặt (DPS = 0) — DDM không áp dụng được. Dùng DCF/PE/PB thay thế."
-
-    # Kiểm tra payout ratio ≥ 10% trong 3 năm gần nhất
+        return None, "DN không chia cổ tức tiền mặt (DPS = 0) — DDM không áp dụng được."
     if net_profit_series is not None and not net_profit_series.empty:
-        recent_np = net_profit_series.dropna().iloc[-3:]
+        recent_np  = net_profit_series.dropna().iloc[-3:]
         recent_dps = dps_series.dropna()
         common = recent_np.index.intersection(recent_dps.index)
         if len(common) >= 2:
@@ -258,24 +177,18 @@ def ddm_gordon(
             )
             if not payout_ok:
                 return None, "Payout ratio < 10% — DDM không đáng tin cậy cho mã này"
-
-    # WACC theo ngành làm ke
     if ke is None:
-        ke = estimate_wacc(ticker) + 0.01   # ke = WACC + 1% risk premium nhỏ
-
+        ke = estimate_wacc(ticker) + 0.01
     if ke <= g:
         return None, f"ke ({ke:.1%}) ≤ g ({g:.1%}) — DDM vô nghĩa"
-
-    fair = round(dps_latest * (1 + g) / (ke - g), 0)
-    return fair, None
+    return round(dps_latest * (1 + g) / (ke - g), 0), None
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# 6. PE / PB MEDIAN — có lọc outlier + điều chỉnh pha loãng
+# 6. PE / PB MEDIAN
 # ════════════════════════════════════════════════════════════════════════════
 
 def _clean_multiples(series: pd.Series, lo: float, hi: float) -> pd.Series:
-    """Loại bỏ outlier ngoài [lo, hi] trước khi tính median."""
     if series is None or series.empty:
         return pd.Series(dtype=float)
     s = pd.to_numeric(series, errors='coerce').dropna()
@@ -290,25 +203,17 @@ def pe_pb_valuation(
     eps_latest: float,
     bvps_latest: float,
 ) -> dict:
-    """
-    FIX: Tính median PE/PB SAU KHI loại outlier (PE < 3 hoặc > 60,
-    PB < 0.3 hoặc > 15) để tránh năm chu kỳ làm lệch kết quả.
-    """
-    results = {}
-
-    pe_clean = _clean_multiples(pe_series, lo=3.0, hi=60.0)
-    pb_clean = _clean_multiples(pb_series, lo=0.3, hi=15.0)
-
+    results  = {}
+    pe_clean = _clean_multiples(pe_series, lo=3.0,  hi=60.0)
+    pb_clean = _clean_multiples(pb_series, lo=0.3,  hi=15.0)
     if not pe_clean.empty and eps_latest > 0:
         median_pe = float(pe_clean.median())
-        results['PE Median 5N'] = round(eps_latest * median_pe, 0)
+        results['PE Median 5N'] = round(eps_latest  * median_pe, 0)
         results['_median_pe']   = round(median_pe, 2)
-
     if not pb_clean.empty and bvps_latest > 0:
         median_pb = float(pb_clean.median())
         results['PB Median 5N'] = round(bvps_latest * median_pb, 0)
         results['_median_pb']   = round(median_pb, 2)
-
     return results
 
 
@@ -316,45 +221,29 @@ def pe_pb_valuation(
 # 7. PEG
 # ════════════════════════════════════════════════════════════════════════════
 
-def peg_valuation(
-    eps_adj: pd.Series,
-    pe_current: float,
-) -> dict:
-    """
-    PEG = PE hiện tại / EPS_CAGR(%).
-    FIX: Dùng EPS đã điều chỉnh pha loãng, không dùng EPS gốc.
-    Không áp dụng cho chu kỳ (EPS tăng trưởng âm hoặc cực biến động).
-    """
+def peg_valuation(eps_adj: pd.Series, pe_current: float) -> dict:
     results = {}
     if eps_adj is None or len(eps_adj.dropna()) < 2:
         return results
-
-    s = eps_adj.dropna().sort_index()
+    s         = eps_adj.dropna().sort_index()
     eps_start = float(s.iloc[0])
     eps_end   = float(s.iloc[-1])
     n_years   = len(s) - 1
-
     if eps_start <= 0 or eps_end <= 0 or n_years < 1:
         return results
-
     eps_growth_pct = ((eps_end / eps_start) ** (1 / n_years) - 1) * 100
-
     if eps_growth_pct <= 0:
         results['_peg_note'] = "EPS tăng trưởng âm — PEG không áp dụng"
         return results
-
-    peg = pe_current / eps_growth_pct if eps_growth_pct > 0 else None
-
-    if peg is not None:
-        results['PEG Fair Value'] = round(eps_end * max(eps_growth_pct, 1), 0)
-        results['_PEG_Ratio']     = round(peg, 2)
-        if peg < 1.0:
-            results['_peg_signal'] = f"PEG {peg:.2f} < 1.0 → Có thể định giá thấp"
-        elif peg < 2.0:
-            results['_peg_signal'] = f"PEG {peg:.2f} ≈ 1-2 → Định giá hợp lý"
-        else:
-            results['_peg_signal'] = f"PEG {peg:.2f} > 2.0 → Có thể định giá cao"
-
+    peg = pe_current / eps_growth_pct
+    results['PEG Fair Value'] = round(eps_end * max(eps_growth_pct, 1), 0)
+    results['_PEG_Ratio']     = round(peg, 2)
+    if peg < 1.0:
+        results['_peg_signal'] = f"PEG {peg:.2f} < 1.0 → Có thể định giá thấp"
+    elif peg < 2.0:
+        results['_peg_signal'] = f"PEG {peg:.2f} ≈ 1-2 → Định giá hợp lý"
+    else:
+        results['_peg_signal'] = f"PEG {peg:.2f} > 2.0 → Có thể định giá cao"
     return results
 
 
@@ -378,24 +267,16 @@ def nine_methods_valuation(
     dps_series: Optional[pd.Series] = None,
     ticker: str = "",
 ) -> dict:
-    """
-    Tổng hợp ≤ 9 phương pháp định giá. Mỗi kết quả là giá/cp đơn vị đồng VN.
-    Trả về dict {tên_phương_pháp: giá} — chỉ chứa giá trị số dương, KHÔNG chứa
-    key nội bộ (metadata _xxx) để tránh lỗi khi render_tab_valuation chia giá.
-    """
-    methods = {}
-
+    methods   = {}
     _eps_use  = eps_adj  if eps_adj  is not None and not eps_adj.empty  else pe_series
     _bvps_use = bvps_adj if bvps_adj is not None and not bvps_adj.empty else pb_series
 
-    # 1–2. PE / PB Median — lọc metadata key ra ngoài
     pe_pb = pe_pb_valuation(
         _eps_use, _bvps_use, pe_series, pb_series, eps_latest, bvps_latest)
     for k, v in pe_pb.items():
         if not k.startswith('_') and isinstance(v, (int, float)) and v > 0:
             methods[k] = v
 
-    # 3. PEG
     pe_current = (current_price / eps_latest) if eps_latest > 0 else 0
     if _eps_use is not None and not _eps_use.empty and pe_current > 0:
         peg = peg_valuation(_eps_use if not _eps_use.empty else pe_series, pe_current)
@@ -403,21 +284,15 @@ def nine_methods_valuation(
             if not k.startswith('_') and isinstance(v, (int, float)) and v > 0:
                 methods[k] = v
 
-    # 4–6. DCF
     if dcf_results:
         for scenario_name, res in dcf_results.items():
-            if isinstance(res, dict):
-                price = res.get('value_per_share')
-            else:
-                price = res
+            price = res.get('value_per_share') if isinstance(res, dict) else res
             if price and isinstance(price, (int, float)) and price > 0:
                 methods[f'DCF {scenario_name}'] = float(price)
 
-    # 7. Graham Number
     if graham_value and isinstance(graham_value, (int, float)) and graham_value > 0:
         methods['Graham Number'] = graham_value
 
-    # 8. DDM
     if ddm_value and isinstance(ddm_value, (int, float)) and ddm_value > 0:
         methods['DDM Gordon'] = ddm_value
 
@@ -429,47 +304,35 @@ def nine_methods_valuation(
 # ════════════════════════════════════════════════════════════════════════════
 
 def summarize_valuation(methods: dict, current_price: float) -> dict:
-    """
-    Tổng hợp các phương pháp định giá. Keys trả về khớp với ui_components.py:
-      median, verdict, upside_median_pct, p25, p75, avg_fair_price, n_methods,
-      price_range_low, price_range_high, methods_used
-    """
     if not methods or current_price <= 0:
         return {}
-
     prices = {k: v for k, v in methods.items()
               if not k.startswith('_') and isinstance(v, (int, float)) and v > 0}
-
     if not prices:
         return {}
-
-    vals = sorted(prices.values())
-    avg_fair = float(np.mean(vals))
-    med_fair = float(np.median(vals))
-    p25      = float(np.percentile(vals, 25))
-    p75      = float(np.percentile(vals, 75))
+    vals       = sorted(prices.values())
+    avg_fair   = float(np.mean(vals))
+    med_fair   = float(np.median(vals))
+    p25        = float(np.percentile(vals, 25))
+    p75        = float(np.percentile(vals, 75))
     upside_pct = (med_fair / current_price - 1) * 100
-
     if upside_pct > 15:
         verdict = "UNDERVALUED"
     elif upside_pct < -10:
         verdict = "OVERVALUED"
     else:
         verdict = "FAIRLY_VALUED"
-
     return {
-        # Keys render_tab_valuation & render_tab_forecast dùng
-        'median':             round(med_fair, 0),
-        'verdict':            verdict,
-        'upside_median_pct':  round(upside_pct, 1),
-        'p25':                round(p25, 0),
-        'p75':                round(p75, 0),
-        # Keys bổ sung
-        'avg_fair_price':     round(avg_fair, 0),
-        'n_methods':          len(prices),
-        'price_range_low':    round(vals[0], 0),
-        'price_range_high':   round(vals[-1], 0),
-        'methods_used':       list(prices.keys()),
+        'median':            round(med_fair, 0),
+        'verdict':           verdict,
+        'upside_median_pct': round(upside_pct, 1),
+        'p25':               round(p25, 0),
+        'p75':               round(p75, 0),
+        'avg_fair_price':    round(avg_fair, 0),
+        'n_methods':         len(prices),
+        'price_range_low':   round(vals[0], 0),
+        'price_range_high':  round(vals[-1], 0),
+        'methods_used':      list(prices.keys()),
     }
 
 
@@ -483,13 +346,6 @@ def dupont_decomposition(
     total_assets_series: pd.Series,
     equity_series: pd.Series,
 ) -> pd.DataFrame:
-    """
-    ROE = Net Margin × Asset Turnover × Equity Multiplier
-        = (LNST/Doanh thu) × (Doanh thu/Tài sản) × (Tài sản/VCSH)
-
-    Trả về DataFrame với index là năm, các cột là 3 thành phần + ROE.
-    Tương thích với mọi ngành: nếu doanh thu = 0 (ngân hàng), bỏ qua năm đó.
-    """
     common = (
         set(revenue_series.dropna().index)      &
         set(net_profit_series.dropna().index)   &
@@ -498,35 +354,29 @@ def dupont_decomposition(
     )
     if not common:
         return pd.DataFrame()
-
     rows = []
     for y in sorted(common):
-        rev  = float(revenue_series.get(y, 0))
-        np_  = float(net_profit_series.get(y, 0))
-        ta   = float(total_assets_series.get(y, 0))
-        eq   = float(equity_series.get(y, 0))
-
+        rev = float(revenue_series.get(y, 0))
+        np_ = float(net_profit_series.get(y, 0))
+        ta  = float(total_assets_series.get(y, 0))
+        eq  = float(equity_series.get(y, 0))
         if ta <= 0 or eq <= 0:
             continue
-
-        net_margin      = (np_ / rev * 100) if rev > 0 else None
-        asset_turnover  = (rev / ta)         if rev > 0 else None
-        equity_mult     = ta / eq
-        roe_dupont      = (np_ / eq * 100)
-
+        net_margin     = (np_ / rev * 100) if rev > 0 else None
+        asset_turnover = (rev / ta)         if rev > 0 else None
+        equity_mult    = ta / eq
+        roe_dupont     = (np_ / eq * 100)
         rows.append({
-            'Năm':             int(y),
-            'net_margin':      round(net_margin / 100, 4)     if net_margin     is not None else None,
-            'asset_turnover':  round(asset_turnover, 4)       if asset_turnover is not None else None,
-            'leverage':        round(equity_mult, 4),
-            'roe_dupont':      round(roe_dupont / 100, 4),
-            # Cột tiếng Việt — dùng cho st.dataframe nếu cần
-            'Biên LN ròng (%)':  round(net_margin, 2)     if net_margin     is not None else None,
-            'Vòng quay TS (x)':  round(asset_turnover, 3) if asset_turnover is not None else None,
+            'Năm':               int(y),
+            'net_margin':        round(net_margin / 100, 4)     if net_margin     is not None else None,
+            'asset_turnover':    round(asset_turnover, 4)       if asset_turnover is not None else None,
+            'leverage':          round(equity_mult, 4),
+            'roe_dupont':        round(roe_dupont / 100, 4),
+            'Biên LN ròng (%)':  round(net_margin, 2)           if net_margin     is not None else None,
+            'Vòng quay TS (x)':  round(asset_turnover, 3)       if asset_turnover is not None else None,
             'Đòn bẩy (x)':       round(equity_mult, 2),
             'ROE DuPont (%)':    round(roe_dupont, 2),
         })
-
     return pd.DataFrame(rows).set_index('Năm') if rows else pd.DataFrame()
 
 
@@ -541,18 +391,12 @@ def dcf_sensitivity_table(
     wacc_range: list = None,
     g_range: list = None,
 ) -> pd.DataFrame:
-    """
-    Ma trận nhạy cảm DCF: hàng = WACC, cột = g tăng trưởng dài hạn.
-    Trả về DataFrame giá/cp (đồng).
-    """
     if wacc_range is None:
         wacc_range = [0.09, 0.095, 0.10, 0.105, 0.11, 0.115, 0.12]
     if g_range is None:
         g_range = [0.02, 0.025, 0.03, 0.035, 0.04]
-
     if not latest_fcff or not shares_outstanding:
         return pd.DataFrame()
-
     rows = {}
     for wacc in wacc_range:
         row = {}
@@ -569,15 +413,12 @@ def dcf_sensitivity_table(
             except Exception:
                 row[f'g={g:.1%}'] = None
         rows[f'WACC={wacc:.1%}'] = row
-
     return pd.DataFrame(rows).T
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# 12. RE-EXPORT WACC cho pipeline.py import
+# 12. WACC ENGINE
 # ════════════════════════════════════════════════════════════════════════════
-# pipeline.py import: from valuation import ... estimate_wacc, wacc_scenarios
-# → cần export 2 hàm này từ file này luôn (sector_wacc đã merge vào đây)
 
 TICKER_SECTOR_MAP = {
     'VCB':'bank','BID':'bank','CTG':'bank','TCB':'bank','MBB':'bank',
@@ -616,12 +457,12 @@ def detect_sector(ticker: str, industry_text: str = "") -> str:
         return TICKER_SECTOR_MAP[t]
     text = (industry_text or "").lower()
     rules = [
-        (['ngân hàng','bank'],'bank'),
-        (['thép','steel','khoáng sản','luyện kim'],'steel'),
-        (['bất động sản','real estate','xây dựng'],'real_estate'),
-        (['bán lẻ','retail','thực phẩm','tiêu dùng'],'retail'),
-        (['công nghệ','technology','viễn thông','phần mềm'],'tech'),
-        (['dầu khí','oil','gas','hoá chất','xăng dầu'],'oil_gas'),
+        (['ngân hàng','bank'],                          'bank'),
+        (['thép','steel','khoáng sản','luyện kim'],     'steel'),
+        (['bất động sản','real estate','xây dựng'],     'real_estate'),
+        (['bán lẻ','retail','thực phẩm','tiêu dùng'],   'retail'),
+        (['công nghệ','technology','viễn thông'],        'tech'),
+        (['dầu khí','oil','gas','hoá chất','xăng dầu'], 'oil_gas'),
         (['hàng không','aviation','vận tải','logistics'],'aviation'),
     ]
     for kws, sector in rules:
@@ -629,15 +470,17 @@ def detect_sector(ticker: str, industry_text: str = "") -> str:
             return sector
     return 'default'
 
+
 def estimate_wacc(ticker: str, industry_text: str = "") -> float:
-    ticker = (ticker or "").upper().strip()
-    sector = detect_sector(ticker, industry_text)
-    row = SECTOR_WACC_TABLE.get(sector, SECTOR_WACC_TABLE['default'])
+    ticker   = (ticker or "").upper().strip()
+    sector   = detect_sector(ticker, industry_text)
+    row      = SECTOR_WACC_TABLE.get(sector, SECTOR_WACC_TABLE['default'])
     wacc_low, wacc_high, beta_mid = row['wacc_low'], row['wacc_high'], row['beta_mid']
     wacc_mid = (wacc_low + wacc_high) / 2
-    beta = TICKER_BETA_MAP.get(ticker, beta_mid)
+    beta     = TICKER_BETA_MAP.get(ticker, beta_mid)
     wacc_adj = wacc_mid + (beta - beta_mid) * 0.02
     return round(max(wacc_low - 0.01, min(wacc_high + 0.01, wacc_adj)), 4)
+
 
 def wacc_scenarios(base_wacc: float) -> dict:
     return {
