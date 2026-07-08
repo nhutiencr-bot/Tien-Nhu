@@ -469,7 +469,10 @@ def execute_equity_research_pipeline(ticker):
 
         dps_series = fin5.get('dps', pd.Series(dtype=float))
         dps_latest = get_latest(dps_series, default=0.0) if not dps_series.empty else 0.0
-        ddm_value  = ddm_gordon(dps_latest) if dps_latest > 0 else None
+        ddm_value, ddm_reason = (
+            ddm_gordon(dps_series, net_profit_series, ticker=ticker)
+            if dps_latest > 0 else (None, None)
+        )
 
         valuation_methods = nine_methods_valuation(
             eps_latest=eps_latest,
