@@ -53,10 +53,10 @@ def _cached_format_table(df_json):
 
 def render_kpi_cards(metrics, fundamentals):
     kpi1, kpi2, kpi3, kpi4, kpi5, kpi6 = st.columns(6)
-    kpi1.metric("Thị Giá Hiện Tại", f"{metrics['current_price']:,.0f} đ")
-    kpi2.metric("Vốn Hóa", format_market_cap_billion(metrics['market_cap_billion']))
-    kpi3.metric("P/E (TTM)", f"{metrics['pe']:.2f} x")
-    kpi4.metric("P/B (TTM)", f"{metrics['pb']:.2f} x")
+    kpi1.metric("Thị Giá Hiện Tại", f"{metrics.get('current_price', 0) or 0:,.0f} đ")
+    kpi2.metric("Vốn Hóa", format_market_cap_billion(metrics.get('market_cap_billion', 0) or 0))
+    kpi3.metric("P/E (TTM)", f"{metrics.get('pe', 0) or 0:.2f} x")
+    kpi4.metric("P/B (TTM)", f"{metrics.get('pb', 0) or 0:.2f} x")
     kpi5.metric("ROE Gần Nhất", fmt(fundamentals['roe_latest'], suffix="%"))
     kpi6.metric("CAGR LNST 5N", fmt(fundamentals['net_profit_cagr_pct'], suffix="%"))
 
@@ -129,83 +129,60 @@ def render_tab_kqkd(df_5y_table, fundamentals, period_col='Năm'):
     indicator_cols = [c for c in df_5y_table.columns if c != period_col]
     periods = df_5y_table[period_col].tolist()
 
-    # ── Hàm tính CAGR dùng NĂM THỰC (periods) không phải index vị trí ──────
-    # Bug cũ: dùng enumerate index → nếu thiếu 2021, CAGR tính trên 3 năm
-    # (2022→2025) thay vì đúng 4 năm (2021→2025).
-    # Fix: zip(periods, vals) → lấy năm/quý thực, tính n_years từ năm thực.
-
-    def _calc_cagr(period_val_pairs, n_periods_per_year=1):
+    def _calc_cagr(series_vals, n_periods_per_year=1):
         """
-        CAGR compound dùng NĂM THỰC từ cột periods.
-        period_val_pairs: list of (period, value) — period là năm int hoặc str quý.
-        n_periods_per_year: 1 cho năm, 4 cho quý.
-
-        Ví dụ đúng:
-          [(2021, 53246), (2022, 53621), (2023, 53621), (2024, 55406), (2025, 58771)]
-          → CAGR = (58771/53246)^(1/4) - 1  [4 năm từ 2021→2025]
+        CAGR compound giữa điểm đầu và cuối có giá trị hợp lệ.
+        Trả về None nếu < 2 điểm dữ liệu hoặc giá trị âm (không có nghĩa).
         """
-        valid = [(p, v) for p, v in period_val_pairs
-                 if pd.notnull(v) and v not in (0, None, "—", "")]
+        valid = [(i, v) for i, v in enumerate(series_vals)
+                 if pd.notnull(v) and v != 0]
         if len(valid) < 2:
             return None
-        (p0, v0), (p1, v1) = valid[0], valid[-1]
-        # Tính số năm thực từ period label
-        try:
-            if isinstance(p0, (int, float)):
-                n_years = (float(p1) - float(p0)) / n_periods_per_year
-            elif '-Q' in str(p0):
-                # Dạng "2021-Q1" → lấy năm
-                y0 = int(str(p0).split('-Q')[0])
-                q0 = int(str(p0).split('-Q')[1])
-                y1 = int(str(p1).split('-Q')[0])
-                q1 = int(str(p1).split('-Q')[1])
-                n_quarters = (y1 - y0) * 4 + (q1 - q0)
-                n_years = n_quarters / 4
-            else:
-                n_years = (len(valid) - 1) / n_periods_per_year
-        except Exception:
-            n_years = (len(valid) - 1) / n_periods_per_year
-
-        if n_years <= 0 or float(v0) <= 0 or float(v1) <= 0:
+        (i0, v0), (i1, v1) = valid[0], valid[-1]
+        n_periods = i1 - i0
+        if n_periods <= 0:
+            return None
+        n_years = n_periods / n_periods_per_year
+        if v0 <= 0 or v1 <= 0 or n_years <= 0:
             return None
         try:
-            return ((float(v1) / float(v0)) ** (1.0 / n_years) - 1) * 100
+            return ((v1 / v0) ** (1 / n_years) - 1) * 100
         except Exception:
             return None
 
-    def _calc_delta_pp(period_val_pairs):
+    def _calc_delta_pp(series_vals):
         """
-        Δpp = cuối - đầu (dùng cho ROE/ROA).
-        Dùng year thực: nếu 2021 bị thiếu, lấy năm đầu tiên có data.
+        Thay đổi điểm phần trăm tuyệt đối (pp) giữa kỳ đầu và kỳ cuối.
+        Dùng cho ROE/ROA vì CAGR compound trên tỷ lệ % gây hiểu nhầm.
+        VD: ROE 29.66% → 26.64% = -3.02 pp (không phải -2.65% CAGR).
         """
-        valid = [(p, v) for p, v in period_val_pairs
-                 if pd.notnull(v) and v not in (0, None, "—", "")]
+        valid = [v for v in series_vals if pd.notnull(v) and v != 0]
         if len(valid) < 2:
             return None
-        return float(valid[-1][1]) - float(valid[0][1])
+        return valid[-1] - valid[0]  # Δpp = cuối - đầu
 
     n_per_year = 4 if period_col == 'Quý' else 1
 
     def _is_pct_ratio(col_name: str) -> bool:
         """ROE/ROA là tỷ lệ % — dùng Δpp thay CAGR compound."""
         lower = col_name.lower()
-        return 'roe' in lower or 'roa' in lower
+        return ('roe' in lower or 'roa' in lower)
 
-    def _sparkline(vals_only):
-        """Mini-bar Unicode + mũi tên xu hướng."""
+    def _sparkline(series_vals):
+        """Mini-bar Unicode thể hiện xu hướng."""
         bars = "▁▂▃▄▅▆▇█"
-        valid_vals = [float(v) for v in vals_only if pd.notnull(v) and v not in ("—", "", None)]
+        valid_vals = [v for v in series_vals if pd.notnull(v)]
         if len(valid_vals) < 2:
             return "—"
         lo, hi = min(valid_vals), max(valid_vals)
         rng = (hi - lo) if hi != lo else 1
         out = []
-        for v in vals_only:
-            if not pd.notnull(v) or v in ("—", "", None):
+        for v in series_vals:
+            if pd.isnull(v):
                 out.append(" ")
             else:
-                idx = int((float(v) - lo) / rng * (len(bars) - 1))
-                out.append(bars[max(0, min(idx, len(bars)-1))])
+                idx = int((v - lo) / rng * (len(bars) - 1))
+                out.append(bars[idx])
         trend_up = valid_vals[-1] >= valid_vals[0]
         arrow = "🟢▲" if trend_up else "🔴▼"
         return f"{''.join(out)} {arrow}"
@@ -217,25 +194,22 @@ def render_tab_kqkd(df_5y_table, fundamentals, period_col='Năm'):
 
         # Giá trị từng kỳ
         for p, v in zip(periods, vals):
-            row[p] = "—" if (v is None or (isinstance(v, float) and pd.isnull(v))) \
-                     else "{:,.2f}".format(float(v))
+            row[p] = "—" if pd.isnull(v) else "{:,.2f}".format(float(v))
 
-        # Tạo pairs (period, value) để tính CAGR dùng năm thực
-        pv_pairs = [(p, v) for p, v in zip(periods, vals)
-                    if v is not None and not (isinstance(v, float) and pd.isnull(v))]
-
-        # ── CAGR / Δpp ──────────────────────────────────────────────────────
+        # ── CAGR / Δpp ──────────────────────────────────────────────
+        # FIX CHÍNH: trước đây toàn bộ cột có "%" → hardcode "—"
+        # Giờ:
+        #   ROE/ROA → Δpp (thay đổi điểm phần trăm tuyệt đối, suffix " pp")
+        #   Còn lại → CAGR compound bình thường (suffix "%")
         if _is_pct_ratio(col):
-            # ROE/ROA: dùng Δpp tuyệt đối
-            delta = _calc_delta_pp(pv_pairs)
+            delta = _calc_delta_pp(vals)
             if delta is not None:
                 sign = "+" if delta >= 0 else ""
                 row["CAGR / Δpp"] = f"{sign}{delta:.2f} pp"
             else:
                 row["CAGR / Δpp"] = "—"
         else:
-            # Tất cả các chỉ tiêu khác: CAGR compound dùng năm thực
-            cagr_val = _calc_cagr(pv_pairs, n_periods_per_year=n_per_year)
+            cagr_val = _calc_cagr(vals, n_periods_per_year=n_per_year)
             row["CAGR / Δpp"] = fmt(cagr_val, suffix="%") if cagr_val is not None else "—"
 
         row["Tăng trưởng"] = _sparkline(vals)
@@ -276,18 +250,24 @@ def render_tab_valuation(valuation_pkg, metrics):
               delta=f"{summary['upside_median_pct']:+.1f}%")
 
     if methods:
+        # Lọc bỏ key nội bộ (bắt đầu bằng _) — chỉ giữ giá trị là số dương
+        display_methods = {
+            k: float(v) for k, v in methods.items()
+            if not k.startswith('_') and isinstance(v, (int, float)) and v > 0
+        }
+        cp = metrics.get('current_price') or 0
         st.markdown("#### Các Kịch Bản Định Giá")
-        cols = st.columns(min(len(methods), 4) or 1)
-        for i, (name, value) in enumerate(methods.items()):
-            pct = (value / metrics['current_price'] - 1) * 100 if metrics['current_price'] else 0
+        cols = st.columns(min(len(display_methods), 4) or 1)
+        for i, (name, value) in enumerate(display_methods.items()):
+            pct = ((value / cp) - 1) * 100 if cp else 0
             cols[i % len(cols)].metric(name, f"{value:,.0f} đ", delta=f"{pct:+.1f}%")
 
         fig = go.Figure()
-        names, values = list(methods.keys()), list(methods.values())
-        colors = ['#10d98a' if v >= metrics['current_price'] else '#ff4d6d' for v in values]
+        names, values = list(display_methods.keys()), list(display_methods.values())
+        colors = ['#10d98a' if v >= cp else '#ff4d6d' for v in values]
         fig.add_trace(go.Bar(x=names, y=values, marker_color=colors))
-        fig.add_hline(y=metrics['current_price'], line_dash='dash', line_color='#fbbf24',
-                      annotation_text=f"Giá hiện tại {metrics['current_price']:,.0f}đ")
+        fig.add_hline(y=cp, line_dash='dash', line_color='#fbbf24',
+                      annotation_text=f"Giá hiện tại {cp:,.0f}đ")
         fig.update_layout(template='plotly_dark',
                           paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
                           margin=dict(t=20, b=20))
@@ -544,7 +524,7 @@ def render_tab_technical(df_price, tech, metrics):
     v2.metric("KL TB 20 Ngày",    f"{tech['avg_volume_20d']:,.0f} CP")
     v3.metric("So Với TB",        f"{tech['volume_vs_avg_pct']:+.1f}%",
               delta=f"{tech['volume_vs_avg_pct']:+.1f}%")
-    st.caption(f"CP Lưu Hành: **{metrics['issue_share_million']:,.1f} Tr CP**")
+    st.caption(f"CP Lưu Hành: **{metrics.get('issue_share_million', 0) or 0:,.1f} Tr CP**")
 
     if tech.get('oil_correlation', 0.0) != 0.0:
         st.warning(f"🛢️ Tương quan giá dầu: **{tech['oil_correlation']:.2f}** — mã nhạy cảm với biến động dầu thô WTI.")
