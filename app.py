@@ -67,10 +67,13 @@ if pipeline_output is None:
     st.error(f"Không thể tải dữ liệu cho mã {ticker_input}. Vui lòng thử mã khác.")
     st.stop()
 
-# Dòng 70-72: unpack đúng 10 giá trị (bỏ df_quarter_table)
-(df_price_clean, df_5y_table, df_balance_table,
+# Unpack đúng 10 giá trị từ pipeline (df_quarter_table nằm ở vị trí thứ 3)
+(df_price_clean, df_5y_table, df_quarter_table, df_balance_table,
  metrics, tech, news_cards, fundamentals, df_dupont,
- valuation_pkg, reports_pkg) = pipeline_output
+ valuation_pkg) = pipeline_output
+
+# reports_pkg là optional — lấy từ valuation_pkg nếu pipeline không trả riêng
+reports_pkg = {}
 
 # --- Header ---
 st.markdown(f"## Báo Cáo Định Giá Toàn Diện: {ticker_input}")
@@ -98,9 +101,18 @@ render_kpi_cards(metrics, fundamentals)
 
 # ── Tab 1: KQKD ──────────────────────────────────────────────────────────────
 with tab_kqkd:
+    # Toggle Năm / Quý
+    view_mode = st.radio(
+        "Chế độ xem:", ["📅 Theo Năm", "📆 Theo Quý"],
+        horizontal=True, label_visibility="collapsed",
+    )
+    if view_mode == "📅 Theo Năm":
         render_tab_kqkd(df_5y_table, fundamentals, period_col="Năm")
     else:
-        render_tab_kqkd(df_quarter_table, fundamentals, period_col="Quý")
+        if df_quarter_table is not None and not df_quarter_table.empty:
+            render_tab_kqkd(df_quarter_table, fundamentals, period_col="Quý")
+        else:
+            st.info("Chưa có dữ liệu theo quý cho mã này.")
 
 # ── Tab 2: Định giá PE/PB ─────────────────────────────────────────────────────
 with tab_valuation:
@@ -108,7 +120,6 @@ with tab_valuation:
 
 # ── Tab 3: Multiples Mở Rộng — CARD UI ĐẸP ──────────────────────────────────
 with tab_multiples:
-    # Cảnh báo pha loãng nếu có
     dilution_years = valuation_pkg.get('dilution_years', [])
     if dilution_years:
         st.warning(
@@ -127,7 +138,6 @@ with tab_multiples:
     if ddm_note:
         st.info(f"ℹ️ **DDM:** {ddm_note}")
 
-    # Render card UI đẹp (thay toàn bộ code cũ)
     render_tab_multiples(metrics, fundamentals, valuation_pkg)
 
 # ── Tab 4: DCF & Graham ───────────────────────────────────────────────────────
@@ -158,7 +168,6 @@ with tab_insights:
             f"🛢️ Tương quan giá dầu: **{tech['oil_correlation']:.2f}** "
             "— mã nhạy cảm với biến động dầu thô WTI."
         )
-    # Báo cáo CafeF nếu pipeline có
     reports_inline = reports_pkg.get("reports", []) if reports_pkg else []
     if reports_inline:
         st.markdown("---")
