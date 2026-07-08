@@ -14,8 +14,8 @@ from financial_normalizer import (
 from valuation import (
     dupont_decomposition, dcf_fcff_scenarios, reverse_dcf_implied_growth,
     graham_number, ddm_gordon, nine_methods_valuation, summarize_valuation,
-    estimate_wacc, detect_sector,
 )
+from sector_wacc import estimate_wacc, detect_sector, wacc_scenarios
 from cafef_fallback import fetch_cafef_balance_sheet_5y, fetch_cafef_yearly_full
 
 SOURCE_FALLBACK_ORDER = ['VCI', 'KBS', 'DNSE']
@@ -449,19 +449,21 @@ def execute_equity_research_pipeline(ticker):
             if cfo_l is not None:
                 latest_fcff = (cfo_l - abs(capex_l)) * 1e9
 
+        wacc_base = estimate_wacc(ticker)
+
         dcf_results = reverse_g = None
         if latest_fcff and latest_fcff > 0 and issue_share > 0:
             dcf_results = dcf_fcff_scenarios(
                 latest_fcff=latest_fcff,
                 shares_outstanding=issue_share,
                 net_debt=0.0,
-                ticker=ticker,
+                scenarios=wacc_scenarios(wacc_base),
             )
             reverse_g = reverse_dcf_implied_growth(
                 current_price=current_price,
                 shares_outstanding=issue_share,
                 latest_fcff=latest_fcff,
-                wacc=estimate_wacc(ticker),
+                wacc=wacc_base,
                 net_debt=0.0,
             )
 
@@ -469,10 +471,7 @@ def execute_equity_research_pipeline(ticker):
 
         dps_series = fin5.get('dps', pd.Series(dtype=float))
         dps_latest = get_latest(dps_series, default=0.0) if not dps_series.empty else 0.0
-        ddm_value, ddm_reason = (
-            ddm_gordon(dps_series, net_profit_series, ticker=ticker)
-            if dps_latest > 0 else (None, None)
-        )
+        ddm_value = ddm_gordon(dps_latest, required_return=wacc_base + 0.01) if dps_latest > 0 else None
 
         valuation_methods = nine_methods_valuation(
             eps_latest=eps_latest,
@@ -487,7 +486,6 @@ def execute_equity_research_pipeline(ticker):
         valuation_summary = summarize_valuation(valuation_methods, current_price) if valuation_methods else None
 
         sector_detected = detect_sector(ticker)
-        wacc_base       = estimate_wacc(ticker)
 
         valuation_package = {
             "methods":           valuation_methods,
