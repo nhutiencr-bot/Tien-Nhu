@@ -509,6 +509,55 @@ SECTOR_WACC_TABLE = {
 }
 
 def detect_sector(ticker: str, industry_text: str = "") -> str:
-    t = (ticker or "").upper().strip()
-    if t in TICKER_SECTOR_MAP:
-        return
+    """Nhận diện nhóm ngành từ mã CP (ưu tiên) hoặc chuỗi 'industry' của
+    vnstock overview (dò từ khoá tiếng Việt, fallback khi mã không có
+    trong TICKER_SECTOR_MAP)."""
+    ticker = (ticker or "").upper().strip()
+    if ticker in TICKER_SECTOR_MAP:
+        return TICKER_SECTOR_MAP[ticker]
+
+    text = (industry_text or "").lower()
+    keyword_rules = [
+        (['ngân hàng', 'bank'], 'bank'),
+        (['thép', 'steel', 'khoáng sản', 'luyện kim'], 'steel'),
+        (['bất động sản', 'real estate', 'xây dựng'], 'real_estate'),
+        (['bán lẻ', 'retail', 'thực phẩm', 'tiêu dùng', 'hàng tiêu dùng'], 'retail'),
+        (['công nghệ', 'technology', 'viễn thông', 'phần mềm'], 'tech'),
+        (['dầu khí', 'oil', 'gas', 'hoá chất', 'hóa chất', 'xăng dầu'], 'oil_gas'),
+        (['hàng không', 'aviation', 'vận tải', 'logistics', 'cảng'], 'aviation'),
+    ]
+    for keywords, sector in keyword_rules:
+        if any(kw in text for kw in keywords):
+            return sector
+    return 'default'
+
+
+def estimate_wacc(ticker: str, industry_text: str = "") -> float:
+    """
+    WACC ≈ trung điểm dải ngành, tinh chỉnh theo beta cụ thể của mã
+    (nếu có trong TICKER_BETA_MAP), theo quy tắc rule-of-thumb:
+        wacc_adjusted = wacc_mid + (beta - beta_mid_sector) * 0.02
+    Kẹp trong khoảng [wacc_low - 1%, wacc_high + 1%] để tránh outlier.
+    """
+    ticker = (ticker or "").upper().strip()
+    sector = detect_sector(ticker, industry_text)
+    row = SECTOR_WACC_TABLE.get(sector, SECTOR_WACC_TABLE['default'])
+    wacc_low, wacc_high, beta_mid = row['wacc_low'], row['wacc_high'], row['beta_mid']
+    wacc_mid = (wacc_low + wacc_high) / 2
+
+    beta = TICKER_BETA_MAP.get(ticker, beta_mid)
+    wacc_adjusted = wacc_mid + (beta - beta_mid) * 0.02
+
+    lower_bound, upper_bound = wacc_low - 0.01, wacc_high + 0.01
+    wacc_adjusted = max(lower_bound, min(upper_bound, wacc_adjusted))
+    return round(wacc_adjusted, 4)
+
+
+def wacc_scenarios(base_wacc: float) -> dict:
+    """3 kịch bản WACC quanh mức cơ sở theo ngành (Bi quan/Cơ sở/Tích cực),
+    thay vì dùng 10%/10.5%/11% cố định cho mọi mã."""
+    return {
+        'Bi quan':  {'wacc': round(base_wacc + 0.005, 4), 'g': 0.02},
+        'Cơ sở':    {'wacc': round(base_wacc, 4),          'g': 0.03},
+        'Tích cực': {'wacc': round(base_wacc - 0.005, 4), 'g': 0.035},
+    }
