@@ -48,9 +48,6 @@ def _cafef_is_reachable() -> bool:
     if _REACHABLE_CACHE["value"] is not None and (now - _REACHABLE_CACHE["ts"]) < _REACHABLE_CACHE_TTL:
         return _REACHABLE_CACHE["value"]
     try:
-        # Probe URL dữ liệu thật (không phải homepage — homepage có thể block,
-        # nhưng URL báo cáo cụ thể vẫn accessible từ Streamlit Cloud).
-        # Chấp nhận bất kỳ response < 500 = server đang hoạt động.
         resp = _SESSION.get(
             "https://s.cafef.vn/bao-cao-tai-chinh/VNM/bsheet/2024/4/0/0/vnm.chn",
             timeout=REQUEST_TIMEOUT)
@@ -143,10 +140,8 @@ def _fetch_one_period(ticker: str, year: int, quarter: int, slug: str) -> dict:
             _extract_row_values(text_bs, r'TỔNG TÀI SẢN') or
             _extract_row_values(text_bs, r'Tổng cộng tài sản')
         )
-        # Lấy phần tử cuối (thường là năm hiện tại trong bảng dọc)
-        # Giá trị 0 = lỗi extract, không lưu
         if eq_vals and eq_vals[-1] not in (None, 0.0, 0):
-            out['equity'] = round(eq_vals[-1] / 1_000, 2)      # triệu → tỷ
+            out['equity'] = round(eq_vals[-1] / 1_000, 2)
         if ta_vals and ta_vals[-1] not in (None, 0.0, 0):
             out['total_assets'] = round(ta_vals[-1] / 1_000, 2)
 
@@ -201,7 +196,6 @@ def fetch_cafef_balance_sheet_5y(
     if years is None:
         if end_year is None:
             import datetime; end_year = datetime.date.today().year
-        # Cố định 2021-2025 — không dùng range động để tránh bỏ sót 2021
         years = list(range(2021, end_year))
 
     slug = _find_company_slug(ticker)
@@ -250,7 +244,7 @@ def fetch_cafef_yearly_full(
     if years is None:
         import datetime
         cur = datetime.date.today().year
-        years = list(range(2021, cur))   # 2021 đến năm hiện tại (không bao gồm)
+        years = list(range(2021, cur))
 
     slug = _find_company_slug(ticker)
     eq_dict, ta_dict, rev_dict, np_dict = {}, {}, {}, {}
@@ -306,3 +300,8 @@ def fetch_cafef_analysis_reports(ticker: str, page_size: int = 10) -> list:
     except Exception:
         pass
     return out
+
+
+# ── Alias ─────────────────────────────────────────────────────────────────────
+# pipeline.py import fetch_cafef_income_5y — trỏ thẳng vào fetch_cafef_yearly_full
+fetch_cafef_income_5y = fetch_cafef_yearly_full
