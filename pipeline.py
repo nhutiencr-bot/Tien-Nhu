@@ -115,7 +115,19 @@ def _merge_financial_dataframes(dfs: list):
     if len(dfs) == 1:
         return dfs[0]
     try:
-        combined = pd.concat(dfs, axis=0, ignore_index=True, sort=False)
+        # Chuẩn hoá tên cột về string TRƯỚC khi concat — tránh trường hợp
+        # 1 nguồn dùng cột năm kiểu int (2022) còn nguồn khác dùng kiểu
+        # str ('2022'), khiến pandas coi đây là 2 cột KHÁC NHAU thay vì
+        # cùng 1 cột năm, gây lẫn lộn kiểu dữ liệu khi gộp.
+        dfs_normalized = []
+        for d in dfs:
+            d2 = d.copy()
+            d2.columns = [str(c) for c in d2.columns]
+            dfs_normalized.append(d2)
+        combined = pd.concat(dfs_normalized, axis=0, ignore_index=True, sort=False)
+        # Loại bỏ cột trùng tên (giữ cột xuất hiện đầu tiên) — phòng ngừa
+        # thêm 1 lớp nữa nếu vẫn có cột trùng nhãn sau khi đã chuẩn hoá.
+        combined = combined.loc[:, ~combined.columns.duplicated()]
         return combined
     except Exception:
         # Nếu concat lỗi vì cấu trúc cột quá khác nhau giữa các nguồn,
