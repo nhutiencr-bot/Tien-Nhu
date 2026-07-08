@@ -466,6 +466,32 @@ def execute_equity_research_pipeline(ticker):
                     and has_np and has_ta and total_assets_series[y] != 0:
                 roa_series_filled[y] = net_profit_series[y] / total_assets_series[y] * 100
 
+        # ── Bảng KQKD theo Quý ───────────────────────────────────────────
+        try:
+            fin_q = build_5y_financial_table(df_income_q, df_balance_q, df_ratio_q, ticker=ticker)
+            rev_q = normalize_to_billion_vnd(fin_q['revenue'])
+            np_q  = normalize_net_profit_with_anchor(fin_q['net_profit'], normalize_to_billion_vnd(fin_q['equity']), fin_q['roe'])
+            eq_q  = normalize_to_billion_vnd(fin_q['equity'])
+            ta_q  = normalize_to_billion_vnd(fin_q['total_assets'])
+            eps_q = fin_q['eps']
+            bvps_q = fin_q['bvps']
+            roe_q = fin_q['roe']
+            roa_q = fin_q['roa']
+            quarters_available = sorted(
+                set(rev_q.index) | set(np_q.index) | set(eq_q.index) | set(ta_q.index)
+            )
+            df_quarter_table = pd.DataFrame({'Quý': quarters_available})
+            df_quarter_table['Doanh thu thuần (tỷ)'] = df_quarter_table['Quý'].map(rev_q)
+            df_quarter_table['LNST (tỷ)']            = df_quarter_table['Quý'].map(np_q)
+            df_quarter_table['Vốn CSH (tỷ)']         = df_quarter_table['Quý'].map(eq_q)
+            df_quarter_table['Tổng tài sản (tỷ)']    = df_quarter_table['Quý'].map(ta_q)
+            df_quarter_table['EPS (đ)']               = df_quarter_table['Quý'].map(eps_q)
+            df_quarter_table['BVPS (đ)']              = df_quarter_table['Quý'].map(bvps_q)
+            df_quarter_table['ROE (%)'] = df_quarter_table['Quý'].map(lambda y: roe_q.get(y, None) if hasattr(roe_q, 'get') else None)
+            df_quarter_table['ROA (%)'] = df_quarter_table['Quý'].map(lambda y: roa_q.get(y, None) if hasattr(roa_q, 'get') else None)
+        except Exception:
+            df_quarter_table = pd.DataFrame()
+
         df_5y_table = pd.DataFrame({'Năm': years_available})
         df_5y_table['Doanh thu thuần (tỷ)'] = df_5y_table['Năm'].map(revenue_series)
         df_5y_table['LNST (tỷ)']            = df_5y_table['Năm'].map(net_profit_series)
@@ -612,7 +638,7 @@ def execute_equity_research_pipeline(ticker):
         reports_pkg = None
 
         return (
-            df_price, df_5y_table, df_balance,
+            df_price, df_5y_table, df_quarter_table, df_balance,
             clean_metrics, technical_summary,
             news_list, fundamentals_summary, df_dupont, valuation_package,
             reports_pkg,
