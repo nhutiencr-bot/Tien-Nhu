@@ -566,6 +566,7 @@ def execute_equity_research_pipeline(ticker):
             df_price, df_5y_table, df_quarter_table, df_balance,
             clean_metrics, technical_summary,
             news_list, fundamentals_summary, df_dupont, valuation_package,
+            None,  # reports_pkg placeholder — báo cáo phân tích được tab_report tự fetch riêng qua TCBS API, không qua pipeline
         )
 
     except Exception as e:
