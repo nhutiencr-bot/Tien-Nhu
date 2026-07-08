@@ -16,7 +16,7 @@ from valuation import (
     graham_number, ddm_gordon, nine_methods_valuation, summarize_valuation,
     detect_stock_dividend_years, normalize_eps_bvps_series, estimate_wacc,
 )
-from cafef_fallback import fetch_cafef_balance_sheet_5y
+from cafef_fallback import fetch_cafef_balance_sheet_5y, fetch_cafef_yearly_full
 
 # Thử KBS trước (hoạt động ổn định qua mọi lần test) — VCI hay fail/timeout,
 # đưa lên đầu gây chờ vô ích trước khi fallback. Đây là fix tốc độ chính.
@@ -299,23 +299,40 @@ def execute_equity_research_pipeline(ticker):
             if total_assets_series.empty and not cafef_data['total_assets'].empty:
                 total_assets_series = cafef_data['total_assets']
 
-        # ── Kiểm tra còn thiếu năm nào không (chỉ để cảnh báo — KHÔNG còn
-        # dùng CafeF để bù nữa) ─────────────────────────────────────────────
-        # Trước đây dùng fetch_cafef_yearly_full() để bù năm thiếu, nhưng
-        # việc cào CafeF không ổn định (đã xác nhận sai với nhiều loại mã
-        # khác nhau: ngân hàng, CTCK, vận tải...). Thay vào đó, 3 nguồn
-        # vnstock (VCI/KBS/DNSE) giờ đã tự backup lẫn nhau NGAY Ở TẦNG FETCH
-        # (xem _fetch_income_statement/_fetch_ratio/_fetch_cashflow/
-        # _fetch_balance_sheet — gọi cả 3 nguồn rồi merge cột năm), nên
-        # revenue_series/net_profit_series/equity_series/total_assets_series
-        # ở đây ĐÃ bao gồm dữ liệu ghép từ cả 3 nguồn, không cần bù thêm.
+        # ── Bù năm còn thiếu từ CafeF (nguồn độc lập, không phụ thuộc vnstock) ─
+        # 3 nguồn VCI/KBS/DNSE đã được merge ở tầng fetch, nhưng một số mã
+        # (VD TPB 2021) thực sự không có trong API vnstock → CafeF là nguồn
+        # duy nhất có thể bù được. Dùng intersection (AND) để chỉ trigger khi
+        # CẢ revenue lẫn net_profit đều thiếu năm đó — tránh skip khi chỉ
+        # equity đã có (bug cũ dùng union/OR).
         _current_year_check = datetime.today().year
-        _expected_years = set(range(_current_year_check - DEFAULT_YEAR_LIMIT, _current_year_check))
-        _years_have = (set(revenue_series.index) | set(net_profit_series.index)
-                       | set(equity_series.index) | set(total_assets_series.index))
-        _missing_years = sorted(_expected_years - _years_have)
+        _expected_years = set(range(2021, _current_year_check))
+        _years_have_income = set(revenue_series.index) & set(net_profit_series.index)
+        _missing_years = sorted(_expected_years - _years_have_income)
         if _missing_years:
-            st.warning(f"⚠️ {ticker}: cả 3 nguồn VCI/KBS/DNSE đều không có dữ liệu năm {_missing_years}.")
+            try:
+                cafef_full = fetch_cafef_yearly_full(ticker, years=_missing_years)
+                def _fill(target, source_series):
+                    if source_series is None or source_series.empty:
+                        return target
+                    result = target.copy() if not target.empty else pd.Series(dtype=float)
+                    for yr, val in source_series.items():
+                        if val and not pd.isna(val) and val != 0 and yr not in result.index:
+                            result[yr] = val
+                    return result.sort_index()
+                revenue_series     = _fill(revenue_series,     cafef_full.get('revenue'))
+                net_profit_series  = _fill(net_profit_series,  cafef_full.get('net_profit'))
+                equity_series      = _fill(equity_series,      cafef_full.get('equity'))
+                total_assets_series= _fill(total_assets_series,cafef_full.get('total_assets'))
+            except Exception as _e:
+                pass  # CafeF không accessible, tiếp tục với dữ liệu hiện có
+
+        # Cảnh báo nếu vẫn còn thiếu sau khi đã bù từ cả CafeF
+        _years_have_final = (set(revenue_series.index) | set(net_profit_series.index)
+                             | set(equity_series.index) | set(total_assets_series.index))
+        _still_missing = sorted(_expected_years - _years_have_final)
+        if _still_missing:
+            st.warning(f"⚠️ {ticker}: cả 3 nguồn VCI/KBS/DNSE đều không có dữ liệu năm {_still_missing}.")
 
         market_cap_series_raw = fin5.get('market_cap', pd.Series(dtype=float))
         market_cap_direct = get_latest(market_cap_series_raw, default=0.0)
