@@ -62,7 +62,7 @@ def render_kpi_cards(metrics, fundamentals):
 
 
 def render_tab_kqkd(df_5y_table, fundamentals, period_col='Năm'):
-    label = "5 Năm" if period_col == 'Năm' else "Theo Quý"
+    label = "5 Năm"
     st.markdown(f"### Kết Quả Kinh Doanh {label}")
 
     if df_5y_table.empty:
@@ -161,7 +161,7 @@ def render_tab_kqkd(df_5y_table, fundamentals, period_col='Năm'):
             return None
         return valid[-1] - valid[0]  # Δpp = cuối - đầu
 
-    n_per_year = 4 if period_col == 'Quý' else 1
+    n_per_year = 1
 
     def _is_pct_ratio(col_name: str) -> bool:
         """ROE/ROA là tỷ lệ % — dùng Δpp thay CAGR compound."""
@@ -220,7 +220,7 @@ def render_tab_kqkd(df_5y_table, fundamentals, period_col='Năm'):
 
     st.caption(
         "CAGR = Tốc độ tăng trưởng kép giữa kỳ đầu và kỳ cuối có dữ liệu trong bảng "
-        f"(theo {'năm' if period_col == 'Năm' else 'quý, quy đổi ra năm'}). "
+        "(theo năm). "
         "Cột 'Tăng trưởng' là biểu đồ mini thể hiện xu hướng qua các kỳ. "
         "ROE/ROA hiển thị Δpp (thay đổi điểm phần trăm tuyệt đối đầu → cuối kỳ) "
         "thay vì CAGR compound để tránh hiểu nhầm về bản chất tỷ lệ sinh lời."

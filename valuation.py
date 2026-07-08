@@ -29,36 +29,6 @@ import numpy as np
 import pandas as pd
 from typing import Optional
 
-# ── Import WACC engine từ sector_wacc (valuation.py cũ đã rename) ──────────
-# Nếu sector_wacc chưa tách file, copy inline tại đây để an toàn
-try:
-    from valuation import estimate_wacc, wacc_scenarios  # self-import safe vì khác tên hàm
-except Exception:
-    # Fallback WACC ngành khi sector_wacc không import được
-    def estimate_wacc(ticker: str, industry_text: str = "") -> float:
-        _MAP = {
-            'VCB':'bank','BID':'bank','CTG':'bank','TCB':'bank','MBB':'bank',
-            'ACB':'bank','STB':'bank','VPB':'bank','HDB':'bank','SHB':'bank',
-            'HPG':'steel','HSG':'steel','NKG':'steel',
-            'VIC':'real_estate','VHM':'real_estate','NVL':'real_estate',
-            'MWG':'retail','PNJ':'retail','VNM':'retail','MSN':'retail',
-            'FPT':'tech','CMG':'tech',
-            'GAS':'oil_gas','PLX':'oil_gas','PVD':'oil_gas',
-        }
-        _WACC = {
-            'bank':0.10,'steel':0.11,'real_estate':0.12,
-            'retail':0.09,'tech':0.09,'oil_gas':0.10,'default':0.105,
-        }
-        sector = _MAP.get((ticker or '').upper(), 'default')
-        return _WACC.get(sector, 0.105)
-
-    def wacc_scenarios(base_wacc: float) -> dict:
-        return {
-            'Bi quan': {'wacc': round(base_wacc + 0.005, 4), 'g': 0.02},
-            'Cơ sở':   {'wacc': round(base_wacc, 4),         'g': 0.03},
-            'Tích cực':{'wacc': round(base_wacc - 0.005, 4), 'g': 0.035},
-        }
-
 
 # ════════════════════════════════════════════════════════════════════════════
 # 1. PHÁT HIỆN PHA LOÃNG TỪ CỔ TỨC CỔ PHIẾU
