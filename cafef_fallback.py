@@ -19,6 +19,7 @@ import unicodedata
 import pandas as pd
 import requests
 import concurrent.futures
+import datetime
 
 
 # ── Cấu hình ─────────────────────────────────────────────────────────────────
@@ -106,13 +107,13 @@ def _extract_row_values(html_text: str, row_label_pattern: str):
 def _fetch_one_period(ticker: str, year: int, quarter: int, slug: str) -> dict:
     """
     Cào 1 kỳ báo cáo từ CafeF (bsheet + incsta song song).
-    Trả về dict với các key có: equity, total_assets, revenue, net_profit.
+    Trả về dict với các key: equity, total_assets, revenue, net_profit.
     Đơn vị trả về: TỶ VNĐ (đã chia 1,000 từ triệu).
     """
     out = {}
     base = f"https://s.cafef.vn/bao-cao-tai-chinh/{ticker.upper()}"
-    bsheet_url  = f"{base}/bsheet/{year}/{quarter}/0/0/{slug}.chn"
-    incsta_url  = f"{base}/incsta/{year}/{quarter}/0/0/{slug}.chn"
+    bsheet_url = f"{base}/bsheet/{year}/{quarter}/0/0/{slug}.chn"
+    incsta_url = f"{base}/incsta/{year}/{quarter}/0/0/{slug}.chn"
 
     def _get(url):
         try:
@@ -183,8 +184,8 @@ def fetch_cafef_balance_sheet_5y(
     years: list | None = None,
 ) -> dict:
     """
-    Lấy Vốn CSH + Tổng tài sản từ CafeF cho danh sách năm cụ thể
-    (mặc định: 2021–2025).
+    Lấy Vốn CSH + Tổng tài sản từ CafeF cho danh sách năm cụ thể.
+    Mặc định: 2021 → end_year (bao gồm end_year).
 
     Trả về:
       {'equity': pd.Series, 'total_assets': pd.Series}  — đơn vị: tỷ VNĐ
@@ -195,8 +196,9 @@ def fetch_cafef_balance_sheet_5y(
 
     if years is None:
         if end_year is None:
-            import datetime; end_year = datetime.date.today().year
-        years = list(range(2021, end_year))
+            end_year = datetime.date.today().year
+        # FIX: +1 để bao gồm end_year, bắt đầu cố định từ 2021
+        years = list(range(2021, end_year + 1))
 
     slug = _find_company_slug(ticker)
     eq_dict, ta_dict = {}, {}
@@ -228,23 +230,27 @@ def fetch_cafef_yearly_full(
     """
     Lấy đủ 4 chỉ tiêu (equity, total_assets, revenue, net_profit) từ CafeF.
 
-    Tham số `years`: danh sách năm cần cào. Nếu None → cào 2021–2025.
+    Tham số `years`: danh sách năm cần cào. Nếu None → cào 2021 → năm hiện tại.
     Trả về dict mỗi key là pd.Series(index=năm, values=tỷ VNĐ).
 
     Fallback tự động: nếu CafeF không accessible → trả về 4 Series rỗng
-    (không crash pipeline, pipeline sẽ dùng dữ liệu vnstock gốc).
+    (không crash pipeline).
     """
     empty_s = pd.Series(dtype=float)
-    empty = {'equity': empty_s, 'total_assets': empty_s,
-             'revenue': empty_s, 'net_profit': empty_s}
+    empty = {
+        'equity':       empty_s.copy(),
+        'total_assets': empty_s.copy(),
+        'revenue':      empty_s.copy(),
+        'net_profit':   empty_s.copy(),
+    }
 
     if not _cafef_is_reachable():
         return empty
 
     if years is None:
-        import datetime
+        # FIX: +1 để bao gồm năm hiện tại, bắt đầu cố định từ 2021
         cur = datetime.date.today().year
-        years = list(range(2021, cur))
+        years = list(range(2021, cur + 1))
 
     slug = _find_company_slug(ticker)
     eq_dict, ta_dict, rev_dict, np_dict = {}, {}, {}, {}
