@@ -283,8 +283,11 @@ def nine_methods_valuation(eps_latest, bvps_latest, pe_series, pb_series,
         methods["Graham Number"] = graham_value
 
     # 6. DDM Gordon
-    if ddm_value:
-        methods["DDM Gordon"] = ddm_value
+    if ddm_value is not None:
+        # ddm_gordon() trả về tuple (value, note) — unpack nếu cần
+        _ddm_num = ddm_value[0] if isinstance(ddm_value, tuple) else ddm_value
+        if _ddm_num is not None and _ddm_num > 0:
+            methods["DDM Gordon"] = _ddm_num
 
     # 7-9. DCF FCFF
     if dcf_results:
@@ -299,7 +302,16 @@ def nine_methods_valuation(eps_latest, bvps_latest, pe_series, pb_series,
 def summarize_valuation(valuation_methods, current_price):
     if not valuation_methods:
         return None
-    values = [v for v in valuation_methods.values() if v is not None and v > 0]
+    values = []
+    for v in valuation_methods.values():
+        if isinstance(v, tuple):
+            v = v[0]  # unpack (value, note)
+        try:
+            fv = float(v)
+            if fv > 0:
+                values.append(fv)
+        except (TypeError, ValueError):
+            pass
     if not values:
         return None
 
