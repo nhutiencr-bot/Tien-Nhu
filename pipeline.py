@@ -370,15 +370,21 @@ def execute_equity_research_pipeline(ticker):
             ['lưu chuyển tiền thuần từ hoạt động kinh doanh',
              'lưu chuyển tiền thuần từ hđkd',
              'i. lưu chuyển tiền từ hoạt động kinh doanh',
+             'lưu chuyển tiền tệ ròng từ các hoạt động sản xuất kinh doanh',
+             'lưu chuyển tiền thuần từ hoạt động sản xuất kinh doanh',
+             'tiền thuần từ hoạt động kinh doanh',
              'net cash flow from operating', 'net cash provided by operating',
              'net cash from operating activities',
              'cash flow from operating activities', 'cash flows from operating activities',
-             'net cash generated from operating activities']))
+             'net cash generated from operating activities',
+             'cash flow from operations', 'operating cash flow']))
         cfo_latest = get_latest(cfo_series_for_multiples, default=0.0) if not cfo_series_for_multiples.empty else 0.0
+        cfo_is_estimated = False
 
         pretax_series = normalize_to_billion_vnd(find_row_series(
             df_income,
             ['lợi nhuận trước thuế', 'tổng lợi nhuận kế toán trước thuế',
+             'lợi nhuận kế toán trước thuế',
              'profit before tax', 'income before tax', 'earnings before tax']))
         interest_series = normalize_to_billion_vnd(find_row_series(
             df_income,
@@ -389,7 +395,10 @@ def execute_equity_research_pipeline(ticker):
         da_series = normalize_to_billion_vnd(find_row_series(
             df_cashflow,
             ['khấu hao tài sản cố định', 'khấu hao và phân bổ',
-             'depreciation and amortization', 'depreciation & amortisation', 'depreciation']))
+             'khấu hao tscđ và bđsđt', 'khấu hao bất động sản đầu tư',
+             'hao mòn tài sản cố định', 'chi phí khấu hao',
+             'depreciation and amortization', 'depreciation & amortisation',
+             'depreciation of fixed assets', 'amortisation of intangible', 'depreciation']))
         if da_series.empty:
             da_series = normalize_to_billion_vnd(find_row_series(
                 df_income,
@@ -406,23 +415,38 @@ def execute_equity_research_pipeline(ticker):
         except ImportError:
             is_securities = False
 
+        # FIX: dùng .empty (đã tìm được dòng dữ liệu hay chưa) thay vì truthy giá trị.
+        # 0.0 hợp lệ (tìm thấy nhưng bằng 0) khác với "không tìm thấy dòng nào" —
+        # truthy-check cũ khiến EBITDA bị bỏ trắng khi LNTT tìm được nhưng khấu hao
+        # bằng 0/không có (phổ biến ở BĐS, dịch vụ ít TSCĐ như KDH).
         if is_bank:
             ebitda_latest  = 0.0
             revenue_latest = 0.0
         elif is_securities:
             # CTCK: EBITDA = LN trước thuế + khấu hao (không cộng lãi vay)
-            if pretax_latest:
+            if not pretax_series.empty:
                 ebitda_latest = abs(pretax_latest) + abs(da_latest)
             elif not net_profit_series.empty:
                 ebitda_latest = abs(get_latest(net_profit_series, default=0.0)) + abs(da_latest)
             else:
                 ebitda_latest = 0.0
-        elif pretax_latest:
+        elif not pretax_series.empty:
             ebitda_latest = abs(pretax_latest) + abs(interest_latest) + abs(da_latest)
-        elif da_latest and not net_profit_series.empty:
+        elif not net_profit_series.empty:
             ebitda_latest = abs(get_latest(net_profit_series, default=0.0)) + abs(da_latest)
         else:
             ebitda_latest = 0.0
+
+        ebitda_is_estimated = (not is_bank) and pretax_series.empty and (not net_profit_series.empty)
+
+        # CFO fallback: nếu không tìm được dòng "lưu chuyển tiền từ HĐKD" gốc,
+        # ước tính thô CFO ≈ LNST + Khấu hao (proxy phổ biến khi thiếu dữ liệu dòng tiền).
+        # Chỉ kích hoạt khi thực sự thiếu số liệu gốc, không ghi đè số liệu thật.
+        # LƯU Ý: áp dụng cho cả ngân hàng — CFO (dòng tiền HĐKD) là khái niệm hợp lệ
+        # với mọi loại hình DN (khác với EBITDA/Doanh thu vốn không áp dụng cho ngân hàng).
+        if cfo_series_for_multiples.empty and not net_profit_series.empty:
+            cfo_latest = abs(get_latest(net_profit_series, default=0.0)) + abs(da_latest)
+            cfo_is_estimated = True
 
         short_debt_series = normalize_to_billion_vnd(find_row_series(
             df_balance, ['vay và nợ thuê tài chính ngắn hạn', 'vay ngắn hạn', 'short-term borrowings']))
@@ -440,7 +464,9 @@ def execute_equity_research_pipeline(ticker):
         clean_metrics.update({
             "revenue_latest_billion":  revenue_latest,
             "cfo_latest_billion":      cfo_latest,
+            "cfo_is_estimated":        cfo_is_estimated,
             "ebitda_latest_billion":   ebitda_latest,
+            "ebitda_is_estimated":     ebitda_is_estimated,
             "net_debt_billion":        net_debt_latest,
             "excl_extended_multiples": is_bank and not is_securities,
         })
