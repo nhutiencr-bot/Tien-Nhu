@@ -388,3 +388,61 @@ def normalize_eps_bvps_series(eps_series, bvps_series, outstanding_shares_series
                     bvps_adj[y] = bvps_adj[y] / mult
 
     return eps_adj, bvps_adj
+
+
+# ══════════════════════════════════════════════════════════════════════
+# PHẦN 3 — EXTENDED MULTIPLES (P/S, P/CF, EV/EBITDA)
+# ══════════════════════════════════════════════════════════════════════
+
+def compute_extended_multiples(clean_metrics: dict) -> dict:
+    """
+    Tính P/S, P/CF, EV/EBITDA từ clean_metrics trả về bởi pipeline.
+    Dùng trong UI tab "Multiples Mở Rộng" để hiển thị nhất quán.
+
+    Trả về dict:
+        ps               float | None  — Price-to-Sales
+        pcf              float | None  — Price-to-Cash Flow
+        ev_ebitda        float | None  — EV/EBITDA
+        pcf_estimated    bool          — CFO dùng proxy LNST+KH hay không
+        ebitda_estimated bool          — EBITDA dùng proxy hay không
+        excl_extended    bool          — True nếu là ngân hàng (không áp dụng EV/EBITDA & P/S)
+    """
+    excl = bool(clean_metrics.get("excl_extended_multiples", False))
+    result = {
+        "ps":               None,
+        "pcf":              None,
+        "ev_ebitda":        None,
+        "pcf_estimated":    False,
+        "ebitda_estimated": False,
+        "excl_extended":    excl,
+    }
+    if excl:
+        return result
+
+    mktcap_b   = clean_metrics.get("market_cap_billion",  0.0) or 0.0   # tỷ VND
+    rev_b      = clean_metrics.get("revenue_latest_billion", 0.0) or 0.0
+    # None = pipeline không tìm được dữ liệu → hiển thị "Thiếu dữ liệu"
+    # 0.0  = tìm được nhưng = 0 → cũng không tính (chia 0)
+    cfo_b      = clean_metrics.get("cfo_latest_billion",   None)
+    ebitda_b   = clean_metrics.get("ebitda_latest_billion", None)
+    net_debt_b = clean_metrics.get("net_debt_billion",      0.0) or 0.0
+
+    # P/S = Vốn hóa / Doanh thu thuần
+    if rev_b and rev_b > 0 and mktcap_b > 0:
+        result["ps"] = round(mktcap_b / rev_b, 2)
+
+    # P/CF = Vốn hóa / Dòng tiền HĐKD
+    # Guard: cfo_b phải là số thực dương (None hoặc âm → không tính)
+    if cfo_b is not None and cfo_b > 0 and mktcap_b > 0:
+        result["pcf"] = round(mktcap_b / cfo_b, 2)
+        result["pcf_estimated"] = bool(clean_metrics.get("cfo_is_estimated", False))
+
+    # EV/EBITDA: EV = Vốn hóa + Nợ ròng
+    # Guard: ebitda_b phải là số thực dương; EV âm (tiền > nợ + vốn hóa) → không tính
+    if ebitda_b is not None and ebitda_b > 0 and mktcap_b > 0:
+        ev = mktcap_b + net_debt_b
+        if ev > 0:  # EV âm vô nghĩa kinh tế (thường xảy ra với CTCK có tiền mặt lớn)
+            result["ev_ebitda"] = round(ev / ebitda_b, 2)
+            result["ebitda_estimated"] = bool(clean_metrics.get("ebitda_is_estimated", False))
+
+    return result
