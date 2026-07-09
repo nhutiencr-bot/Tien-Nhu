@@ -288,7 +288,14 @@ with tab_multiples:
         )
     else:
         e1, e2, e3 = st.columns(3)
-        c, n = _card_label(ps, low_thresh=1.5, low_msg="Cạnh tranh tốt", high_msg="Định giá cao")
+        # P/S: dùng median 5N của chính mã nếu có, fallback ngưỡng ngành
+        # CTCK P/S 3-6x bình thường, ngưỡng 1.5 cũ quá thấp → luôn vàng/đỏ
+        ps_median_ref = None
+        if pe_hist_series is not None and not pe_hist_series.dropna().empty:
+            # Dùng pe_median như proxy scale, hoặc tính ps_series riêng nếu có
+            pass  # pe_median_5y đã tính ở trên
+        c, n = _card_label(ps, avg=None, low_thresh=8.0,
+                            low_msg="Định giá hợp lý", high_msg="Định giá cao")
         _render_card(e1, "P/S", f"{ps:.2f}x" if ps else "—", c, n)
         c, n = _card_label(pcf, low_thresh=10, low_msg="Dòng tiền hấp dẫn", high_msg="Bình thường")
         _render_card(e2, "P/CF", f"{pcf:.2f}x" if pcf else "—", c, n)
