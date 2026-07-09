@@ -198,7 +198,6 @@ def execute_equity_research_pipeline(ticker):
     try:
         q_engine, f_engine, c_engine, source_used = _build_engines_with_fallback(ticker)
 
-        # Định nghĩa sớm để dùng xuyên suốt pipeline (kể cả lọc cafef)
         current_year_for_table = datetime.today().year
         allowed_years = set(range(current_year_for_table - DEFAULT_YEAR_LIMIT, current_year_for_table))
 
@@ -266,7 +265,6 @@ def execute_equity_research_pipeline(ticker):
         pb_series                 = fin5['pb']
         outstanding_shares_series = fin5['outstanding_shares']
 
-        # Lọc tất cả series về allowed_years ngay từ đầu
         def _filter_years(s):
             if s is None or s.empty:
                 return s
@@ -362,7 +360,7 @@ def execute_equity_research_pipeline(ticker):
             "source_used":         source_used,
         }
 
-        # ── Multiples mở rộng ─────────────────────────────────────────────
+        # ── Multiples mở rộng ────────────────────────────────────────────
         revenue_latest = get_latest(revenue_series, default=0.0) if not revenue_series.empty else 0.0
 
         cfo_series_for_multiples = normalize_to_billion_vnd(find_row_series(
@@ -378,7 +376,10 @@ def execute_equity_research_pipeline(ticker):
              'cash flow from operating activities', 'cash flows from operating activities',
              'net cash generated from operating activities',
              'cash flow from operations', 'operating cash flow']))
-        cfo_latest = get_latest(cfo_series_for_multiples, default=0.0) if not cfo_series_for_multiples.empty else 0.0
+
+        # BUG FIX: dùng None thay vì 0.0 để phân biệt "không tìm được" vs "CFO = 0"
+        cfo_latest = get_latest(cfo_series_for_multiples, default=None) \
+            if not cfo_series_for_multiples.empty else None
         cfo_is_estimated = False
 
         pretax_series = normalize_to_billion_vnd(find_row_series(
@@ -415,38 +416,41 @@ def execute_equity_research_pipeline(ticker):
         except ImportError:
             is_securities = False
 
-        # FIX: dùng .empty (đã tìm được dòng dữ liệu hay chưa) thay vì truthy giá trị.
-        # 0.0 hợp lệ (tìm thấy nhưng bằng 0) khác với "không tìm thấy dòng nào" —
-        # truthy-check cũ khiến EBITDA bị bỏ trắng khi LNTT tìm được nhưng khấu hao
-        # bằng 0/không có (phổ biến ở BĐS, dịch vụ ít TSCĐ như KDH).
+        # EBITDA — theo công thức tài liệu: EBITDA = LNTT + lãi vay + khấu hao
+        # Ngân hàng: không áp dụng EV/EBITDA (cấu trúc vốn hoàn toàn khác)
+        # CTCK: không loại trừ lãi vay như trước — đồng nhất công thức với DN thường
+        # BUG FIX: CTCK cũng dùng pretax + interest + da (interest thường gần 0 → không sai)
         if is_bank:
-            ebitda_latest  = 0.0
+            ebitda_latest  = None   # BUG FIX: None thay vì 0.0 — ngân hàng không áp dụng
             revenue_latest = 0.0
-        elif is_securities:
-            # CTCK: EBITDA = LN trước thuế + khấu hao (không cộng lãi vay)
-            if not pretax_series.empty:
-                ebitda_latest = abs(pretax_latest) + abs(da_latest)
-            elif not net_profit_series.empty:
-                ebitda_latest = abs(get_latest(net_profit_series, default=0.0)) + abs(da_latest)
-            else:
-                ebitda_latest = 0.0
         elif not pretax_series.empty:
+            # Mọi DN phi ngân hàng (kể cả CTCK): LNTT + lãi vay + KH
             ebitda_latest = abs(pretax_latest) + abs(interest_latest) + abs(da_latest)
+            ebitda_latest = ebitda_latest if ebitda_latest > 0 else None
         elif not net_profit_series.empty:
-            ebitda_latest = abs(get_latest(net_profit_series, default=0.0)) + abs(da_latest)
+            # Fallback khi không có LNTT: dùng LNST + KH (proxy thô)
+            _np_proxy = get_latest(net_profit_series, default=None)
+            ebitda_latest = (abs(_np_proxy) + abs(da_latest)) if _np_proxy is not None else None
         else:
-            ebitda_latest = 0.0
+            ebitda_latest = None   # BUG FIX: None thay vì 0.0
 
-        ebitda_is_estimated = (not is_bank) and pretax_series.empty and (not net_profit_series.empty)
+        ebitda_is_estimated = (
+            not is_bank
+            and not is_securities  # CTCK với công thức đầy đủ không cần flag estimated
+            and pretax_series.empty
+            and (not net_profit_series.empty)
+        )
 
-        # CFO fallback: nếu không tìm được dòng "lưu chuyển tiền từ HĐKD" gốc,
-        # ước tính thô CFO ≈ LNST + Khấu hao (proxy phổ biến khi thiếu dữ liệu dòng tiền).
-        # Chỉ kích hoạt khi thực sự thiếu số liệu gốc, không ghi đè số liệu thật.
-        # LƯU Ý: áp dụng cho cả ngân hàng — CFO (dòng tiền HĐKD) là khái niệm hợp lệ
-        # với mọi loại hình DN (khác với EBITDA/Doanh thu vốn không áp dụng cho ngân hàng).
-        if cfo_series_for_multiples.empty and not net_profit_series.empty:
-            cfo_latest = abs(get_latest(net_profit_series, default=0.0)) + abs(da_latest)
-            cfo_is_estimated = True
+        # BUG FIX: CFO fallback — chỉ kích hoạt khi cfo_latest là None (không tìm được)
+        # Không fallback khi CFO tìm được nhưng = 0 (CFO thật bằng 0 là có nghĩa)
+        if cfo_latest is None and not net_profit_series.empty:
+            _np_proxy = get_latest(net_profit_series, default=None)
+            if _np_proxy is not None:
+                cfo_latest = abs(_np_proxy) + abs(da_latest)
+                cfo_is_estimated = True
+        # BUG FIX: CFO âm → không có ý nghĩa kinh tế cho P/CF → đặt None
+        if cfo_latest is not None and cfo_latest <= 0:
+            cfo_latest = None
 
         short_debt_series = normalize_to_billion_vnd(find_row_series(
             df_balance, ['vay và nợ thuê tài chính ngắn hạn', 'vay ngắn hạn', 'short-term borrowings']))
@@ -463,15 +467,17 @@ def execute_equity_research_pipeline(ticker):
 
         clean_metrics.update({
             "revenue_latest_billion":  revenue_latest,
-            "cfo_latest_billion":      cfo_latest,
+            "cfo_latest_billion":      cfo_latest,        # None = không có dữ liệu
             "cfo_is_estimated":        cfo_is_estimated,
-            "ebitda_latest_billion":   ebitda_latest,
+            "ebitda_latest_billion":   ebitda_latest,     # None = không áp dụng / không có dữ liệu
             "ebitda_is_estimated":     ebitda_is_estimated,
             "net_debt_billion":        net_debt_latest,
-            "excl_extended_multiples": is_bank and not is_securities,
+            # Ngân hàng: loại trừ EV/EBITDA và P/S (cấu trúc vốn khác biệt hoàn toàn)
+            # CTCK: KHÔNG loại trừ — P/CF, P/S, EV/EBITDA vẫn có ý nghĩa tham chiếu
+            "excl_extended_multiples": is_bank,
         })
 
-        # ── Bảng 5 năm (allowed_years đã định nghĩa ở đầu hàm) ───────────
+        # ── Bảng 5 năm ───────────────────────────────────────────────────
         years_available = sorted(
             (set(revenue_series.index)      |
              set(net_profit_series.index)   |
