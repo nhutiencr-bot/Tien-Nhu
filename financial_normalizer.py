@@ -19,12 +19,16 @@ import re
 BANK_TICKERS = {
     'VCB', 'BID', 'CTG', 'TCB', 'MBB', 'ACB', 'STB', 'VPB', 'HDB', 'TPB',
     'MSB', 'OCB', 'VIB', 'SHB', 'EIB', 'LPB', 'SSB', 'NAB', 'ABB', 'BAB',
-    'BVB', 'KLB', 'PGB', 'VAB', 'VBB', 'SGN', 'NVB', 'SGB', 'CBB', 'SEAB',
+    'BVB', 'KLB', 'PGB', 'VAB', 'VBB', 'MBB', 'NVB', 'SGB',
 }
 
 FINANCIAL_TICKERS = {
     'BVH', 'PVI', 'PTI', 'MIG', 'BMI', 'VNR', 'BIC', 'PRE', 'PGI',
+}
+
+SECURITIES_TICKERS = {
     'SSI', 'VND', 'HCM', 'MBS', 'VCI', 'FTS', 'AGR', 'SBS', 'BSI',
+    'CTS', 'SHS', 'TVS', 'TCX', 'VPX', 'BVS', 'VCK', 'SHS', 'VDS',
 }
 
 RETAIL_TICKERS = {
@@ -132,16 +136,47 @@ def find_row_series(df: pd.DataFrame, keywords, exclude_keywords=None,
 
 
 def _find_revenue_for_bank(df_income, period='year'):
-    """Ngân hàng/bảo hiểm/chứng khoán — dùng thu nhập thay doanh thu."""
+    """
+    Ngân hàng/bảo hiểm — dùng 'Thu nhập lãi và các khoản thu nhập tương tự'
+    (gross interest income), KHÔNG dùng 'Thu nhập lãi thuần' (đã trừ chi phí lãi).
+    Thứ tự ưu tiên theo chuẩn BCTC ngân hàng VN (TT 49/2014):
+      1. Thu nhập lãi và các khoản thu nhập tương tự  ← gross, đúng nhất
+      2. Tổng thu nhập hoạt động                      ← nếu nguồn gộp sẵn
+      3. Thu nhập lãi thuần                           ← fallback (thấp hơn thực)
+    """
     bank_revenue_keywords = [
-        (['tổng thu nhập hoạt động', 'total operating income', 'net operating income'], ['chi phí', 'expense']),
-        (['thu nhập lãi thuần', 'net interest income', 'lãi thuần'], ['chi phí lãi']),
-        (['thu nhập thuần', 'net income from', 'total net income'], ['lợi nhuận', 'profit']),
+        (['thu nhập lãi và các khoản thu nhập tương tự',
+          'thu nhập từ lãi và các khoản tương tự',
+          'interest and similar income',
+          'interest income and similar'], ['chi phí', 'expense']),
+        (['tổng thu nhập hoạt động', 'total operating income',
+          'net operating income'], ['chi phí', 'expense']),
+        (['thu nhập lãi thuần', 'net interest income'], []),
         (['tổng doanh thu', 'total revenue', 'gross revenue'], []),
-        (['doanh thu hoạt động', 'operating revenue'], []),
-        (['thu nhập từ lãi', 'interest income'], ['chi phí']),
     ]
     for keywords, excludes in bank_revenue_keywords:
+        s = find_row_series(df_income, keywords,
+                            exclude_keywords=excludes if excludes else None,
+                            period=period)
+        if not s.empty:
+            return s
+    return pd.Series(dtype=float)
+
+
+def _find_revenue_for_securities(df_income, period='year'):
+    """
+    Công ty chứng khoán — dùng 'Doanh thu hoạt động' theo TT 334/2016.
+    Không dùng 'Thu nhập lãi thuần' vì CTCK hạch toán lãi margin vào
+    doanh thu môi giới, không tách riêng như ngân hàng.
+    """
+    securities_revenue_keywords = [
+        (['doanh thu hoạt động', 'operating revenue',
+          'tổng doanh thu hoạt động', 'total operating revenue'], ['chi phí', 'giá vốn']),
+        (['tổng doanh thu', 'total revenue', 'gross revenue'], ['chi phí']),
+        (['doanh thu từ hoạt động', 'revenue from activities'], ['chi phí']),
+        (['doanh thu thuần', 'net revenue', 'net sales'], []),
+    ]
+    for keywords, excludes in securities_revenue_keywords:
         s = find_row_series(df_income, keywords,
                             exclude_keywords=excludes if excludes else None,
                             period=period)
@@ -195,10 +230,13 @@ def build_financial_table(df_income, df_balance, df_ratio=None,
 
     is_bank = ticker in BANK_TICKERS if ticker else False
     is_financial = ticker in FINANCIAL_TICKERS if ticker else False
+    is_securities = ticker in SECURITIES_TICKERS if ticker else False
     is_retail = ticker in RETAIL_TICKERS if ticker else False
     is_realestate = ticker in REAL_ESTATE_TICKERS if ticker else False
 
-    if is_bank or is_financial:
+    if is_securities:
+        data['revenue'] = _find_revenue_for_securities(df_income, period=period)
+    elif is_bank or is_financial:
         data['revenue'] = _find_revenue_for_bank(df_income, period=period)
     elif is_realestate:
         data['revenue'] = _find_revenue_for_realestate(df_income, period=period)
