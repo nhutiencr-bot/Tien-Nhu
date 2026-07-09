@@ -400,9 +400,23 @@ def execute_equity_research_pipeline(ticker):
         interest_latest = get_latest(interest_series, default=0.0) if not interest_series.empty else 0.0
         da_latest       = get_latest(da_series,       default=0.0) if not da_series.empty       else 0.0
 
+        try:
+            from financial_normalizer import SECURITIES_TICKERS as _SEC_TICKERS
+            is_securities = ticker in _SEC_TICKERS
+        except ImportError:
+            is_securities = False
+
         if is_bank:
             ebitda_latest  = 0.0
             revenue_latest = 0.0
+        elif is_securities:
+            # CTCK: EBITDA = LN trước thuế + khấu hao (không cộng lãi vay)
+            if pretax_latest:
+                ebitda_latest = abs(pretax_latest) + abs(da_latest)
+            elif not net_profit_series.empty:
+                ebitda_latest = abs(get_latest(net_profit_series, default=0.0)) + abs(da_latest)
+            else:
+                ebitda_latest = 0.0
         elif pretax_latest:
             ebitda_latest = abs(pretax_latest) + abs(interest_latest) + abs(da_latest)
         elif da_latest and not net_profit_series.empty:
@@ -428,7 +442,7 @@ def execute_equity_research_pipeline(ticker):
             "cfo_latest_billion":      cfo_latest,
             "ebitda_latest_billion":   ebitda_latest,
             "net_debt_billion":        net_debt_latest,
-            "excl_extended_multiples": is_bank,
+            "excl_extended_multiples": is_bank and not is_securities,
         })
 
         # ── Bảng 5 năm (allowed_years đã định nghĩa ở đầu hàm) ───────────
