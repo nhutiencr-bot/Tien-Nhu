@@ -385,3 +385,70 @@ def summarize_valuation(valuation_methods, current_price):
         "recommendation": recommendation,
         "num_methods": len(values),
     }
+
+
+def detect_stock_dividend_years(outstanding_shares_series):
+    """
+    Phát hiện năm có chia cổ tức bằng cổ phiếu / tăng vốn đột biến
+    dựa trên series số CP lưu hành.
+    Trả về list các năm có số CP tăng > 10% so với năm trước.
+    """
+    if outstanding_shares_series is None or outstanding_shares_series.empty:
+        return []
+    s = outstanding_shares_series.sort_index().dropna()
+    if len(s) < 2:
+        return []
+    dividend_years = []
+    years = sorted(s.index)
+    for i in range(1, len(years)):
+        prev_y, cur_y = years[i-1], years[i]
+        prev_val, cur_val = s[prev_y], s[cur_y]
+        if prev_val and prev_val > 0:
+            change = (cur_val - prev_val) / prev_val
+            if change > 0.10:   # tăng >10% → nhiều khả năng có chia CP
+                dividend_years.append(cur_y)
+    return dividend_years
+
+
+def normalize_eps_bvps_series(eps_series, bvps_series, outstanding_shares_series):
+    """
+    Điều chỉnh EPS/BVPS lịch sử về cùng base số CP với năm hiện tại
+    (Bẫy 5B — split-adjustment consistency).
+
+    Với mỗi năm có chia cổ phiếu: chia EPS/BVPS cho hệ số tích luỹ
+    để đưa về base post-split, nhất quán với giá đã split-adjusted
+    mà vnstock Quote.history() trả về.
+
+    Trả về (eps_adj, bvps_adj) — hai pd.Series đã điều chỉnh.
+    Nếu không phát hiện split → trả về series gốc không đổi.
+    """
+    import pandas as pd
+    import numpy as np
+
+    eps_adj  = eps_series.copy()  if eps_series  is not None else pd.Series(dtype=float)
+    bvps_adj = bvps_series.copy() if bvps_series is not None else pd.Series(dtype=float)
+
+    if outstanding_shares_series is None or outstanding_shares_series.empty:
+        return eps_adj, bvps_adj
+
+    s = outstanding_shares_series.sort_index().dropna()
+    if len(s) < 2:
+        return eps_adj, bvps_adj
+
+    # Tính hệ số dồn tích từ năm sớm nhất đến năm muộn nhất
+    years = sorted(s.index)
+    # cumulative_mult[y] = số CP năm cuối / số CP năm y
+    latest_shares = s[years[-1]]
+    eps_adj  = eps_adj.astype(float)
+    bvps_adj = bvps_adj.astype(float)
+
+    for y in years[:-1]:
+        if s[y] and s[y] > 0 and latest_shares > 0:
+            mult = latest_shares / s[y]
+            if abs(mult - 1.0) > 0.05:   # chỉ adjust khi lệch > 5%
+                if y in eps_adj.index:
+                    eps_adj[y] = eps_adj[y] / mult
+                if y in bvps_adj.index:
+                    bvps_adj[y] = bvps_adj[y] / mult
+
+    return eps_adj, bvps_adj
