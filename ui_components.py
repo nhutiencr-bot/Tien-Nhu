@@ -242,7 +242,9 @@ def render_tab_valuation(valuation_pkg, metrics):
         st.warning("Không đủ dữ liệu để chạy các phương pháp định giá.")
         return
 
-    st.markdown(f"#### Giá Trị Hợp Lý Ước Tính: **{summary['target_price_median']:,.0f} đ/CP**")
+    median_val = summary.get('target_price_median')
+    median_str = f"{median_val:,.0f}" if median_val is not None else "—"
+    st.markdown(f"#### Giá Trị Hợp Lý Ước Tính: **{median_str} đ/CP**")
     c1, c2 = st.columns([1, 2])
     c1.metric("Khuyến nghị", summary.get('recommendation', '—'))
     upside = summary.get('upside_pct')
@@ -447,13 +449,27 @@ def render_tab_dupont(df_dupont):
         st.warning("Không đủ dữ liệu để phân tách DuPont.")
         return
 
+    # Column mapping: dupont_decomposition() trả về tên dài có đơn vị
+    COL_MARGIN   = 'Net margin (%)'
+    COL_TURNOVER = 'Asset turnover (x)'
+    COL_LEVERAGE = 'Equity multiplier (x)'
+    COL_ROE      = 'ROE (%)'
+    COL_YEAR     = 'Năm'
+
+    # Set index = Năm nếu chưa set
+    if COL_YEAR in df_dupont.columns:
+        df_dupont = df_dupont.set_index(COL_YEAR)
+
     fig = go.Figure()
-    fig.add_trace(go.Bar(x=df_dupont.index, y=df_dupont['net_margin'] * 100,
-                         name='Biên LN (%)', marker_color='#a855f7'))
-    fig.add_trace(go.Bar(x=df_dupont.index, y=df_dupont['asset_turnover'] * 100,
-                         name='Vòng quay TS', marker_color='#ec4899'))
-    fig.add_trace(go.Bar(x=df_dupont.index, y=df_dupont['leverage'] * 100,
-                         name='Đòn bẩy', marker_color='#06b6d4'))
+    if COL_MARGIN in df_dupont.columns:
+        fig.add_trace(go.Bar(x=df_dupont.index, y=df_dupont[COL_MARGIN],
+                             name='Biên LN (%)', marker_color='#a855f7'))
+    if COL_TURNOVER in df_dupont.columns:
+        fig.add_trace(go.Bar(x=df_dupont.index, y=df_dupont[COL_TURNOVER] * 100,
+                             name='Vòng quay TS (×100)', marker_color='#ec4899'))
+    if COL_LEVERAGE in df_dupont.columns:
+        fig.add_trace(go.Bar(x=df_dupont.index, y=df_dupont[COL_LEVERAGE] * 10,
+                             name='Đòn bẩy (×10)', marker_color='#06b6d4'))
     fig.update_layout(barmode='stack', template='plotly_dark',
                       paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
                       margin=dict(t=20, b=20))
@@ -462,9 +478,12 @@ def render_tab_dupont(df_dupont):
     latest_year = df_dupont.index.max()
     r = df_dupont.loc[latest_year]
     d1, d2, d3 = st.columns(3)
-    d1.metric(f"Biên LN {latest_year}", f"{r['net_margin']*100:.1f}%")
-    d2.metric("Vòng Quay TS", f"{r['asset_turnover']:.2f}x")
-    d3.metric("Đòn Bẩy", f"{r['leverage']:.2f}x")
+    d1.metric(f"Biên LN {latest_year}",
+              f"{r[COL_MARGIN]:.1f}%" if COL_MARGIN in r and r[COL_MARGIN] == r[COL_MARGIN] else '—')
+    d2.metric("Vòng Quay TS",
+              f"{r[COL_TURNOVER]:.2f}x" if COL_TURNOVER in r and r[COL_TURNOVER] == r[COL_TURNOVER] else '—')
+    d3.metric("Đòn Bẩy",
+              f"{r[COL_LEVERAGE]:.2f}x" if COL_LEVERAGE in r and r[COL_LEVERAGE] == r[COL_LEVERAGE] else '—')
 
 
 def render_tab_technical(df_price, tech, metrics):
