@@ -242,12 +242,13 @@ def render_tab_valuation(valuation_pkg, metrics):
         st.warning("Không đủ dữ liệu để chạy các phương pháp định giá.")
         return
 
-    st.markdown(f"#### Giá Trị Hợp Lý Ước Tính: **{summary['median']:,.0f} đ/CP**")
+    st.markdown(f"#### Giá Trị Hợp Lý Ước Tính: **{summary['target_price_median']:,.0f} đ/CP**")
     c1, c2 = st.columns([1, 2])
-    c1.metric("Verdict", summary['verdict'])
+    c1.metric("Khuyến nghị", summary.get('recommendation', '—'))
+    upside = summary.get('upside_pct')
     c2.metric("So Với Giá Hiện Tại",
-              f"{summary['upside_median_pct']:+.1f}%",
-              delta=f"{summary['upside_median_pct']:+.1f}%")
+              f"{upside:+.1f}%" if upside is not None else "—",
+              delta=f"{upside:+.1f}%" if upside is not None else None)
 
     if methods:
         # Lọc bỏ key nội bộ (bắt đầu bằng _) — chỉ giữ giá trị là số dương
@@ -641,20 +642,19 @@ def render_tab_forecast(df_5y_table, fundamentals, metrics, tech, valuation_pkg,
     st.markdown("---")
     summary = valuation_pkg.get('summary') if valuation_pkg else None
     if summary:
-        verdict      = summary.get('verdict', '')
-        p25, p75     = summary.get('p25'), summary.get('p75')
-        upside_median = summary.get('upside_median_pct')
+        rec           = summary.get('recommendation', '')
+        target_min    = summary.get('target_price_min')
+        target_max    = summary.get('target_price_max')
+        upside_median = summary.get('upside_pct')
 
-        if 'UNDERVALUED' in verdict:
+        if rec in ('MUA MẠNH', 'MUA'):
             rec_text, rec_color = "↑ ACCUMULATE · TÍCH LŨY", "#22c55e"
-        elif 'OVERVALUED' in verdict:
+        elif rec == 'BÁN':
             rec_text, rec_color = "↓ REDUCE · GIẢM TỈ TRỌNG", "#ef4444"
         else:
             rec_text, rec_color = "→ HOLD · NẮM GIỮ", "#fbbf24"
 
-        target_low  = min(p25, p75) if (p25 is not None and p75 is not None) else None
-        target_high = max(p25, p75) if (p25 is not None and p75 is not None) else None
-        target_str  = f"₫{target_low:,.0f} – {target_high:,.0f}" if target_low is not None else "—"
+        target_str  = f"₫{target_min:,.0f} – {target_max:,.0f}" if (target_min is not None and target_max is not None) else "—"
         upside_str  = f"({upside_median:+.0f}%)" if upside_median is not None else ""
 
         st.markdown(f"""
