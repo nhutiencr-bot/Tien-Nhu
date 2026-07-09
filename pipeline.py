@@ -18,12 +18,8 @@ from valuation import (
 )
 from cafef_fallback import fetch_cafef_balance_sheet_5y
 
-# Thử KBS trước (hoạt động ổn định qua mọi lần test) — VCI hay fail/timeout,
-# đưa lên đầu gây chờ vô ích trước khi fallback. Đây là fix tốc độ chính.
 SOURCE_FALLBACK_ORDER = ['KBS', 'VCI', 'DNSE']
-DEFAULT_YEAR_LIMIT = 5   # truyền limit=5 vào Finance → vnai (tier 4 kỳ) vẫn trả 5 kỳ thật
-# Giải thích: vnai community = max 4 kỳ, nhưng khi limit > 4 thì trả toàn bộ data có sẵn
-# (thường là 5 năm 2021-2025). Đặt 5 để chắc chắn không bị cắt mất 2021.
+DEFAULT_YEAR_LIMIT = 5
 
 
 def normalize_to_billion_vnd(series):
@@ -97,17 +93,6 @@ def _safe_fetch(fn, default=None):
 
 
 def _merge_financial_dataframes(dfs: list):
-    """
-    Ghép nhiều DataFrame BCTC (từ VCI/KBS/DNSE) thành 1 bảng duy nhất, LẤY
-    HỢP các cột năm từ tất cả nguồn — thay vì chỉ dùng nguồn đầu tiên trả
-    về non-empty (cách cũ khiến nếu nguồn đó thiếu 1 năm, VD 2021, thì
-    năm đó mất luôn dù nguồn khác có sẵn).
-
-    Ghép theo cột 'item' (đã chuẩn hoá lowercase/strip) — các dòng chỉ tiêu
-    cùng tên ở các nguồn khác nhau sẽ được nối thêm cột năm còn thiếu.
-    Ưu tiên giữ nguyên dữ liệu của DataFrame đầu tiên (nhiều cột năm nhất)
-    khi trùng năm.
-    """
     dfs = [d for d in dfs if d is not None and not d.empty]
     if not dfs:
         return pd.DataFrame()
@@ -141,10 +126,6 @@ def _merge_financial_dataframes(dfs: list):
 
 
 def _fetch_income_statement(ticker, source, period='year', limit=DEFAULT_YEAR_LIMIT):
-    # FIX: gọi CẢ 3 NGUỒN (VCI/KBS/DNSE) rồi GHÉP cột năm lại — 3 nguồn
-    # backup lẫn nhau cho từng năm cụ thể, thay vì dừng ở nguồn đầu tiên
-    # non-empty (cách cũ khiến thiếu năm nếu đúng nguồn đó thiếu, dù nguồn
-    # khác có sẵn năm đó).
     sources_to_try = [source] + [s for s in SOURCE_FALLBACK_ORDER if s != source]
     dfs = []
     for src in sources_to_try:
@@ -217,6 +198,10 @@ def execute_equity_research_pipeline(ticker):
     try:
         q_engine, f_engine, c_engine, source_used = _build_engines_with_fallback(ticker)
 
+        # Định nghĩa sớm để dùng xuyên suốt pipeline (kể cả lọc cafef)
+        current_year_for_table = datetime.today().year
+        allowed_years = set(range(current_year_for_table - DEFAULT_YEAR_LIMIT, current_year_for_table))
+
         end_date   = datetime.today().strftime('%Y-%m-%d')
         start_date = (datetime.today() - timedelta(days=365 * 3)).strftime('%Y-%m-%d')
 
@@ -268,24 +253,43 @@ def execute_equity_research_pipeline(ticker):
 
         fin5 = build_5y_financial_table(df_income, df_balance, df_ratio, ticker=ticker)
 
-        revenue_series          = normalize_to_billion_vnd(fin5['revenue'])
-        equity_series           = normalize_to_billion_vnd(fin5['equity'])
-        total_assets_series     = normalize_to_billion_vnd(fin5['total_assets'])
-        net_profit_series       = normalize_net_profit_with_anchor(
+        revenue_series            = normalize_to_billion_vnd(fin5['revenue'])
+        equity_series             = normalize_to_billion_vnd(fin5['equity'])
+        total_assets_series       = normalize_to_billion_vnd(fin5['total_assets'])
+        net_profit_series         = normalize_net_profit_with_anchor(
             fin5['net_profit'], equity_series, fin5['roe'])
-        eps_series              = fin5['eps']
-        bvps_series             = fin5['bvps']
-        roe_series               = fin5['roe']
-        roa_series               = fin5['roa']
-        pe_series                = fin5['pe']
-        pb_series                = fin5['pb']
+        eps_series                = fin5['eps']
+        bvps_series               = fin5['bvps']
+        roe_series                = fin5['roe']
+        roa_series                = fin5['roa']
+        pe_series                 = fin5['pe']
+        pb_series                 = fin5['pb']
         outstanding_shares_series = fin5['outstanding_shares']
+
+        # Lọc tất cả series về allowed_years ngay từ đầu
+        def _filter_years(s):
+            if s is None or s.empty:
+                return s
+            return s[s.index.isin(allowed_years)]
+
+        revenue_series        = _filter_years(revenue_series)
+        equity_series         = _filter_years(equity_series)
+        total_assets_series   = _filter_years(total_assets_series)
+        net_profit_series     = _filter_years(net_profit_series)
+        eps_series            = _filter_years(eps_series)
+        bvps_series           = _filter_years(bvps_series)
+        roe_series            = _filter_years(roe_series)
+        roa_series            = _filter_years(roa_series)
+        pe_series             = _filter_years(pe_series)
+        pb_series             = _filter_years(pb_series)
+        outstanding_shares_series = _filter_years(outstanding_shares_series)
 
         if equity_series.empty and not total_assets_series.empty:
             total_liab_series = normalize_to_billion_vnd(find_row_series(
                 df_balance,
                 ['tổng cộng nợ phải trả', 'tổng nợ phải trả', 'total liabilities'],
                 exclude_keywords=['vốn chủ sở hữu']))
+            total_liab_series = _filter_years(total_liab_series)
             if not total_liab_series.empty:
                 common_years = total_assets_series.index.intersection(total_liab_series.index)
                 if len(common_years) > 0:
@@ -293,24 +297,13 @@ def execute_equity_research_pipeline(ticker):
                                      - total_liab_series.loc[common_years])
 
         if equity_series.empty or total_assets_series.empty:
-            cafef_data = fetch_cafef_balance_sheet_5y(ticker, end_year=datetime.today().year)
-            if equity_series.empty and not cafef_data['equity'].empty:
-                equity_series = cafef_data['equity']
-            if total_assets_series.empty and not cafef_data['total_assets'].empty:
-                total_assets_series = cafef_data['total_assets']
+            cafef_data = fetch_cafef_balance_sheet_5y(ticker)
+            if equity_series.empty and isinstance(cafef_data, dict) and not cafef_data.get('equity', pd.Series()).empty:
+                equity_series = _filter_years(cafef_data['equity'])
+            if total_assets_series.empty and isinstance(cafef_data, dict) and not cafef_data.get('total_assets', pd.Series()).empty:
+                total_assets_series = _filter_years(cafef_data['total_assets'])
 
-        # ── Kiểm tra còn thiếu năm nào không (chỉ để cảnh báo — KHÔNG còn
-        # dùng CafeF để bù nữa) ─────────────────────────────────────────────
-        # Trước đây dùng fetch_cafef_yearly_full() để bù năm thiếu, nhưng
-        # việc cào CafeF không ổn định (đã xác nhận sai với nhiều loại mã
-        # khác nhau: ngân hàng, CTCK, vận tải...). Thay vào đó, 3 nguồn
-        # vnstock (VCI/KBS/DNSE) giờ đã tự backup lẫn nhau NGAY Ở TẦNG FETCH
-        # (xem _fetch_income_statement/_fetch_ratio/_fetch_cashflow/
-        # _fetch_balance_sheet — gọi cả 3 nguồn rồi merge cột năm), nên
-        # revenue_series/net_profit_series/equity_series/total_assets_series
-        # ở đây ĐÃ bao gồm dữ liệu ghép từ cả 3 nguồn, không cần bù thêm.
-        _current_year_check = datetime.today().year
-        _expected_years = set(range(_current_year_check - DEFAULT_YEAR_LIMIT, _current_year_check))
+        _expected_years  = allowed_years
         _years_have = (set(revenue_series.index) | set(net_profit_series.index)
                        | set(equity_series.index) | set(total_assets_series.index))
         _missing_years = sorted(_expected_years - _years_have)
@@ -438,10 +431,7 @@ def execute_equity_research_pipeline(ticker):
             "excl_extended_multiples": is_bank,
         })
 
-        # ── Bảng 5 năm ───────────────────────────────────────────────────
-        current_year_for_table = datetime.today().year
-        allowed_years = set(range(current_year_for_table - DEFAULT_YEAR_LIMIT, current_year_for_table))
-
+        # ── Bảng 5 năm (allowed_years đã định nghĩa ở đầu hàm) ───────────
         years_available = sorted(
             (set(revenue_series.index)      |
              set(net_profit_series.index)   |
@@ -552,8 +542,6 @@ def execute_equity_research_pipeline(ticker):
             if cfo_l is not None:
                 latest_fcff = (cfo_l - abs(capex_l)) * 1e9
 
-        # net_debt_latest (tính ở khối Multiples phía trên) dùng lại cho DCF
-        # để EV chính xác hơn thay vì giả định net_debt = 0.
         dcf_results = reverse_g = None
         if latest_fcff and latest_fcff > 0 and issue_share > 0:
             dcf_results = dcf_fcff_scenarios(
@@ -567,17 +555,12 @@ def execute_equity_research_pipeline(ticker):
         graham_value = graham_number(eps_latest, bvps_latest) \
             if eps_latest > 0 and bvps_latest > 0 else None
 
-        # ── Phát hiện pha loãng (cổ tức CP) + điều chỉnh EPS/BVPS lịch sử ──
         dilution_years = detect_stock_dividend_years(outstanding_shares_series)
         eps_adj, bvps_adj = normalize_eps_bvps_series(
             eps_series_filled, bvps_series_filled, outstanding_shares_series)
 
-        # ── DDM (Gordon Growth) — chữ ký ĐÚNG theo valuation.py hiện tại:
-        # nhận cả series, tự kiểm tra payout ratio, trả về tuple (giá, lý_do).
-        # ⚠️ Đây là fix quan trọng nhất — bản cũ gọi ddm_gordon(dps_latest,
-        # required_return=..., g=...) SAI chữ ký, gây crash TOÀN BỘ pipeline
-        # (not just DDM) cho mọi mã chưa có cache.
         dps_series = fin5.get('dps', pd.Series(dtype=float))
+        dps_series = _filter_years(dps_series)
         dps_latest = get_latest(dps_series, default=0.0) if not dps_series.empty else 0.0
         ddm_value, ddm_note = ddm_gordon(dps_series, net_profit_series, ticker=ticker)
 
