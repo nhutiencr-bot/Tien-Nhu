@@ -558,7 +558,7 @@ def execute_equity_research_pipeline(ticker):
         if latest_fcff and latest_fcff > 0 and issue_share > 0:
             dcf_results = dcf_fcff_scenarios(
                 latest_fcff=latest_fcff, shares_outstanding=issue_share,
-                net_debt=net_debt_latest * 1e9, ticker=ticker)
+                net_debt=net_debt_latest * 1e9)
             reverse_g = reverse_dcf_implied_growth(
                 current_price=current_price, shares_outstanding=issue_share,
                 latest_fcff=latest_fcff, wacc=estimate_wacc(ticker),
