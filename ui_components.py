@@ -217,66 +217,251 @@ def render_tab_kqkd(df_5y_table, fundamentals, period_col='Năm'):
     )
 
 
-def render_tab_valuation(valuation_pkg, metrics):
-    st.markdown("### Định Giá PE · PB · BV Trung Bình 5 Năm")
-    summary = valuation_pkg.get('summary')
-    methods = valuation_pkg.get('methods', {})
+_PBV_CARD_CSS = """
+<style>
+.pbv-hero {
+  border-radius: 20px; padding: 30px 26px; margin-bottom: 20px; text-align: center;
+  background: radial-gradient(circle at 50% 0%, rgba(168,85,247,0.16), rgba(15,15,25,0.35));
+  border: 1px solid rgba(168,85,247,0.25);
+}
+.pbv-hero-eyebrow { color: #d4d4e0; font-size: 16px; font-weight: 700; margin-bottom: 2px; }
+.pbv-hero-sub { color: #9a9aab; font-size: 13px; margin-bottom: 18px; }
+.pbv-hero-value {
+  font-size: 50px; font-weight: 800; font-family: 'Courier New', monospace;
+  background: linear-gradient(90deg, #a855f7, #ec4899);
+  -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
+}
+.pbv-hero-unit { color: #9a9aab; font-size: 13px; margin: 6px 0 18px; }
+.pbv-pill {
+  display: inline-block; padding: 9px 24px; border-radius: 30px;
+  font-weight: 800; font-size: 14px; letter-spacing: 0.5px; margin-bottom: 16px;
+}
+.pbv-pill-cheap { background: #22c55e; color: #052e13; }
+.pbv-pill-fair { background: #fbbf24; color: #3a2a00; }
+.pbv-pill-expensive { background: #f43f5e; color: #3a0512; }
+.pbv-hero-compare { color: #c7c7d6; font-size: 14px; }
 
-    if not summary:
-        st.warning("Không đủ dữ liệu để chạy các phương pháp định giá.")
+.pbv-card {
+  border-radius: 16px; padding: 18px 20px 20px; margin-bottom: 14px; position: relative;
+  border: 1px solid rgba(255,255,255,0.06); background: rgba(255,255,255,0.03); min-height: 148px;
+}
+.pbv-card-reco {
+  background: linear-gradient(135deg, rgba(168,85,247,0.16), rgba(236,72,153,0.10));
+  border-color: rgba(168,85,247,0.30);
+}
+.pbv-card-badge {
+  position: absolute; top: 14px; right: 16px;
+  background: linear-gradient(90deg, #a855f7, #ec4899); color: white;
+  font-size: 10px; font-weight: 800; padding: 3px 10px; border-radius: 20px; letter-spacing: 0.5px;
+}
+.pbv-card-title { color: #9a9aab; font-size: 12px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; }
+.pbv-card-value { font-size: 27px; font-weight: 800; font-family: 'Courier New', monospace; margin-top: 8px; }
+.pbv-card-pct { font-size: 14px; font-weight: 700; margin-top: 2px; }
+.pbv-bar-track { width: 100%; height: 6px; border-radius: 4px; background: rgba(255,255,255,0.08); margin-top: 12px; overflow: hidden; }
+.pbv-bar-fill { height: 100%; border-radius: 4px; }
+.pbv-card-sub { color: #6b6b7b; font-size: 12px; margin-top: 8px; }
+.val-up { color: #22c55e; } .val-down { color: #f43f5e; }
+</style>
+"""
+
+
+def render_tab_valuation(valuation_pkg, metrics):
+    st.markdown(_PBV_CARD_CSS, unsafe_allow_html=True)
+    st.markdown("### 💰 PE · PB · BV Trung Bình 5 Năm")
+
+    cp = metrics.get('current_price') or 0
+    price_s = valuation_pkg.get('price_series')
+    eps_adj_s = valuation_pkg.get('eps_series_adj')
+    bvps_adj_s = valuation_pkg.get('bvps_series_adj')
+
+    # FIX Bẫy 5B (mixing base): nếu có price_series + eps/bvps đã split-adjusted
+    # (cùng số CP hiện tại với giá) → tự tính lại PE/PB lịch sử nhất quán,
+    # thay vì dùng thẳng pe_series/pb_series thô từ vendor (có thể lệch base
+    # ở các năm có phát hành CP thưởng/chia tách → PE/PB bị phình hoặc bóp méo).
+    pe_all = pb_all = None
+    if (price_s is not None and not price_s.empty
+            and eps_adj_s is not None and not eps_adj_s.empty):
+        common_y = sorted(set(price_s.index) & set(eps_adj_s.index))
+        vals = {y: price_s[y] / eps_adj_s[y] for y in common_y
+                if eps_adj_s[y] and eps_adj_s[y] > 0}
+        if vals:
+            pe_all = pd.Series(vals).sort_index()
+    if (price_s is not None and not price_s.empty
+            and bvps_adj_s is not None and not bvps_adj_s.empty):
+        common_y = sorted(set(price_s.index) & set(bvps_adj_s.index))
+        vals = {y: price_s[y] / bvps_adj_s[y] for y in common_y
+                if bvps_adj_s[y] and bvps_adj_s[y] > 0}
+        if vals:
+            pb_all = pd.Series(vals).sort_index()
+
+    # Fallback: không có đủ dữ liệu split-adjusted → dùng ratio thô từ vendor
+    if pe_all is None:
+        pe_all = valuation_pkg.get('pe_series')
+    if pb_all is None:
+        pb_all = valuation_pkg.get('pb_series')
+    bvps_s = bvps_adj_s if bvps_adj_s is not None and not bvps_adj_s.empty \
+        else valuation_pkg.get('bvps_series')
+
+    pe_pos = pe_all[pe_all > 0] if pe_all is not None and not pe_all.empty else None
+    pb_pos = pb_all[pb_all > 0] if pb_all is not None and not pb_all.empty else None
+
+    if pb_pos is None or pb_pos.empty or not cp:
+        st.warning("Không đủ dữ liệu lịch sử P/E, P/B để dựng các kịch bản định giá.")
         return
 
-    median_val = summary.get('target_price_median')
-    median_str = f"{median_val:,.0f}" if median_val is not None else "—"
-    st.markdown(f"#### Giá Trị Hợp Lý Ước Tính: **{median_str} đ/CP**")
-    c1, c2 = st.columns([1, 2])
-    c1.metric("Khuyến nghị", summary.get('recommendation', '—'))
-    upside = summary.get('upside_pct')
-    c2.metric("So Với Giá Hiện Tại",
-              f"{upside:+.1f}%" if upside is not None else "—",
-              delta=f"{upside:+.1f}%" if upside is not None else None)
+    bvps_latest = float(bvps_s.iloc[-1]) if bvps_s is not None and not bvps_s.empty else (
+        cp / metrics['pb'] if metrics.get('pb') else 0)
+    eps_latest = float(eps_adj_s.iloc[-1]) if eps_adj_s is not None and not eps_adj_s.empty else (
+        cp / metrics['pe'] if metrics.get('pe') else 0)
 
-    if methods:
-        display_methods = {
-            k: float(v) for k, v in methods.items()
-            if not k.startswith('_') and isinstance(v, (int, float)) and v > 0
-        }
-        cp = metrics.get('current_price') or 0
-        st.markdown("#### Các Kịch Bản Định Giá")
-        cols = st.columns(min(len(display_methods), 4) or 1)
-        for i, (name, value) in enumerate(display_methods.items()):
-            pct = ((value / cp) - 1) * 100 if cp else 0
-            cols[i % len(cols)].metric(name, f"{value:,.0f} đ", delta=f"{pct:+.1f}%")
+    if not bvps_latest:
+        st.warning("Không đủ dữ liệu BVPS để dựng các kịch bản định giá.")
+        return
 
-        fig = go.Figure()
-        names, values = list(display_methods.keys()), list(display_methods.values())
-        colors = ['#10d98a' if v >= cp else '#ff4d6d' for v in values]
-        fig.add_trace(go.Bar(x=names, y=values, marker_color=colors))
-        fig.add_hline(y=cp, line_dash='dash', line_color='#fbbf24',
-                      annotation_text=f"Giá hiện tại {cp:,.0f}đ")
-        fig.update_layout(template='plotly_dark',
-                          paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
-                          margin=dict(t=20, b=20))
-        st.plotly_chart(fig, use_container_width=True)
+    latest_year = pb_all.index[-1] if pb_all is not None and not pb_all.empty else "gần nhất"
+    yy = str(latest_year)[-2:]
+    st.caption(f"Áp hệ số tham chiếu lên số liệu {latest_year}")
 
-    pe_s = valuation_pkg.get('pe_series')
-    pb_s = valuation_pkg.get('pb_series')
-    if pe_s is not None and not pe_s.empty:
-        st.markdown("### Lịch Sử P/E & P/B 5 Năm")
+    pb_med, pb_mean, pb_max = pb_pos.median(), pb_pos.mean(), pb_pos.max()
+    pe_med = pe_pos.median() if pe_pos is not None and not pe_pos.empty else None
+
+    scenarios = [
+        dict(label="PB 1.0x (Sàn)", value=bvps_latest * 1.0,
+             sub=f"BVPS'{yy}", reco=False),
+        dict(label="PB Median 5N", value=bvps_latest * pb_med,
+             sub=f"BVPS'{yy} × PB {pb_med:.2f}x", reco=False),
+        dict(label="PB TB 5N", value=bvps_latest * pb_mean,
+             sub=f"BVPS'{yy} × PB {pb_mean:.2f}x", reco=True),
+    ]
+    if pe_med and eps_latest:
+        scenarios.append(dict(label="PE Median 5N", value=eps_latest * pe_med,
+                               sub=f"EPS'{yy} × PE {pe_med:.2f}x", reco=True))
+    scenarios.append(dict(label="PB Cao Nhất 5N (Trần)", value=bvps_latest * pb_max,
+                           sub=f"BVPS'{yy} × PB {pb_max:.2f}x", reco=False))
+    scenarios = [s for s in scenarios if s['value'] and s['value'] > 0]
+
+    if not scenarios:
+        st.warning("Không đủ dữ liệu để dựng các kịch bản định giá.")
+        return
+
+    # Giá trị hợp lý = trung bình trọng số (kịch bản khuyến nghị x2)
+    w_sum = sum(2 if s['reco'] else 1 for s in scenarios)
+    fair_value = sum(s['value'] * (2 if s['reco'] else 1) for s in scenarios) / w_sum
+    fair_pct = (fair_value / cp - 1) * 100 if cp else 0
+
+    if fair_pct >= 10:
+        pill_cls, pill_label, compare_word = "cheap", "⬇️ UNDERVALUED", "rẻ hơn"
+    elif fair_pct <= -10:
+        pill_cls, pill_label, compare_word = "expensive", "⬆️ OVERVALUED", "đắt hơn"
+    else:
+        pill_cls, pill_label, compare_word = "fair", "⚖️ FAIRLY VALUED", "ngang giá"
+
+    st.markdown(f"""
+<div class="pbv-hero">
+  <div class="pbv-hero-eyebrow">Giá trị hợp lý ước tính</div>
+  <div class="pbv-hero-sub">Trung bình trọng số các kịch bản</div>
+  <div class="pbv-hero-value">đ{_fmt_k(fair_value)}</div>
+  <div class="pbv-hero-unit">nghìn đồng / cổ phiếu</div>
+  <div class="pbv-pill pbv-pill-{pill_cls}">{pill_label}</div>
+  <div class="pbv-hero-compare">Giá hiện đ{_fmt_k(cp)} → {compare_word} ~{abs(fair_pct):.0f}%</div>
+</div>""", unsafe_allow_html=True)
+
+    st.markdown("#### 5 Kịch Bản Định Giá")
+    st.caption("Hệ số PE/PB tham chiếu × EPS & BVPS gần nhất")
+
+    max_val = max(s['value'] for s in scenarios)
+    cols = st.columns(2)
+    for i, s in enumerate(scenarios):
+        pct = (s['value'] / cp - 1) * 100 if cp else 0
+        width = max(15, min(100, s['value'] / max_val * 100)) if max_val else 15
+        if s['reco']:
+            bar_style = "background:linear-gradient(90deg,#a855f7,#ec4899);"
+        elif pct < 0:
+            bar_style = "background:#f43f5e;"
+        else:
+            bar_style = "background:#22c55e;"
+        card_cls = "pbv-card pbv-card-reco" if s['reco'] else "pbv-card"
+        badge_html = '<div class="pbv-card-badge">KHUYẾN NGHỊ</div>' if s['reco'] else ''
+        val_cls = "val-up" if pct >= 0 else "val-down"
+        cols[i % 2].markdown(f"""
+<div class="{card_cls}">
+  {badge_html}
+  <div class="pbv-card-title">{s['label']}</div>
+  <div class="pbv-card-value">{_fmt_k(s['value'])}</div>
+  <div class="pbv-card-pct {val_cls}">{pct:+.0f}%</div>
+  <div class="pbv-bar-track"><div class="pbv-bar-fill" style="width:{width:.0f}%;{bar_style}"></div></div>
+  <div class="pbv-card-sub">{s['sub']}</div>
+</div>""", unsafe_allow_html=True)
+
+    # --- Lịch sử P/E & P/B 5 năm ---
+    if pe_all is not None and not pe_all.empty:
+        latest_pb = pb_all.iloc[-1] if pb_all is not None and not pb_all.empty else None
+        pb_note = ""
+        if latest_pb is not None and pb_med:
+            if latest_pb < pb_med * 0.85:
+                pb_note = f"{latest_year}: P/B đang thấp hơn trung vị lịch sử — vùng \"mua\" theo lịch sử"
+            elif latest_pb > pb_med * 1.15:
+                pb_note = f"{latest_year}: P/B đang cao hơn trung vị lịch sử — cân nhắc thận trọng"
+            else:
+                pb_note = f"{latest_year}: P/B quanh mức trung vị 5 năm"
+
+        st.markdown("#### Lịch Sử P/E & P/B 5 Năm")
+        if pb_note:
+            st.caption(pb_note)
         fig2 = go.Figure()
-        fig2.add_trace(go.Scatter(x=pe_s.index, y=pe_s.values, name='P/E',
-                                  line=dict(color='#a855f7', width=2), yaxis='y1'))
-        if pb_s is not None and not pb_s.empty:
-            fig2.add_trace(go.Scatter(x=pb_s.index, y=pb_s.values, name='P/B',
-                                      line=dict(color='#10d98a', width=2), yaxis='y2'))
+        fig2.add_trace(go.Scatter(x=pe_all.index, y=pe_all.values, name='P/E',
+                                   mode='lines+markers',
+                                   line=dict(color='#a855f7', width=3),
+                                   marker=dict(size=8, color='#a855f7', line=dict(color='white', width=1)),
+                                   yaxis='y1'))
+        if pb_all is not None and not pb_all.empty:
+            fig2.add_trace(go.Scatter(x=pb_all.index, y=pb_all.values, name='P/B',
+                                       mode='lines+markers',
+                                       line=dict(color='#22c55e', width=3),
+                                       marker=dict(size=8, color='#22c55e', line=dict(color='white', width=1)),
+                                       yaxis='y2'))
         fig2.update_layout(
             template='plotly_dark',
             paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
-            yaxis=dict(title='P/E (x)'),
+            yaxis=dict(title='P/E (x)', gridcolor='rgba(255,255,255,0.06)'),
             yaxis2=dict(title='P/B (x)', overlaying='y', side='right'),
-            margin=dict(t=20, b=20),
+            legend=dict(orientation='h', y=1.15),
+            margin=dict(t=30, b=20),
         )
         st.plotly_chart(fig2, use_container_width=True)
+
+    # --- Giá vs Giá trị sổ sách (BVPS) ---
+    if price_s is not None and not price_s.empty and bvps_s is not None and not bvps_s.empty:
+        common_idx = sorted(set(price_s.index) & set(bvps_s.index))
+        if common_idx:
+            last_y = common_idx[-1]
+            last_price = price_s.get(last_y)
+            last_bvps = bvps_s.get(last_y)
+            bvps_note = ""
+            if last_price and last_bvps:
+                premium_pct = (last_price / last_bvps - 1) * 100
+                word = "premium" if premium_pct >= 0 else "chiết khấu"
+                sign = ">" if last_price >= last_bvps else "<"
+                bvps_note = (f"{last_y}: Giá ({last_price:,.0f}đ) {sign} "
+                             f"BVPS ({last_bvps:,.0f}đ) — {word} ~{abs(premium_pct):.0f}%")
+
+            st.markdown("#### Giá vs Giá Trị Sổ Sách (BVPS)")
+            if bvps_note:
+                st.caption(bvps_note)
+            fig3 = go.Figure()
+            fig3.add_trace(go.Bar(x=common_idx, y=[bvps_s.get(y) for y in common_idx],
+                                   name='BVPS (đ)', marker_color='#0ea5e9', opacity=0.55))
+            fig3.add_trace(go.Scatter(x=common_idx, y=[price_s.get(y) for y in common_idx],
+                                       name='Giá (đ)', mode='lines+markers',
+                                       line=dict(color='#ec4899', width=3),
+                                       marker=dict(size=8, color='#ec4899', line=dict(color='white', width=1))))
+            fig3.update_layout(
+                template='plotly_dark',
+                paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+                legend=dict(orientation='h', y=1.15),
+                margin=dict(t=30, b=20),
+            )
+            st.plotly_chart(fig3, use_container_width=True)
 
 
 def _fmt_k(value):
