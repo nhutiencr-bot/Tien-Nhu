@@ -21,9 +21,9 @@ from cafef_fallback import fetch_cafef_balance_sheet_5y
 # Thử KBS trước (hoạt động ổn định qua mọi lần test) — VCI hay fail/timeout,
 # đưa lên đầu gây chờ vô ích trước khi fallback. Đây là fix tốc độ chính.
 SOURCE_FALLBACK_ORDER = ['KBS', 'VCI', 'DNSE']
-DEFAULT_YEAR_LIMIT = 5   # truyền limit=6 vào Finance → vnai (tier 4 kỳ) vẫn trả 5 kỳ thật
+DEFAULT_YEAR_LIMIT = 5   # truyền limit=5 vào Finance → vnai (tier 4 kỳ) vẫn trả 5 kỳ thật
 # Giải thích: vnai community = max 4 kỳ, nhưng khi limit > 4 thì trả toàn bộ data có sẵn
-# (thường là 5 năm 2021-2025). Đặt 6 để chắc chắn không bị cắt mất 2021.
+# (thường là 5 năm 2021-2025). Đặt 5 để chắc chắn không bị cắt mất 2021.
 
 
 def normalize_to_billion_vnd(series):
