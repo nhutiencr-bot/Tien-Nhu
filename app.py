@@ -163,17 +163,7 @@ render_kpi_cards(metrics, fundamentals)
 ])
 
 with tab_kqkd:
-    che_do_xem = st.selectbox(
-        "Xem dữ liệu theo:",
-        options=["Theo Năm", "Theo Quý"],
-        index=0,
-        key="che_do_xem_kqkd",
-    )
-    if che_do_xem == "Theo Năm":
-        render_tab_kqkd(df_5y_table, fundamentals, period_col="Năm")
-    else:
-        render_tab_kqkd(df_quarter_table, fundamentals, period_col="Quý")
-
+    render_tab_kqkd(df_5y_table, fundamentals, period_col="Năm")
 with tab_valuation:
     render_tab_valuation(valuation_pkg, metrics)
 
