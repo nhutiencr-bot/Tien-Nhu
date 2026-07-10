@@ -1,7 +1,9 @@
 import re
 import requests
 from bs4 import BeautifulSoup
-from cafef_reports import fetch_cafef_reports
+# FIX: đã bỏ `from cafef_reports import fetch_cafef_reports` — bị shadow
+# hoàn toàn bởi hàm fetch_cafef_reports định nghĩa ngay bên dưới (dòng ~26),
+# import cũ không hề được dùng, chỉ gây hiểu nhầm là "name collision".
 
 import streamlit as st
 from styles import apply_premium_fintech_theme
