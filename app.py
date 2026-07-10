@@ -9,7 +9,8 @@ from pipeline import execute_equity_research_pipeline
 from symbols_loader import load_all_symbols, build_display_options
 from ui_components import (
     render_kpi_cards, render_tab_kqkd, render_tab_valuation,
-    render_tab_dcf, render_tab_dupont, render_tab_technical, render_tab_news, fmt,
+    render_tab_multiples, render_tab_dcf, render_tab_dupont,
+    render_tab_technical, render_tab_forecast, fmt,
 )
 ...
 with tab_volume:
