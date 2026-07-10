@@ -523,42 +523,6 @@ def execute_equity_research_pipeline(ticker):
         df_5y_table['ROE (%)'] = df_5y_table['Năm'].map(lambda y: roe_series_filled.get(y, None))
         df_5y_table['ROA (%)'] = df_5y_table['Năm'].map(lambda y: roa_series_filled.get(y, None))
 
-        # ── BỔ SUNG 4 chỉ tiêu mới ────────────────────────────────────────
-        # 1) LCFD HĐKD (CFO) – tỷ
-        if not cfo_series_for_multiples.empty:
-            df_5y_table['LCFD HĐKD (tỷ)'] = df_5y_table['Năm'].map(
-                lambda y: cfo_series_for_multiples.get(y, None))
-        else:
-            df_5y_table['LCFD HĐKD (tỷ)'] = None
-
-        # 2) Số CP lưu hành – tỷ cổ phiếu
-        if outstanding_shares_series is not None and not outstanding_shares_series.empty:
-            # outstanding_shares_series thường theo đơn vị cổ phiếu → chia 1e9 ra tỷ
-            _shares_bil = outstanding_shares_series / 1e9
-            df_5y_table['Số CP lưu hành (tỷ)'] = df_5y_table['Năm'].map(
-                lambda y: _shares_bil.get(y, None))
-        else:
-            df_5y_table['Số CP lưu hành (tỷ)'] = None
-
-        # 3) Biên LNST / ROS (%) = LNST / Doanh thu × 100
-        def _ros(y):
-            rev = revenue_series.get(y, None)
-            np_ = net_profit_series.get(y, None)
-            if rev and np_ and rev != 0:
-                return np_ / rev * 100
-            return None
-        df_5y_table['ROS (%)'] = df_5y_table['Năm'].map(_ros)
-
-        # 4) Giá cuối năm (đ) – lấy close_vnd của phiên giao dịch cuối năm
-        _price_eoy = {}
-        if not df_price.empty and 'time' in df_price.columns and 'close_vnd' in df_price.columns:
-            _df_p = df_price.copy()
-            _df_p['_year'] = pd.to_datetime(_df_p['time']).dt.year
-            for _y, _grp in _df_p.groupby('_year'):
-                _price_eoy[_y] = float(_grp.sort_values('time')['close_vnd'].iloc[-1])
-        df_5y_table['Giá cuối năm (đ)'] = df_5y_table['Năm'].map(
-            lambda y: _price_eoy.get(y, None))
-
         revenue_cagr    = cagr(get_latest_n_years(revenue_series,    DEFAULT_YEAR_LIMIT))
         net_profit_cagr = cagr(get_latest_n_years(net_profit_series, DEFAULT_YEAR_LIMIT))
 
@@ -598,11 +562,6 @@ def execute_equity_research_pipeline(ticker):
             df_quarter_table['BVPS (đ)']             = df_quarter_table['_p'].map(bvps_q)
             df_quarter_table['ROE (%)'] = df_quarter_table['_p'].map(lambda y: roe_q.get(y, None))
             df_quarter_table['ROA (%)'] = df_quarter_table['_p'].map(lambda y: roa_q.get(y, None))
-            # ROS quý = LNST / Doanh thu × 100
-            def _ros_q(p):
-                r = rev_q.get(p, None); n = np_q.get(p, None)
-                return n / r * 100 if r and n and r != 0 else None
-            df_quarter_table['ROS (%)'] = df_quarter_table['_p'].map(_ros_q)
             df_quarter_table = df_quarter_table.drop(columns=['_p'])
         except Exception:
             pass
