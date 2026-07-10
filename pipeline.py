@@ -478,17 +478,10 @@ def execute_equity_research_pipeline(ticker):
         })
 
         # ── Bảng 5 năm ───────────────────────────────────────────────────
-        years_available = sorted(
-            (set(revenue_series.index)      |
-             set(net_profit_series.index)   |
-             set(equity_series.index)       |
-             set(total_assets_series.index) |
-             set(eps_series.index)          |
-             set(bvps_series.index)         |
-             set(roe_series.index)          |
-             set(roa_series.index))
-            & allowed_years
-        )
+        # Luôn hiển thị đủ 5 năm (2021-2025) kể cả khi source thiếu data một năm.
+        # Nếu chỉ union series rồi intersect allowed_years, năm bị thiếu data
+        # hoàn toàn sẽ biến mất khỏi bảng. Fix: dùng allowed_years làm skeleton.
+        years_available = sorted(allowed_years)
 
         eps_series_filled  = eps_series.copy()  if eps_series  is not None else pd.Series(dtype=float)
         bvps_series_filled = bvps_series.copy() if bvps_series is not None else pd.Series(dtype=float)
