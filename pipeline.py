@@ -476,6 +476,8 @@ def execute_equity_research_pipeline(ticker):
              'cash flow from operating activities', 'cash flows from operating activities',
              'net cash generated from operating activities',
              'cash flow from operations', 'operating cash flow']))
+        # FIX: filter về ALLOWED_YEARS để đồng bộ với các series khác (2021–2025)
+        cfo_series_for_multiples = _filter_years(cfo_series_for_multiples)
 
         cfo_latest = get_latest(cfo_series_for_multiples, default=None) \
             if not cfo_series_for_multiples.empty else None
@@ -586,12 +588,24 @@ def execute_equity_research_pipeline(ticker):
             if (y not in bvps_series_filled.index or pd.isna(bvps_series_filled.get(y))) \
                     and has_eq and issue_share > 0:
                 bvps_series_filled[y] = equity_series[y] * 1e9 / issue_share
+            # ROE back-calc: LNST (tỷ) / VCSH (tỷ) × 100 → đúng đơn vị
+            # Guard: chỉ fill khi equity > 0 để tránh chia 0 hoặc số âm bất thường
             if (y not in roe_series_filled.index or pd.isna(roe_series_filled.get(y))) \
-                    and has_np and has_eq and equity_series[y] != 0:
+                    and has_np and has_eq and equity_series[y] > 0:
                 roe_series_filled[y] = net_profit_series[y] / equity_series[y] * 100
+            # ROA back-calc: LNST (tỷ) / Tổng tài sản (tỷ) × 100 → đúng đơn vị
             if (y not in roa_series_filled.index or pd.isna(roa_series_filled.get(y))) \
-                    and has_np and has_ta and total_assets_series[y] != 0:
+                    and has_np and has_ta and total_assets_series[y] > 0:
                 roa_series_filled[y] = net_profit_series[y] / total_assets_series[y] * 100
+
+        # BUG FIX: _normalize_pct phải chạy LẠI sau vòng back-calc.
+        # Nếu chạy trước (trên roe_series từ API) → null hóa series gốc.
+        # Sau đó vòng for điền lại giá trị back-calc — nhưng nếu net_profit_series
+        # đang ở đơn vị đồng (không phải tỷ) thì ROE back-calc = hàng triệu %.
+        # Chạy lại _normalize_pct ở đây sẽ catch được cả 2 nguồn sai.
+        roe_series_filled = _normalize_pct(roe_series_filled)
+        roa_series_filled = _normalize_pct(roa_series_filled)
+        # Nếu vẫn bị null toàn bộ sau normalize → cần xem lại đơn vị net_profit/equity nguồn
 
         df_5y_table = pd.DataFrame({'Năm': years_available})
         df_5y_table['Doanh thu thuần (tỷ)'] = df_5y_table['Năm'].map(revenue_series)
