@@ -265,8 +265,13 @@ def _build_shares_series(outstanding_shares_series, net_profit_series, eps_serie
     return pd.Series(result, dtype=float).sort_index()
 
 
-@st.cache_data(ttl=1800)
-def execute_equity_research_pipeline(ticker):
+def _execute_equity_research_pipeline_inner(ticker):
+    """
+    Toàn bộ logic tính toán gốc — KHÔNG được cache trực tiếp ở đây.
+    Việc cache được xử lý ở wrapper execute_equity_research_pipeline() bên dưới,
+    để có thể chủ động xoá cache khi kết quả lỗi/thiếu dữ liệu quan trọng
+    (FIX #1 — xem giải thích ở wrapper).
+    """
     try:
         q_engine, f_engine, c_engine, source_used = _build_engines_with_fallback(ticker)
 
@@ -289,6 +294,8 @@ def execute_equity_research_pipeline(ticker):
             "ratio_q":    lambda: _fetch_ratio(ticker,             source_used, period='quarter', limit=20),
             "balance_y":  lambda: _fetch_balance_sheet(ticker,     source_used, period='year',    limit=FETCH_LIMIT_YEAR),
             "balance_q":  lambda: _fetch_balance_sheet(ticker,     source_used, period='quarter', limit=20),
+            # FIX #2 — "news" fetch ở đây (song song) và dùng lại kết quả bên dưới,
+            # KHÔNG gọi c_engine.news() thêm lần nữa (bản cũ gọi 2 lần, lãng phí request).
             "news":       lambda: c_engine.news(),
         }
 
@@ -311,6 +318,7 @@ def execute_equity_research_pipeline(ticker):
         df_ratio_q   = results.get("ratio_q",    pd.DataFrame())
         df_balance   = results.get("balance_y",  pd.DataFrame())
         df_balance_q = results.get("balance_q",  pd.DataFrame())
+        news_raw     = results.get("news",       pd.DataFrame())
 
         if df_price is None or df_price.empty:
             st.error(f"Không có dữ liệu giá lịch sử cho mã {ticker}.")
@@ -333,7 +341,7 @@ def execute_equity_research_pipeline(ticker):
         net_profit_series         = normalize_net_profit_with_anchor(
             fin5['net_profit'], equity_series, fin5['roe'])
         eps_series                = fin5['eps']
-        bvps_series               = fin5['bvps']
+        bvps_series                = fin5['bvps']
         roe_series                = fin5['roe']
         roa_series                = fin5['roa']
         pe_series                 = fin5['pe']
@@ -347,15 +355,15 @@ def execute_equity_research_pipeline(ticker):
             return s[s.index.isin(allowed_years)]
 
         revenue_series        = _filter_years(revenue_series)
-        equity_series         = _filter_years(equity_series)
-        total_assets_series   = _filter_years(total_assets_series)
-        net_profit_series     = _filter_years(net_profit_series)
-        eps_series            = _filter_years(eps_series)
-        bvps_series           = _filter_years(bvps_series)
-        roe_series            = _filter_years(roe_series)
-        roa_series            = _filter_years(roa_series)
-        pe_series             = _filter_years(pe_series)
-        pb_series             = _filter_years(pb_series)
+        equity_series          = _filter_years(equity_series)
+        total_assets_series    = _filter_years(total_assets_series)
+        net_profit_series      = _filter_years(net_profit_series)
+        eps_series              = _filter_years(eps_series)
+        bvps_series              = _filter_years(bvps_series)
+        roe_series              = _filter_years(roe_series)
+        roa_series              = _filter_years(roa_series)
+        pe_series                = _filter_years(pe_series)
+        pb_series                = _filter_years(pb_series)
         outstanding_shares_series = _filter_years(outstanding_shares_series)
 
         # PATCH 4 — bổ sung back-calc per-year cho Số CP lưu hành
@@ -638,13 +646,15 @@ def execute_equity_research_pipeline(ticker):
         revenue_cagr    = cagr(get_latest_n_years(revenue_series,    DEFAULT_YEAR_LIMIT))
         net_profit_cagr = cagr(get_latest_n_years(net_profit_series, DEFAULT_YEAR_LIMIT))
 
+        # FIX #3 — dùng roe_series_filled/roa_series_filled (đã back-calc + normalize)
+        # thay vì roe_series/roa_series gốc, để tóm tắt khớp với số hiển thị trong bảng.
         fundamentals_summary = {
             "revenue_cagr_pct":    revenue_cagr    * 100 if revenue_cagr    is not None else None,
             "net_profit_cagr_pct": net_profit_cagr * 100 if net_profit_cagr is not None else None,
             "eps_latest":          eps_latest,
             "bvps_latest":         bvps_latest,
-            "roe_latest":          get_latest(roe_series, default=None),
-            "roa_latest":          get_latest(roa_series, default=None),
+            "roe_latest":          get_latest(roe_series_filled, default=None),
+            "roa_latest":          get_latest(roa_series_filled, default=None),
         }
 
         # ── Bảng quý ─────────────────────────────────────────────────────
@@ -840,8 +850,9 @@ def execute_equity_research_pipeline(ticker):
         }
 
         # ── Tin tức ──────────────────────────────────────────────────────
+        # FIX #2 — dùng news_raw đã fetch song song trong ThreadPoolExecutor ở trên,
+        # KHÔNG gọi lại c_engine.news() lần 2 (bản cũ tốn thêm 1 request mỗi lần chạy).
         vnstock_news = []
-        news_raw = _safe_fetch(lambda: c_engine.news(), default=pd.DataFrame())
         if news_raw is not None and not news_raw.empty:
             for _, row in news_raw.head(10).iterrows():
                 vnstock_news.append({
@@ -868,3 +879,24 @@ def execute_equity_research_pipeline(ticker):
     except Exception as e:
         st.error(f"Lỗi Pipeline: {str(e)}")
         return None
+
+
+@st.cache_data(ttl=1800, show_spinner="Đang tải dữ liệu tài chính...")
+def execute_equity_research_pipeline(ticker):
+    """
+    FIX #1 — nguyên nhân dữ liệu 2021 (hoặc bất kỳ năm nào) "chập chờn":
+    bản cũ decorate @st.cache_data(ttl=1800) THẲNG lên hàm chứa toàn bộ logic.
+    Nếu một lần gọi bị lỗi mạng thoáng qua / thiếu dữ liệu tạm thời từ nguồn,
+    kết quả None hoặc thiếu năm đó sẽ bị Streamlit CACHE LẠI 30 PHÚT — mọi
+    người dùng khác gọi cùng ticker trong 30 phút đó tiếp tục nhận kết quả
+    lỗi/thiếu, dù nguồn dữ liệu đã khôi phục ngay sau đó.
+
+    Cách sửa: tách logic ra hàm inner KHÔNG cache. Hàm wrapper này mới được
+    cache — nhưng nếu kết quả trả về là None (thất bại), chủ động xoá cache
+    vừa ghi ngay lập tức để lần gọi tiếp theo (dù trong 30 phút) sẽ thử lại
+    từ đầu thay vì tiếp tục phục vụ kết quả lỗi.
+    """
+    result = _execute_equity_research_pipeline_inner(ticker)
+    if result is None:
+        execute_equity_research_pipeline.clear()
+    return result
