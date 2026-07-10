@@ -522,6 +522,12 @@ def execute_equity_research_pipeline(ticker):
         df_5y_table['BVPS (đ)']             = df_5y_table['Năm'].map(bvps_series_filled)
         df_5y_table['ROE (%)'] = df_5y_table['Năm'].map(lambda y: roe_series_filled.get(y, None))
         df_5y_table['ROA (%)'] = df_5y_table['Năm'].map(lambda y: roa_series_filled.get(y, None))
+        # Placeholder 4 cột mới — sẽ được điền đầy đủ sau khi tính eps_adj/bvps_adj (Bẫy 5B)
+        # Thứ tự cột: giữ đúng thứ tự hiển thị mong muốn
+        df_5y_table['LCFD HĐKD (tỷ)']      = None
+        df_5y_table['Số CP lưu hành (tỷ)'] = None
+        df_5y_table['ROS (%)']              = None
+        df_5y_table['Giá cuối năm (đ)']     = None
 
         revenue_cagr    = cagr(get_latest_n_years(revenue_series,    DEFAULT_YEAR_LIMIT))
         net_profit_cagr = cagr(get_latest_n_years(net_profit_series, DEFAULT_YEAR_LIMIT))
@@ -562,6 +568,16 @@ def execute_equity_research_pipeline(ticker):
             df_quarter_table['BVPS (đ)']             = df_quarter_table['_p'].map(bvps_q)
             df_quarter_table['ROE (%)'] = df_quarter_table['_p'].map(lambda y: roe_q.get(y, None))
             df_quarter_table['ROA (%)'] = df_quarter_table['_p'].map(lambda y: roa_q.get(y, None))
+            # ROS quý = LNST / Doanh thu × 100 (cùng đơn vị tỷ — Bẫy 2 an toàn)
+            def _ros_q(p):
+                r = rev_q.get(p) if p in rev_q.index else None
+                n = np_q.get(p)  if p in np_q.index  else None
+                if (r is not None and n is not None
+                        and pd.notna(r) and pd.notna(n) and r != 0):
+                    return n / r * 100
+                return None
+            df_quarter_table['ROS (%)'] = df_quarter_table['_p'].map(_ros_q)
+            # LCFD HĐKD / Số CP / Giá cuối năm không có ý nghĩa theo quý → không thêm
             df_quarter_table = df_quarter_table.drop(columns=['_p'])
         except Exception:
             pass
@@ -604,6 +620,72 @@ def execute_equity_research_pipeline(ticker):
         dilution_years = detect_stock_dividend_years(outstanding_shares_series)
         eps_adj, bvps_adj = normalize_eps_bvps_series(
             eps_series_filled, bvps_series_filled, outstanding_shares_series)
+
+        # ── BẪY 5B FIX + 4 CỘT MỚI ──────────────────────────────────────
+        # Quote.history() trả giá SPLIT-ADJUSTED (toàn bộ lịch sử scale về CP mới nhất).
+        # EPS/BVPS ban đầu trong bảng = BCTC gốc (unadjusted).
+        # → Phải OVERWRITE EPS/BVPS bằng eps_adj/bvps_adj (cùng base CP mới nhất với giá)
+        #   để người dùng không vô tình tính PE/PB sai khi nhìn bảng.
+        # Ví dụ BSR: EPS 2021 gốc = 2,166đ (base 3.10 tỷ CP)
+        #             EPS 2021 adj = 2,166/1.615 = 1,341đ (base 5.007 tỷ CP, cùng base giá)
+        #             Giá 2021 split-adj = 13,210đ
+        #             PE đúng = 13,210 / 1,341 = 9.85x (không phải 6.10x)
+
+        # FIX EPS/BVPS: ghi đè bằng split-adjusted (chỉ khi có dilution, tức mult ≠ 1)
+        if dilution_years:  # có split/cổ tức CP trong kỳ → adjust cần thiết
+            df_5y_table['EPS (đ)']  = df_5y_table['Năm'].map(
+                lambda y: eps_adj.get(y, None)  if y in eps_adj.index  else None)
+            df_5y_table['BVPS (đ)'] = df_5y_table['Năm'].map(
+                lambda y: bvps_adj.get(y, None) if y in bvps_adj.index else None)
+
+        # 1) LCFD HĐKD (CFO) – tỷ VND
+        #    cfo_series_for_multiples đã qua normalize_to_billion_vnd → đơn vị tỷ (Bẫy 2: không ×1000)
+        _cfo_s = cfo_series_for_multiples if (
+            cfo_series_for_multiples is not None and not cfo_series_for_multiples.empty
+        ) else pd.Series(dtype=float)
+        df_5y_table['LCFD HĐKD (tỷ)'] = df_5y_table['Năm'].map(
+            lambda y: _cfo_s.get(y, None) if not _cfo_s.empty else None)
+
+        # 2) Số CP lưu hành – tỷ CP
+        #    outstanding_shares_series = cổ phiếu lẻ (raw) → /1e9 = tỷ CP (Bẫy 1: đúng đơn vị)
+        #    Dùng outstanding_shares_series (per-year) KHÔNG dùng issue_share (chỉ là latest)
+        if outstanding_shares_series is not None and not outstanding_shares_series.empty:
+            _shares_ty = outstanding_shares_series / 1e9
+            df_5y_table['Số CP lưu hành (tỷ)'] = df_5y_table['Năm'].map(
+                lambda y: _shares_ty.get(y, None))
+        else:
+            df_5y_table['Số CP lưu hành (tỷ)'] = None
+
+        # 3) Biên LNST / ROS (%)
+        #    = LNST (tỷ) / Doanh thu thuần (tỷ) × 100
+        #    Cùng đơn vị tỷ/tỷ = thuần ratio, không ×1000 (Bẫy 2)
+        #    Dùng LNST thuộc CĐ mẹ (net_profit_series đã qua normalize_net_profit_with_anchor — Bẫy 3)
+        def _ros_annual(y):
+            rev = revenue_series.get(y)    if y in revenue_series.index    else None
+            np_ = net_profit_series.get(y) if y in net_profit_series.index else None
+            if (rev is not None and np_ is not None
+                    and pd.notna(rev) and pd.notna(np_) and rev != 0):
+                return np_ / rev * 100
+            return None
+        df_5y_table['ROS (%)'] = df_5y_table['Năm'].map(_ros_annual)
+
+        # 4) Giá cuối năm (đ) – split-adjusted (từ Quote.history())
+        #    Bẫy 5 / 5B: KHÔNG de-adjust giá — giữ nguyên split-adjusted
+        #    Lý do: EPS trong bảng cũng đã được adjust về cùng base (bước trên)
+        #           → PE người dùng tự tính = Giá adj / EPS adj = ĐÚNG
+        #    Bẫy 4: chỉ lấy năm có data thật trong df_price, không suy đoán
+        _price_eoy: dict = {}
+        if (df_price is not None and not df_price.empty
+                and 'time' in df_price.columns and 'close_vnd' in df_price.columns):
+            _dp = df_price[['time', 'close_vnd']].copy()
+            _dp['_year'] = pd.to_datetime(_dp['time']).dt.year
+            for _yr, _grp in _dp.groupby('_year'):
+                _last = _grp.sort_values('time')['close_vnd'].iloc[-1]
+                if pd.notna(_last) and _last > 0:
+                    _price_eoy[int(_yr)] = float(_last)
+        df_5y_table['Giá cuối năm (đ)'] = df_5y_table['Năm'].map(
+            lambda y: _price_eoy.get(int(y), None))
+        # ── KẾT THÚC BẪY 5B FIX + 4 CỘT MỚI ────────────────────────────
 
         dps_series = fin5.get('dps', pd.Series(dtype=float))
         dps_series = _filter_years(dps_series)
