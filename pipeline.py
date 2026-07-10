@@ -1,856 +1,1375 @@
-import pandas as pd
-import numpy as np
+"""
+ui_components.py
+-----------------
+Tách toàn bộ component UI ra khỏi app.py để giảm tải render,
+tăng tốc độ và dễ maintain.
+
+CHANGELOG:
+  - FIX ROE/ROA CAGR: bỏ hardcode "—" cho dòng có '%', thay bằng 2 chế độ:
+      * is_pct_compound: False → CAGR compound bình thường (EPS, BVPS)
+      * is_pct_compound: True  → Hiển thị thay đổi điểm %% tuyệt đối (pp)
+        VD: ROE từ 29.66% → 26.64% = -3.02 pp (không dùng compound để tránh
+        hiểu nhầm: "CAGR ROE -2.65%" gây lẫn với tăng trưởng doanh thu)
+      Header cột đổi từ "CAGR" thành "CAGR / Δpp" để phân biệt 2 loại.
+  - FIX Tab Multiples Section 02: P/CF và EV/EBITDA tính đúng từ key metrics
+  - FIX ROE/ROA/ROS safety net: clamp giá trị bất thường > 500% → hiển thị "—"
+"""
+
 import streamlit as st
-from news_fetcher import fetch_news_with_fallback
-from datetime import datetime, timedelta
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from vnstock.api.quote import Quote
-from vnstock.api.financial import Finance
-from vnstock.api.company import Company
-from financial_normalizer import (
-    find_row_series, build_5y_financial_table, build_financial_table,
-    get_latest, get_latest_n_years, cagr,
-)
-from valuation import (
-    dupont_decomposition, dcf_fcff_scenarios, reverse_dcf_implied_growth,
-    graham_number, ddm_gordon, nine_methods_valuation, summarize_valuation,
-    detect_stock_dividend_years, normalize_eps_bvps_series, estimate_wacc,
-)
-from cafef_fallback import fetch_cafef_balance_sheet_5y
-
-SOURCE_FALLBACK_ORDER = ['KBS', 'VCI', 'DNSE']
-
-# PATCH 1 — Khóa cứng khoảng năm bảng 5 năm: 2021–2025
-TABLE_START_YEAR = 2021
-TABLE_END_YEAR   = 2025
-ALLOWED_YEARS    = set(range(TABLE_START_YEAR, TABLE_END_YEAR + 1))  # {2021,2022,2023,2024,2025}
-
-# PATCH 2 — Fetch 6 năm để dự phòng, sau đó _filter_years() cắt về đúng khoảng
-FETCH_LIMIT_YEAR = 6
-
-# Giữ lại tên cũ để không break code khác dùng DEFAULT_YEAR_LIMIT
-DEFAULT_YEAR_LIMIT = 5
+import plotly.graph_objects as go
+import pandas as pd
 
 
-def normalize_to_billion_vnd(series):
-    if series is None or series.empty:
-        return series
-    def _to_ty(val):
-        try:
-            if pd.isna(val):
-                return None
-            val = float(val)
-            if abs(val) > 1e11:
-                return round(val / 1e9, 2)
-            return round(val, 2)
-        except Exception:
-            return None
-    return series.map(_to_ty).dropna()
-
-
-def normalize_net_profit_with_anchor(net_profit_raw, equity_series, roe_series):
-    base = normalize_to_billion_vnd(net_profit_raw)
-    if base is None or base.empty:
-        return base
-    fixed = {}
-    for year, raw_val in base.items():
-        if (year not in equity_series.index or year not in roe_series.index
-                or pd.isna(equity_series.get(year)) or pd.isna(roe_series.get(year))):
-            fixed[year] = raw_val
-            continue
-        expected = equity_series[year] * roe_series[year] / 100
-        if expected == 0 or raw_val == 0:
-            fixed[year] = raw_val
-            continue
-        ratio = raw_val / expected
-        if ratio <= 0:
-            fixed[year] = raw_val
-            continue
-        power = round(np.log10(ratio))
-        divisor = 10 ** power
-        fixed[year] = round(raw_val / divisor, 2)
-    return pd.Series(fixed)
-
-
-def _build_engines_with_fallback(ticker):
-    last_error = None
-    test_end   = datetime.today().strftime('%Y-%m-%d')
-    test_start = (datetime.today() - timedelta(days=10)).strftime('%Y-%m-%d')
-    for source in SOURCE_FALLBACK_ORDER:
-        try:
-            q_engine = Quote(symbol=ticker, source=source)
-            probe = q_engine.history(start=test_start, end=test_end, interval='1D')
-            if probe is None or probe.empty:
-                raise ValueError(f"Nguồn {source} trả về dữ liệu rỗng cho {ticker}")
-            f_engine = Finance(symbol=ticker, source=source, period='year')
-            c_engine = Company(symbol=ticker, source=source)
-            return q_engine, f_engine, c_engine, source
-        except Exception as e:
-            last_error = e
-            continue
-    raise ConnectionError(
-        f"Không lấy được dữ liệu cho mã {ticker} từ bất kỳ nguồn nào "
-        f"({', '.join(SOURCE_FALLBACK_ORDER)}). Lỗi cuối cùng: {last_error}"
-    )
-
-
-def _safe_fetch(fn, default=None):
+def fmt(value, suffix="", decimals=2, na="—"):
+    if value is None:
+        return na
     try:
-        result = fn()
-        return result if result is not None else (default if default is not None else pd.DataFrame())
+        if value != value:
+            return na
+        return f"{value:,.{decimals}f}{suffix}"
     except Exception:
-        return default if default is not None else pd.DataFrame()
+        return na
 
 
-def _merge_financial_dataframes(dfs: list):
-    dfs = [d for d in dfs if d is not None and not d.empty]
-    if not dfs:
-        return pd.DataFrame()
-    if len(dfs) == 1:
-        return dfs[0]
-
-    def _year_cols(df):
-        return [c for c in df.columns if re_fullmatch_year(c)]
-
-    def re_fullmatch_year(c):
-        c_str = str(c).strip()
-        return c_str.replace('-', '').replace('Q', '').isdigit() and len(c_str) >= 4
-
-    dfs_sorted = sorted(dfs, key=lambda d: len(_year_cols(d)), reverse=True)
-    merged = dfs_sorted[0].copy()
-    key_col = 'item' if 'item' in merged.columns else merged.columns[0]
-    merged['_key_norm'] = merged[key_col].astype(str).str.lower().str.strip()
-
-    for other in dfs_sorted[1:]:
-        other_key_col = 'item' if 'item' in other.columns else other.columns[0]
-        other = other.copy()
-        other['_key_norm'] = other[other_key_col].astype(str).str.lower().str.strip()
-        other_year_cols = _year_cols(other)
-
-        # 1) Thêm hẳn các cột-năm mà merged CHƯA CÓ (giữ hành vi cũ)
-        new_cols = [c for c in other_year_cols if c not in merged.columns]
-        if new_cols:
-            sub_new = other[['_key_norm'] + new_cols]
-            merged = merged.merge(sub_new, on='_key_norm', how='left')
-
-        # 2) PATCH 5 — Với cột-năm ĐÃ tồn tại nhưng đang NaN (nguồn rộng nhất
-        # có cột nhưng thiếu dữ liệu năm đó), lấp bằng nguồn phụ theo từng dòng.
-        # Đây là nguyên nhân khiến 2021 (hoặc năm bất kỳ) hiện "—" dù limit đã đủ.
-        shared_cols = [c for c in other_year_cols if c in merged.columns and c not in new_cols]
-        if shared_cols:
-            other_indexed = other.drop_duplicates('_key_norm').set_index('_key_norm')
-            for col in shared_cols:
-                if col not in other_indexed.columns:
-                    continue
-                fill_map = other_indexed[col]
-                mask = merged[col].isna()
-                if mask.any():
-                    merged.loc[mask, col] = merged.loc[mask, '_key_norm'].map(fill_map)
-
-    merged = merged.drop(columns=['_key_norm'])
-    return merged
+def format_market_cap_billion(value_billion):
+    if value_billion is None or value_billion != value_billion or value_billion <= 0:
+        return "—"
+    return f"{value_billion:,.0f} Tỷ VNĐ"
 
 
-def _fetch_income_statement(ticker, source, period='year', limit=FETCH_LIMIT_YEAR):
-    sources_to_try = [source] + [s for s in SOURCE_FALLBACK_ORDER if s != source]
-    dfs = []
-    for src in sources_to_try:
+@st.cache_data(ttl=300)
+def _cached_format_table(df_json):
+    """Cache việc format bảng để tránh re-render mỗi lần."""
+    df = pd.read_json(df_json)
+    numeric_cols = [c for c in df.columns if c != 'Năm']
+    for col in numeric_cols:
         try:
-            f = Finance(symbol=ticker, source=src, period=period)
-            try:
-                df = f.income_statement(period=period, limit=limit)
-            except TypeError:
-                df = f.income_statement(period=period)
-            if df is not None and not df.empty:
-                dfs.append(df)
-        except Exception:
-            continue
-    return _merge_financial_dataframes(dfs)
-
-
-def _fetch_ratio(ticker, source, period='year', limit=FETCH_LIMIT_YEAR):
-    sources_to_try = [source] + [s for s in SOURCE_FALLBACK_ORDER if s != source]
-    dfs = []
-    for src in sources_to_try:
-        try:
-            f = Finance(symbol=ticker, source=src, period=period)
-            try:
-                df = f.ratio(period=period, limit=limit)
-            except TypeError:
-                df = f.ratio(period=period)
-            if df is not None and not df.empty:
-                dfs.append(df)
-        except Exception:
-            continue
-    return _merge_financial_dataframes(dfs)
-
-
-def _fetch_cashflow(ticker, source, period='year', limit=FETCH_LIMIT_YEAR):
-    sources_to_try = [source] + [s for s in SOURCE_FALLBACK_ORDER if s != source]
-    dfs = []
-    for src in sources_to_try:
-        try:
-            f = Finance(symbol=ticker, source=src, period=period)
-            try:
-                df = f.cash_flow(period=period, limit=limit)
-            except TypeError:
-                df = f.cash_flow(period=period)
-            if df is not None and not df.empty:
-                dfs.append(df)
-        except Exception:
-            continue
-    return _merge_financial_dataframes(dfs)
-
-
-def _fetch_balance_sheet(ticker, source, period='year', limit=FETCH_LIMIT_YEAR):
-    sources_to_try = [source] + [s for s in SOURCE_FALLBACK_ORDER if s != source]
-    dfs = []
-    for src in sources_to_try:
-        try:
-            f = Finance(symbol=ticker, source=src, period=period)
-            try:
-                df = f.balance_sheet(period=period, limit=limit)
-            except TypeError:
-                df = f.balance_sheet(period=period)
-            if df is not None and not df.empty:
-                dfs.append(df)
-        except Exception:
-            continue
-    return _merge_financial_dataframes(dfs)
-
-
-def _build_shares_series(outstanding_shares_series, net_profit_series, eps_series):
-    """
-    PATCH 4 — Trả về Series số CP lưu hành (đơn vị: cổ phiếu lẻ) theo từng năm.
-    Tầng 1: từ ratio API (outstanding_shares_series).
-    Tầng 2: back-calc LNST(tỷ)*1e9 / EPS(đ) cho từng năm còn thiếu.
-    Verify HPG 2021: LNST=34,521 tỷ, EPS=5,937đ → 34521e9/5937 ≈ 5.82 tỷ CP ✓
-    """
-    result = {}
-    # Tầng 1: từ API
-    if outstanding_shares_series is not None and not outstanding_shares_series.empty:
-        for yr, val in outstanding_shares_series.items():
-            if pd.notna(val) and val > 0:
-                result[yr] = float(val)
-    # Tầng 2: back-calc các năm còn thiếu
-    if net_profit_series is not None and not net_profit_series.empty \
-            and eps_series is not None and not eps_series.empty:
-        for yr in net_profit_series.index:
-            if yr in result:
-                continue
-            np_ty = net_profit_series.get(yr)
-            eps_d = eps_series.get(yr)
-            if (np_ty is not None and eps_d is not None
-                    and pd.notna(np_ty) and pd.notna(eps_d)
-                    and eps_d > 0 and np_ty > 0):
-                backcalc = (np_ty * 1e9) / eps_d  # đơn vị: cổ phiếu lẻ
-                if 1e8 < backcalc < 1e11:          # sanity: 100 triệu – 100 tỷ CP
-                    result[yr] = backcalc
-    if not result:
-        return pd.Series(dtype=float)
-    return pd.Series(result, dtype=float).sort_index()
-
-
-@st.cache_data(ttl=1800)
-def execute_equity_research_pipeline(ticker):
-    try:
-        q_engine, f_engine, c_engine, source_used = _build_engines_with_fallback(ticker)
-
-        # PATCH 1 — Dùng ALLOWED_YEARS khóa cứng 2021–2025 thay vì tính động
-        # (tránh mất 2021 khi current_year=2026, range(2026-5,2026)={2021..2025}
-        #  nhưng nếu đổi DEFAULT_YEAR_LIMIT hay năm tham chiếu sẽ lệch)
-        allowed_years = ALLOWED_YEARS  # {2021, 2022, 2023, 2024, 2025}
-
-        end_date   = datetime.today().strftime('%Y-%m-%d')
-        start_date = (datetime.today() - timedelta(days=365 * 3)).strftime('%Y-%m-%d')
-
-        tasks = {
-            "price":      lambda: q_engine.history(start=start_date, end=end_date, interval='1D'),
-            "overview":   lambda: c_engine.overview(),
-            # PATCH 2 — limit=FETCH_LIMIT_YEAR (7) để chắc lấy đủ từ 2021
-            "income_y":   lambda: _fetch_income_statement(ticker, source_used, period='year',    limit=FETCH_LIMIT_YEAR),
-            "cashflow_y": lambda: _fetch_cashflow(ticker,          source_used, period='year',    limit=FETCH_LIMIT_YEAR),
-            "ratio_y":    lambda: _fetch_ratio(ticker,             source_used, period='year',    limit=FETCH_LIMIT_YEAR),
-            "income_q":   lambda: _fetch_income_statement(ticker,  source_used, period='quarter', limit=20),
-            "ratio_q":    lambda: _fetch_ratio(ticker,             source_used, period='quarter', limit=20),
-            "balance_y":  lambda: _fetch_balance_sheet(ticker,     source_used, period='year',    limit=FETCH_LIMIT_YEAR),
-            "balance_q":  lambda: _fetch_balance_sheet(ticker,     source_used, period='quarter', limit=20),
-            "news":       lambda: c_engine.news(),
-        }
-
-        results = {}
-        with ThreadPoolExecutor(max_workers=10) as executor:
-            future_to_key = {executor.submit(_safe_fetch, fn): key for key, fn in tasks.items()}
-            for future in as_completed(future_to_key):
-                key = future_to_key[future]
-                try:
-                    results[key] = future.result()
-                except Exception:
-                    results[key] = pd.DataFrame()
-
-        df_price     = results.get("price",      pd.DataFrame())
-        df_overview  = results.get("overview",   pd.DataFrame())
-        df_income    = results.get("income_y",   pd.DataFrame())
-        df_cashflow  = results.get("cashflow_y", pd.DataFrame())
-        df_ratio     = results.get("ratio_y",    pd.DataFrame())
-        df_income_q  = results.get("income_q",   pd.DataFrame())
-        df_ratio_q   = results.get("ratio_q",    pd.DataFrame())
-        df_balance   = results.get("balance_y",  pd.DataFrame())
-        df_balance_q = results.get("balance_q",  pd.DataFrame())
-
-        if df_price is None or df_price.empty:
-            st.error(f"Không có dữ liệu giá lịch sử cho mã {ticker}.")
-            return None
-
-        df_price = df_price.dropna(subset=['close']).sort_values('time').reset_index(drop=True)
-        for col in ['close', 'open', 'high', 'low']:
-            df_price[f'{col}_vnd'] = df_price[col] * 1000
-
-        is_bank = ticker in ['VCB', 'BID', 'CTG', 'TCB', 'MBB', 'ACB', 'STB',
-                              'VPB', 'HDB', 'SHB', 'EIB', 'LPB', 'OCB', 'TPB',
-                              'VIB', 'MSB', 'SSB', 'NAB', 'ABB', 'BVB']
-        current_price = float(df_price['close_vnd'].iloc[-1])
-
-        fin5 = build_5y_financial_table(df_income, df_balance, df_ratio, ticker=ticker)
-
-        revenue_series            = normalize_to_billion_vnd(fin5['revenue'])
-        equity_series             = normalize_to_billion_vnd(fin5['equity'])
-        total_assets_series       = normalize_to_billion_vnd(fin5['total_assets'])
-        net_profit_series         = normalize_net_profit_with_anchor(
-            fin5['net_profit'], equity_series, fin5['roe'])
-        eps_series                = fin5['eps']
-        bvps_series               = fin5['bvps']
-        roe_series                = fin5['roe']
-        roa_series                = fin5['roa']
-        pe_series                 = fin5['pe']
-        pb_series                 = fin5['pb']
-        outstanding_shares_series = fin5['outstanding_shares']
-
-        def _filter_years(s):
-            if s is None or s.empty:
-                return s
-            # PATCH 1 — filter về đúng ALLOWED_YEARS (2021–2025), không hơn không kém
-            return s[s.index.isin(allowed_years)]
-
-        revenue_series        = _filter_years(revenue_series)
-        equity_series         = _filter_years(equity_series)
-        total_assets_series   = _filter_years(total_assets_series)
-        net_profit_series     = _filter_years(net_profit_series)
-        eps_series            = _filter_years(eps_series)
-        bvps_series           = _filter_years(bvps_series)
-        roe_series            = _filter_years(roe_series)
-        roa_series            = _filter_years(roa_series)
-        pe_series             = _filter_years(pe_series)
-        pb_series             = _filter_years(pb_series)
-        outstanding_shares_series = _filter_years(outstanding_shares_series)
-
-        # PATCH 4 — bổ sung back-calc per-year cho Số CP lưu hành
-        outstanding_shares_series = _build_shares_series(
-            outstanding_shares_series, net_profit_series, eps_series)
-        outstanding_shares_series = _filter_years(outstanding_shares_series)
-
-        if equity_series.empty and not total_assets_series.empty:
-            total_liab_series = normalize_to_billion_vnd(find_row_series(
-                df_balance,
-                ['tổng cộng nợ phải trả', 'tổng nợ phải trả', 'total liabilities'],
-                exclude_keywords=['vốn chủ sở hữu']))
-            total_liab_series = _filter_years(total_liab_series)
-            if not total_liab_series.empty:
-                common_years = total_assets_series.index.intersection(total_liab_series.index)
-                if len(common_years) > 0:
-                    equity_series = (total_assets_series.loc[common_years]
-                                     - total_liab_series.loc[common_years])
-
-        if equity_series.empty or total_assets_series.empty:
-            cafef_data = fetch_cafef_balance_sheet_5y(ticker)
-            if equity_series.empty and isinstance(cafef_data, dict) and not cafef_data.get('equity', pd.Series()).empty:
-                equity_series = _filter_years(cafef_data['equity'])
-            if total_assets_series.empty and isinstance(cafef_data, dict) and not cafef_data.get('total_assets', pd.Series()).empty:
-                total_assets_series = _filter_years(cafef_data['total_assets'])
-
-        _expected_years  = allowed_years
-        _years_have = (set(revenue_series.index) | set(net_profit_series.index)
-                       | set(equity_series.index) | set(total_assets_series.index))
-        _missing_years = sorted(_expected_years - _years_have)
-        if _missing_years:
-            st.warning(f"⚠️ {ticker}: cả 3 nguồn VCI/KBS/DNSE đều không có dữ liệu năm {_missing_years}.")
-
-        market_cap_series_raw = fin5.get('market_cap', pd.Series(dtype=float))
-        market_cap_direct = get_latest(market_cap_series_raw, default=0.0)
-        if market_cap_direct > 0 and current_price > 0:
-            implied_check = market_cap_direct / current_price
-            if not (1_000_000 <= implied_check <= 50_000_000_000):
-                market_cap_direct = 0.0
-
-        # PATCH 4 — issue_share: 3 tầng fallback khóa chặt không bao giờ ra 0
-        issue_share = get_latest(outstanding_shares_series, default=0.0)
-
-        # Tầng 2: từ overview
-        if issue_share == 0.0 and not df_overview.empty:
-            for col in ['issue_share', 'outstanding_shares', 'listed_volume']:
-                if col in df_overview.columns and pd.notna(df_overview[col].iloc[0]):
-                    issue_share = float(df_overview[col].iloc[0])
-                    break
-
-        # Tầng 2b: charter_capital fallback
-        if issue_share == 0.0 and not df_overview.empty and 'charter_capital' in df_overview.columns:
-            try:
-                issue_share = float(df_overview['charter_capital'].iloc[0]) / 10000
-            except Exception:
-                pass
-
-        # Tầng 3: back-calc từ LNST(tỷ) × 1e9 / EPS(đ) (giá trị latest)
-        if issue_share == 0.0 and not net_profit_series.empty and not eps_series.empty:
-            for yr in sorted(net_profit_series.index, reverse=True):
-                np_ty = net_profit_series.get(yr)
-                eps_d = eps_series.get(yr)
-                if (np_ty is not None and eps_d is not None
-                        and pd.notna(np_ty) and pd.notna(eps_d)
-                        and eps_d > 0 and np_ty > 0):
-                    backcalc = (np_ty * 1e9) / eps_d
-                    if 1e8 < backcalc < 1e11:
-                        issue_share = backcalc
-                        break
-
-        if issue_share == 0.0:
-            st.warning(f"⚠️ Không xác định được số CP lưu hành cho {ticker}.")
-
-        if market_cap_direct > 0 and current_price > 0:
-            implied_from_cap = market_cap_direct / current_price
-            if issue_share > 0:
-                if abs(implied_from_cap - issue_share) / issue_share > 0.20:
-                    issue_share = implied_from_cap
-            else:
-                issue_share = implied_from_cap
-
-        eps_latest  = get_latest(eps_series,  default=0.0)
-        bvps_latest = get_latest(bvps_series, default=0.0)
-        if bvps_latest == 0.0 and issue_share > 0 and not equity_series.empty:
-            bvps_latest = get_latest(equity_series, default=0.0) * 1e9 / issue_share
-
-        # PATCH 3 — _normalize_pct(): 3 nhánh: decimal→×100; hợp lệ→giữ; bất thường→None
-        # Lỗi cũ: chỉ check abs(s.iloc[-1]) < 1 → bỏ sót ROE hàng triệu %
-        # (LNST đơn vị đồng / Vốn CSH đơn vị tỷ → ROE = 36,000,000 → không < 1 → giữ nguyên)
-        def _normalize_pct(s):
-            if s is None or s.empty:
-                return s
-            max_abs = s.abs().max()
-            if max_abs > 10_000:
-                # ROE/ROA hàng triệu % = lỗi đơn vị không thể cứu → trả None toàn series
-                return pd.Series([None] * len(s), index=s.index, dtype=float)
-            if max_abs < 1:
-                # Dạng thập phân (0.33 → 33%)
-                return s * 100
-            # Đã là %, giữ nguyên
-            return s
-
-        roe_series = _normalize_pct(roe_series)
-        roa_series = _normalize_pct(roa_series)
-
-        market_cap = market_cap_direct if market_cap_direct > 0 else (
-            current_price * issue_share if issue_share > 0 else 0.0)
-
-        clean_metrics = {
-            "is_bank":             is_bank,
-            "current_price":       current_price,
-            "market_cap_billion":  market_cap / 1e9,
-            "pe":  (current_price / eps_latest)  if eps_latest  > 0 else 0.0,
-            "pb":  (current_price / bvps_latest) if bvps_latest > 0 else 0.0,
-            "issue_share_million": issue_share / 1e6 if issue_share > 0 else 0,
-            "source_used":         source_used,
-        }
-
-        # ── Multiples mở rộng ────────────────────────────────────────────
-        revenue_latest = get_latest(revenue_series, default=0.0) if not revenue_series.empty else 0.0
-
-        cfo_series_for_multiples = normalize_to_billion_vnd(find_row_series(
-            df_cashflow,
-            ['lưu chuyển tiền thuần từ hoạt động kinh doanh',
-             'lưu chuyển tiền thuần từ hđkd',
-             'i. lưu chuyển tiền từ hoạt động kinh doanh',
-             'lưu chuyển tiền tệ ròng từ các hoạt động sản xuất kinh doanh',
-             'lưu chuyển tiền thuần từ hoạt động sản xuất kinh doanh',
-             'tiền thuần từ hoạt động kinh doanh',
-             'net cash flow from operating', 'net cash provided by operating',
-             'net cash from operating activities',
-             'cash flow from operating activities', 'cash flows from operating activities',
-             'net cash generated from operating activities',
-             'cash flow from operations', 'operating cash flow']))
-        # FIX: filter về ALLOWED_YEARS để đồng bộ với các series khác (2021–2025)
-        cfo_series_for_multiples = _filter_years(cfo_series_for_multiples)
-
-        cfo_latest = get_latest(cfo_series_for_multiples, default=None) \
-            if not cfo_series_for_multiples.empty else None
-        cfo_is_estimated = False
-
-        pretax_series = normalize_to_billion_vnd(find_row_series(
-            df_income,
-            ['lợi nhuận trước thuế', 'tổng lợi nhuận kế toán trước thuế',
-             'lợi nhuận kế toán trước thuế',
-             'profit before tax', 'income before tax', 'earnings before tax']))
-        interest_series = normalize_to_billion_vnd(find_row_series(
-            df_income,
-            ['chi phí lãi vay', 'lãi vay đã trả', 'interest expense', 'interest paid']))
-        if interest_series.empty:
-            interest_series = normalize_to_billion_vnd(find_row_series(
-                df_cashflow, ['chi phí lãi vay', 'lãi vay đã trả', 'interest expense', 'interest paid']))
-        da_series = normalize_to_billion_vnd(find_row_series(
-            df_cashflow,
-            ['khấu hao tài sản cố định', 'khấu hao và phân bổ',
-             'khấu hao tscđ và bđsđt', 'khấu hao bất động sản đầu tư',
-             'hao mòn tài sản cố định', 'chi phí khấu hao',
-             'depreciation and amortization', 'depreciation & amortisation',
-             'depreciation of fixed assets', 'amortisation of intangible', 'depreciation']))
-        if da_series.empty:
-            da_series = normalize_to_billion_vnd(find_row_series(
-                df_income,
-                ['khấu hao tài sản cố định', 'khấu hao và phân bổ',
-                 'depreciation and amortization', 'depreciation']))
-
-        pretax_latest   = get_latest(pretax_series,   default=0.0) if not pretax_series.empty   else 0.0
-        interest_latest = get_latest(interest_series, default=0.0) if not interest_series.empty else 0.0
-        da_latest       = get_latest(da_series,       default=0.0) if not da_series.empty       else 0.0
-
-        try:
-            from financial_normalizer import SECURITIES_TICKERS as _SEC_TICKERS
-            is_securities = ticker in _SEC_TICKERS
-        except ImportError:
-            is_securities = False
-
-        if is_bank:
-            ebitda_latest  = None
-            revenue_latest = 0.0
-        elif not pretax_series.empty:
-            ebitda_latest = abs(pretax_latest) + abs(interest_latest) + abs(da_latest)
-            ebitda_latest = ebitda_latest if ebitda_latest > 0 else None
-        elif not net_profit_series.empty:
-            _np_proxy = get_latest(net_profit_series, default=None)
-            ebitda_latest = (abs(_np_proxy) + abs(da_latest)) if _np_proxy is not None else None
-        else:
-            ebitda_latest = None
-
-        ebitda_is_estimated = (
-            not is_bank
-            and not is_securities
-            and pretax_series.empty
-            and (not net_profit_series.empty)
-        )
-
-        if cfo_latest is None and not net_profit_series.empty:
-            _np_proxy = get_latest(net_profit_series, default=None)
-            if _np_proxy is not None:
-                cfo_latest = abs(_np_proxy) + abs(da_latest)
-                cfo_is_estimated = True
-        if cfo_latest is not None and cfo_latest <= 0:
-            cfo_latest = None
-
-        short_debt_series = normalize_to_billion_vnd(find_row_series(
-            df_balance, ['vay và nợ thuê tài chính ngắn hạn', 'vay ngắn hạn', 'short-term borrowings']))
-        long_debt_series = normalize_to_billion_vnd(find_row_series(
-            df_balance, ['vay và nợ thuê tài chính dài hạn', 'vay dài hạn', 'long-term borrowings']))
-        cash_series = normalize_to_billion_vnd(find_row_series(
-            df_balance, ['tiền và các khoản tương đương tiền', 'tiền và tương đương tiền',
-                         'cash and cash equivalents']))
-
-        short_debt_latest = get_latest(short_debt_series, default=0.0) if not short_debt_series.empty else 0.0
-        long_debt_latest  = get_latest(long_debt_series,  default=0.0) if not long_debt_series.empty  else 0.0
-        cash_latest_val   = get_latest(cash_series,       default=0.0) if not cash_series.empty       else 0.0
-        net_debt_latest   = (short_debt_latest + long_debt_latest) - cash_latest_val
-
-        clean_metrics.update({
-            "revenue_latest_billion":  revenue_latest,
-            "cfo_latest_billion":      cfo_latest,
-            "cfo_is_estimated":        cfo_is_estimated,
-            "ebitda_latest_billion":   ebitda_latest,
-            "ebitda_is_estimated":     ebitda_is_estimated,
-            "net_debt_billion":        net_debt_latest,
-            "excl_extended_multiples": is_bank,
-        })
-
-        # ── Bảng 5 năm ───────────────────────────────────────────────────
-        # PATCH 1 — years_available luôn là [2021,2022,2023,2024,2025]
-        # Năm nào thiếu data sẽ hiển thị — (None) thay vì biến mất khỏi bảng
-        years_available = sorted(allowed_years)
-
-        eps_series_filled  = eps_series.copy()  if eps_series  is not None else pd.Series(dtype=float)
-        bvps_series_filled = bvps_series.copy() if bvps_series is not None else pd.Series(dtype=float)
-        roe_series_filled  = roe_series.copy()  if roe_series  is not None else pd.Series(dtype=float)
-        roa_series_filled  = roa_series.copy()  if roa_series  is not None else pd.Series(dtype=float)
-
-        for y in years_available:
-            has_np = y in net_profit_series.index and pd.notna(net_profit_series.get(y))
-            has_eq = y in equity_series.index      and pd.notna(equity_series.get(y))
-            has_ta = y in total_assets_series.index and pd.notna(total_assets_series.get(y))
-
-            if (y not in eps_series_filled.index or pd.isna(eps_series_filled.get(y))) \
-                    and has_np and issue_share > 0:
-                eps_series_filled[y] = net_profit_series[y] * 1e9 / issue_share
-            if (y not in bvps_series_filled.index or pd.isna(bvps_series_filled.get(y))) \
-                    and has_eq and issue_share > 0:
-                bvps_series_filled[y] = equity_series[y] * 1e9 / issue_share
-            # ROE back-calc: LNST (tỷ) / VCSH (tỷ) × 100 → đúng đơn vị
-            # Guard: chỉ fill khi equity > 0 để tránh chia 0 hoặc số âm bất thường
-            if (y not in roe_series_filled.index or pd.isna(roe_series_filled.get(y))) \
-                    and has_np and has_eq and equity_series[y] > 0:
-                roe_series_filled[y] = net_profit_series[y] / equity_series[y] * 100
-            # ROA back-calc: LNST (tỷ) / Tổng tài sản (tỷ) × 100 → đúng đơn vị
-            if (y not in roa_series_filled.index or pd.isna(roa_series_filled.get(y))) \
-                    and has_np and has_ta and total_assets_series[y] > 0:
-                roa_series_filled[y] = net_profit_series[y] / total_assets_series[y] * 100
-
-        # BUG FIX: _normalize_pct phải chạy LẠI sau vòng back-calc.
-        # Nếu chạy trước (trên roe_series từ API) → null hóa series gốc.
-        # Sau đó vòng for điền lại giá trị back-calc — nhưng nếu net_profit_series
-        # đang ở đơn vị đồng (không phải tỷ) thì ROE back-calc = hàng triệu %.
-        # Chạy lại _normalize_pct ở đây sẽ catch được cả 2 nguồn sai.
-        roe_series_filled = _normalize_pct(roe_series_filled)
-        roa_series_filled = _normalize_pct(roa_series_filled)
-        # Nếu vẫn bị null toàn bộ sau normalize → cần xem lại đơn vị net_profit/equity nguồn
-
-        df_5y_table = pd.DataFrame({'Năm': years_available})
-        df_5y_table['Doanh thu thuần (tỷ)'] = df_5y_table['Năm'].map(revenue_series)
-        df_5y_table['LNST (tỷ)']            = df_5y_table['Năm'].map(net_profit_series)
-        df_5y_table['Vốn CSH (tỷ)']         = df_5y_table['Năm'].map(equity_series)
-        df_5y_table['Tổng tài sản (tỷ)']    = df_5y_table['Năm'].map(total_assets_series)
-        df_5y_table['EPS (đ)']              = df_5y_table['Năm'].map(eps_series_filled)
-        df_5y_table['BVPS (đ)']             = df_5y_table['Năm'].map(bvps_series_filled)
-        df_5y_table['ROE (%)'] = df_5y_table['Năm'].map(lambda y: roe_series_filled.get(y, None))
-        df_5y_table['ROA (%)'] = df_5y_table['Năm'].map(lambda y: roa_series_filled.get(y, None))
-        df_5y_table['LCFD HĐKD (tỷ)']      = None
-        df_5y_table['Số CP lưu hành (tỷ)'] = None
-        df_5y_table['ROS (%)']              = None
-        df_5y_table['Giá cuối năm (đ)']     = None
-
-        revenue_cagr    = cagr(get_latest_n_years(revenue_series,    DEFAULT_YEAR_LIMIT))
-        net_profit_cagr = cagr(get_latest_n_years(net_profit_series, DEFAULT_YEAR_LIMIT))
-
-        fundamentals_summary = {
-            "revenue_cagr_pct":    revenue_cagr    * 100 if revenue_cagr    is not None else None,
-            "net_profit_cagr_pct": net_profit_cagr * 100 if net_profit_cagr is not None else None,
-            "eps_latest":          eps_latest,
-            "bvps_latest":         bvps_latest,
-            "roe_latest":          get_latest(roe_series, default=None),
-            "roa_latest":          get_latest(roa_series, default=None),
-        }
-
-        # ── Bảng quý ─────────────────────────────────────────────────────
-        df_quarter_table = pd.DataFrame()
-        try:
-            fin_q  = build_financial_table(df_income_q, df_balance_q, df_ratio_q,
-                                           ticker=ticker, period='quarter')
-            rev_q  = normalize_to_billion_vnd(fin_q['revenue'])
-            eq_q   = normalize_to_billion_vnd(fin_q['equity'])
-            ta_q   = normalize_to_billion_vnd(fin_q['total_assets'])
-            np_q   = normalize_net_profit_with_anchor(fin_q['net_profit'], eq_q, fin_q['roe'])
-            eps_q  = fin_q['eps']
-            bvps_q = fin_q['bvps']
-            roe_q  = _normalize_pct(fin_q['roe'])
-            roa_q  = _normalize_pct(fin_q['roa'])
-            quarters = sorted(
-                set(rev_q.index) | set(np_q.index) | set(eq_q.index) | set(ta_q.index),
-                key=lambda c: (int(str(c).split('-Q')[0]), int(str(c).split('-Q')[1])))
-            df_quarter_table = pd.DataFrame({'_p': quarters})
-            df_quarter_table['Quý'] = df_quarter_table['_p'].apply(
-                lambda c: f"Q{str(c).split('-Q')[1]}/{str(c).split('-Q')[0]}")
-            df_quarter_table['Doanh thu thuần (tỷ)'] = df_quarter_table['_p'].map(rev_q)
-            df_quarter_table['LNST (tỷ)']            = df_quarter_table['_p'].map(np_q)
-            df_quarter_table['Vốn CSH (tỷ)']         = df_quarter_table['_p'].map(eq_q)
-            df_quarter_table['Tổng tài sản (tỷ)']    = df_quarter_table['_p'].map(ta_q)
-            df_quarter_table['EPS (đ)']              = df_quarter_table['_p'].map(eps_q)
-            df_quarter_table['BVPS (đ)']             = df_quarter_table['_p'].map(bvps_q)
-            df_quarter_table['ROE (%)'] = df_quarter_table['_p'].map(lambda y: roe_q.get(y, None))
-            df_quarter_table['ROA (%)'] = df_quarter_table['_p'].map(lambda y: roa_q.get(y, None))
-            def _ros_q(p):
-                r = rev_q.get(p) if p in rev_q.index else None
-                n = np_q.get(p)  if p in np_q.index  else None
-                if (r is not None and n is not None
-                        and pd.notna(r) and pd.notna(n) and r != 0):
-                    return n / r * 100
-                return None
-            df_quarter_table['ROS (%)'] = df_quarter_table['_p'].map(_ros_q)
-            df_quarter_table = df_quarter_table.drop(columns=['_p'])
+            df[col] = df[col].apply(
+                lambda x: "{:,.2f}".format(float(x))
+                if pd.notnull(x) and str(x).strip() != "" else "—"
+            )
         except Exception:
             pass
+    return df
 
-        # ── DuPont ────────────────────────────────────────────────────────
-        df_dupont = dupont_decomposition(
-            revenue_series, net_profit_series, total_assets_series, equity_series)
 
-        # ── DCF ───────────────────────────────────────────────────────────
-        cfo_series = cfo_series_for_multiples
-        capex_series = normalize_to_billion_vnd(find_row_series(
-            df_cashflow,
-            ['tiền chi để mua sắm', 'purchase of fixed assets',
-             'capital expenditure', 'mua sắm tài sản cố định',
-             'mua sắm xây dựng tài sản cố định', 'tiền chi mua sắm tscđ',
-             'tiền chi ra để mua sắm, xây dựng tài sản cố định',
-             'purchase of property, plant and equipment',
-             'purchases of fixed assets']))
+def render_kpi_cards(metrics, fundamentals):
+    kpi1, kpi2, kpi3, kpi4, kpi5, kpi6 = st.columns(6)
+    kpi1.metric("Thị Giá Hiện Tại", f"{metrics.get('current_price', 0) or 0:,.0f} đ")
+    kpi2.metric("Vốn Hóa", format_market_cap_billion(metrics.get('market_cap_billion', 0) or 0))
+    kpi3.metric("P/E (TTM)", f"{metrics.get('pe', 0) or 0:.2f} x")
+    kpi4.metric("P/B (TTM)", f"{metrics.get('pb', 0) or 0:.2f} x")
+    kpi5.metric("ROE Gần Nhất", fmt(fundamentals['roe_latest'], suffix="%"))
+    kpi6.metric("CAGR LNST 5N", fmt(fundamentals['net_profit_cagr_pct'], suffix="%"))
 
-        latest_fcff = None
-        if not cfo_series.empty:
-            cfo_l   = get_latest(cfo_series,   default=None)
-            capex_l = get_latest(capex_series, default=0.0) if not capex_series.empty else 0.0
-            if cfo_l is not None:
-                latest_fcff = (cfo_l - abs(capex_l)) * 1e9
 
-        dcf_results = reverse_g = None
-        if latest_fcff and latest_fcff > 0 and issue_share > 0:
-            dcf_results = dcf_fcff_scenarios(
-                latest_fcff=latest_fcff, shares_outstanding=issue_share,
-                net_debt=net_debt_latest * 1e9)
-            reverse_g = reverse_dcf_implied_growth(
-                current_price=current_price, shares_outstanding=issue_share,
-                latest_fcff=latest_fcff, wacc=estimate_wacc(ticker),
-                net_debt=net_debt_latest * 1e9)
+def render_tab_kqkd(df_5y_table, fundamentals, period_col='Năm'):
+    label = "5 Năm" if period_col == 'Năm' else "Theo Quý"
+    st.markdown(f"### Kết Quả Kinh Doanh {label}")
 
-        graham_value = graham_number(eps_latest, bvps_latest) \
-            if eps_latest > 0 and bvps_latest > 0 else None
+    if df_5y_table.empty:
+        st.warning(f"Không có đủ dữ liệu BCTC {label.lower()} cho mã này.")
+        return
 
-        dilution_years = detect_stock_dividend_years(outstanding_shares_series)
-        eps_adj, bvps_adj = normalize_eps_bvps_series(
-            eps_series_filled, bvps_series_filled, outstanding_shares_series)
+    # Chart doanh thu + LNST
+    fig_kqkd = go.Figure()
+    if df_5y_table['Doanh thu thuần (tỷ)'].notna().any():
+        fig_kqkd.add_trace(go.Bar(
+            x=df_5y_table[period_col], y=df_5y_table['Doanh thu thuần (tỷ)'],
+            name='Doanh thu thuần (tỷ)', marker_color='#a855f7', yaxis='y1'
+        ))
+    if df_5y_table['LNST (tỷ)'].notna().any():
+        fig_kqkd.add_trace(go.Scatter(
+            x=df_5y_table[period_col], y=df_5y_table['LNST (tỷ)'],
+            name='LNST (tỷ)', line=dict(color='#ec4899', width=3), yaxis='y2'
+        ))
+    fig_kqkd.update_layout(
+        template='plotly_dark',
+        paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+        xaxis=dict(type='category'),
+        yaxis=dict(title='Doanh thu (tỷ)'),
+        yaxis2=dict(title='LNST (tỷ)', overlaying='y', side='right'),
+        legend=dict(orientation='h', y=1.1),
+        margin=dict(t=40, b=20),
+    )
+    st.plotly_chart(fig_kqkd, use_container_width=True)
 
-        # ── BẪY 5B FIX + 4 CỘT MỚI ──────────────────────────────────────
-        if dilution_years:
-            df_5y_table['EPS (đ)']  = df_5y_table['Năm'].map(
-                lambda y: eps_adj.get(y, None)  if y in eps_adj.index  else None)
-            df_5y_table['BVPS (đ)'] = df_5y_table['Năm'].map(
-                lambda y: bvps_adj.get(y, None) if y in bvps_adj.index else None)
+    if period_col == 'Năm':
+        c1, c2 = st.columns(2)
+        c1.metric("CAGR Doanh Thu (5N)", fmt(fundamentals['revenue_cagr_pct'], suffix="%"))
+        c2.metric("CAGR LNST (5N)", fmt(fundamentals['net_profit_cagr_pct'], suffix="%"))
 
-        # 1) LCFD HĐKD (CFO) – tỷ VND
-        _cfo_s = cfo_series_for_multiples if (
-            cfo_series_for_multiples is not None and not cfo_series_for_multiples.empty
-        ) else pd.Series(dtype=float)
-        df_5y_table['LCFD HĐKD (tỷ)'] = df_5y_table['Năm'].map(
-            lambda y: _cfo_s.get(y, None) if not _cfo_s.empty else None)
+    # Chart biên lợi nhuận
+    st.markdown("### Biên Lợi Nhuận & ROE")
+    fig_margin = go.Figure()
+    if 'ROE (%)' in df_5y_table.columns and df_5y_table['ROE (%)'].notna().any():
+        # Safety net: chỉ plot ROE hợp lý (0-200%)
+        roe_plot = df_5y_table['ROE (%)'].where(
+            df_5y_table['ROE (%)'].abs() <= 200, other=None)
+        if roe_plot.notna().any():
+            fig_margin.add_trace(go.Scatter(
+                x=df_5y_table[period_col], y=roe_plot,
+                name='ROE (%)', line=dict(color='#06b6d4', width=2, dash='dash')
+            ))
+    dtt  = df_5y_table['Doanh thu thuần (tỷ)']
+    lnst = df_5y_table['LNST (tỷ)']
+    if dtt.notna().any() and lnst.notna().any() and (dtt != 0).any():
+        ros = (lnst / dtt.replace(0, float('nan')) * 100)
+        # Safety net: chỉ plot ROS hợp lý (-50% đến 100%)
+        ros = ros.where(ros.abs() <= 100, other=None)
+        if ros.notna().any():
+            fig_margin.add_trace(go.Scatter(
+                x=df_5y_table[period_col], y=ros,
+                name='ROS - Biên LNST (%)', line=dict(color='#ec4899', width=2)
+            ))
+    fig_margin.update_layout(
+        template='plotly_dark',
+        paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+        xaxis=dict(type='category'),
+        margin=dict(t=20, b=20),
+    )
+    st.plotly_chart(fig_margin, use_container_width=True)
 
-        # 2) Số CP lưu hành – tỷ CP
-        # PATCH 4 — outstanding_shares_series đã qua _build_shares_series (back-calc per-year)
-        if outstanding_shares_series is not None and not outstanding_shares_series.empty:
-            _shares_ty = outstanding_shares_series / 1e9
-            df_5y_table['Số CP lưu hành (tỷ)'] = df_5y_table['Năm'].map(
-                lambda y: _shares_ty.get(y, None))
-        else:
-            df_5y_table['Số CP lưu hành (tỷ)'] = None
+    # ══════════════════════════════════════════════════════════════════
+    # Bảng tổng hợp tài chính 5 năm — pivot: hàng = chỉ tiêu, cột = năm
+    # Giống hệt ảnh mẫu: highlight Số CP / EPS / BVPS
+    # ══════════════════════════════════════════════════════════════════
+    st.markdown(f"### Bảng tổng hợp tài chính {label}")
+    if period_col == 'Năm':
+        st.caption(f"{df_5y_table[period_col].min()}–{df_5y_table[period_col].max()} · Cột {df_5y_table[period_col].max()} highlight xanh = dữ liệu mới cập nhật")
 
-        # 3) Biên LNST / ROS (%)
-        def _ros_annual(y):
-            rev = revenue_series.get(y)    if y in revenue_series.index    else None
-            np_ = net_profit_series.get(y) if y in net_profit_series.index else None
-            if (rev is not None and np_ is not None
-                    and pd.notna(rev) and pd.notna(np_) and rev != 0):
-                return np_ / rev * 100
+    periods = df_5y_table[period_col].tolist()
+
+    # Map tên cột nội bộ → tên hiển thị đúng như ảnh mẫu
+    _DISPLAY_MAP = {
+        'Doanh thu thuần (tỷ)':  'Doanh thu thuần',
+        'LNST (tỷ)':             'LNST',
+        'Vốn CSH (tỷ)':          'Vốn chủ sở hữu',
+        'Tổng tài sản (tỷ)':     'Tổng tài sản',
+        'LCFD HĐKD (tỷ)':        'LCFD HĐKD\n(CFO)',
+        'Số CP lưu hành (tỷ)':   'Số CP lưu hành\n(tỷ)',
+        'EPS (đ)':               'EPS\n(đồng)',
+        'BVPS (đ)':              'BVPS\n(đồng)',
+        'ROE (%)':               'ROE',
+        'ROA (%)':               'ROA',
+        'ROS (%)':               'Biên LNST\n(ROS)',
+        'Giá cuối năm (đ)':      'Giá cuối năm\n(đ)',
+    }
+    # Hàng được highlight (màu tím nhạt) giống ảnh mẫu
+    _HIGHLIGHT_ROWS = {'Số CP lưu hành\n(tỷ)', 'EPS\n(đồng)', 'BVPS\n(đồng)'}
+
+    # Thứ tự hiển thị đúng ảnh mẫu
+    _ROW_ORDER = [
+        'Doanh thu thuần (tỷ)', 'LNST (tỷ)', 'Vốn CSH (tỷ)', 'Tổng tài sản (tỷ)',
+        'LCFD HĐKD (tỷ)', 'Số CP lưu hành (tỷ)', 'EPS (đ)', 'BVPS (đ)',
+        'ROE (%)', 'ROA (%)', 'ROS (%)', 'Giá cuối năm (đ)',
+    ]
+
+    # SAFETY NET: ngưỡng hợp lý cho từng loại chỉ tiêu
+    # Nếu giá trị vượt ngưỡng → hiển thị "—" thay vì số vô lý
+    _PCT_MAX_ABS = 500.0   # ROE/ROA/ROS > 500% → sai đơn vị, ẩn đi
+    _TY_MAX      = 1e8     # > 100 triệu tỷ → sai đơn vị
+
+    def _fmt_val(col_name, val):
+        if val is None or (isinstance(val, float) and pd.isnull(val)):
+            return "—"
+        try:
+            v = float(val)
+        except Exception:
+            return "—"
+        if pd.isnull(v):
+            return "—"
+
+        # PCT metrics — safety clamp
+        if 'ROE' in col_name or 'ROA' in col_name or 'ROS' in col_name:
+            if abs(v) > _PCT_MAX_ABS:
+                return "—"   # đơn vị sai, ẩn thay vì hiển thị triệu %
+            return f"{v:.1f}%"
+
+        # Per-share metrics
+        if col_name in ('EPS (đ)', 'BVPS (đ)', 'Giá cuối năm (đ)'):
+            if v <= 0 or v > 1e8:   # EPS/BVPS/Giá > 100 triệu đồng → vô lý
+                return "—"
+            return f"{v:,.0f}"
+
+        if col_name == 'Số CP lưu hành (tỷ)':
+            if v <= 0 or v > 1000:   # > 1000 tỷ CP → vô lý
+                return "—"
+            return f"{v:.2f}"
+
+        # Tỷ VND
+        if v != 0 and abs(v) > _TY_MAX:
+            return "—"   # giá trị ở đơn vị đồng chưa normalize → ẩn
+        return f"{v:,.0f}"
+
+    def _calc_cagr(vals):
+        valid = [(i, v) for i, v in enumerate(vals) if pd.notnull(v) and v > 0]
+        if len(valid) < 2:
             return None
-        df_5y_table['ROS (%)'] = df_5y_table['Năm'].map(_ros_annual)
+        (i0, v0), (i1, v1) = valid[0], valid[-1]
+        n = i1 - i0
+        if n <= 0:
+            return None
+        try:
+            return ((v1 / v0) ** (1 / n) - 1) * 100
+        except Exception:
+            return None
 
-        # 4) Giá cuối năm (đ) – split-adjusted
-        _price_eoy: dict = {}
-        if (df_price is not None and not df_price.empty
-                and 'time' in df_price.columns and 'close_vnd' in df_price.columns):
-            _dp = df_price[['time', 'close_vnd']].copy()
-            _dp['_year'] = pd.to_datetime(_dp['time']).dt.year
-            for _yr, _grp in _dp.groupby('_year'):
-                _last = _grp.sort_values('time')['close_vnd'].iloc[-1]
-                if pd.notna(_last) and _last > 0:
-                    _price_eoy[int(_yr)] = float(_last)
-        df_5y_table['Giá cuối năm (đ)'] = df_5y_table['Năm'].map(
-            lambda y: _price_eoy.get(int(y), None))
-        # ── KẾT THÚC BẪY 5B FIX + 4 CỘT MỚI ────────────────────────────
+    n_per_year = 4 if period_col == 'Quý' else 1
+    indicator_cols = [c for c in _ROW_ORDER if c in df_5y_table.columns]
 
-        dps_series = fin5.get('dps', pd.Series(dtype=float))
-        dps_series = _filter_years(dps_series)
-        dps_latest = get_latest(dps_series, default=0.0) if not dps_series.empty else 0.0
-        ddm_value, ddm_note = ddm_gordon(dps_series, net_profit_series, ticker=ticker)
+    rows = []
+    for col in indicator_cols:
+        disp_name = _DISPLAY_MAP.get(col, col)
+        vals = df_5y_table[col].tolist()
+        row = {"CHỈ TIÊU": disp_name}
+        for p, v in zip(periods, vals):
+            row[str(p)] = _fmt_val(col, v)
+        # CAGR / Δpp
+        is_pct = any(k in col for k in ('ROE', 'ROA', 'ROS'))
+        if is_pct:
+            # Chỉ dùng giá trị hợp lý để tính delta
+            valid_v = [v for v in vals
+                       if v is not None and pd.notnull(v) and abs(float(v)) <= _PCT_MAX_ABS]
+            if len(valid_v) >= 2:
+                delta = valid_v[-1] - valid_v[0]
+                sign = "+" if delta >= 0 else ""
+                row["CAGR/Δpp"] = f"{sign}{delta:.1f} pp"
+            else:
+                row["CAGR/Δpp"] = "—"
+        elif col in ('EPS (đ)', 'BVPS (đ)', 'Giá cuối năm (đ)', 'Số CP lưu hành (tỷ)'):
+            valid_v = [(i, v) for i, v in enumerate(vals) if v is not None and pd.notnull(v) and float(v) > 0]
+            if len(valid_v) >= 2:
+                v0, v1 = valid_v[0][1], valid_v[-1][1]
+                chg = (v1 / v0 - 1) * 100
+                sign = "+" if chg >= 0 else ""
+                row["CAGR/Δpp"] = f"{sign}{chg:.1f}%"
+            else:
+                row["CAGR/Δpp"] = "—"
+        else:
+            # Chỉ dùng giá trị hợp lý để tính CAGR
+            cagr_vals = [v if (v is not None and pd.notnull(v)
+                               and abs(float(v)) <= _TY_MAX) else None for v in vals]
+            cagr_val = _calc_cagr(cagr_vals)
+            if cagr_val is not None:
+                sign = "+" if cagr_val >= 0 else ""
+                row["CAGR/Δpp"] = f"{sign}{cagr_val:.1f}%"
+            else:
+                row["CAGR/Δpp"] = "—"
+        rows.append((disp_name in _HIGHLIGHT_ROWS, row))
 
-        dividend_yield_pct = (dps_latest / current_price * 100) \
-            if dps_latest > 0 and current_price > 0 else None
-        clean_metrics["dividend_yield_pct"] = dividend_yield_pct
-        clean_metrics["dps_latest"]         = dps_latest if dps_latest > 0 else None
+    # Render bằng HTML để highlight đúng như ảnh mẫu
+    col_keys = ["CHỈ TIÊU"] + [str(p) for p in periods] + ["CAGR/Δpp"]
+    latest_col = str(periods[-1]) if periods else ""
 
-        valuation_methods = nine_methods_valuation(
-            eps_latest=eps_latest, bvps_latest=bvps_latest,
-            pe_series=pe_series, pb_series=pb_series,
-            current_price=current_price,
-            dcf_results=dcf_results, graham_value=graham_value, ddm_value=ddm_value,
-            eps_adj=eps_adj, bvps_adj=bvps_adj,
-            shares_series=outstanding_shares_series,
-            net_profit_series=net_profit_series,
-            dps_series=dps_series, ticker=ticker)
+    header_cells = ""
+    for k in col_keys:
+        style = "background:#1e3a5f;color:#60a5fa;" if k == latest_col else ""
+        header_cells += f'<th style="padding:8px 12px;text-align:{"left" if k=="CHỈ TIÊU" else "right"};white-space:pre-line;{style}">{k}</th>'
 
-        valuation_summary = summarize_valuation(valuation_methods, current_price) \
-            if valuation_methods else None
+    body_rows = ""
+    for is_hi, row in rows:
+        bg = "background:rgba(100,60,180,0.25);" if is_hi else ""
+        hi_color = "color:#c084fc;font-weight:600;" if is_hi else ""
+        body_rows += f'<tr style="{bg}">'
+        for k in col_keys:
+            val = row.get(k, "—")
+            align = "left" if k == "CHỈ TIÊU" else "right"
+            body_rows += f'<td style="padding:7px 12px;text-align:{align};white-space:pre-line;border-bottom:1px solid rgba(255,255,255,0.06);{hi_color}">{val}</td>'
+        body_rows += "</tr>"
 
-        valuation_package = {
-            "methods":           valuation_methods,
-            "summary":           valuation_summary,
-            "dcf_scenarios":     dcf_results,
-            "reverse_dcf_g_pct": reverse_g * 100 if reverse_g is not None else None,
-            "graham_value":      graham_value,
-            "ddm_value":         ddm_value,
-            "ddm_note":          ddm_note,
-            "dilution_years":    dilution_years,
-            "pe_series":         pe_series,
-            "pb_series":         pb_series,
-            "bvps_series":       bvps_series_filled,
-            "eps_series_adj":    eps_adj,
-            "bvps_series_adj":   bvps_adj,
-            "price_series": (
-                df_price.set_index('time')['close_vnd']
-                .resample('YE').last()
-                .rename(lambda x: x.year)
-                if not df_price.empty and 'time' in df_price.columns
-                   and 'close_vnd' in df_price.columns
-                else pd.Series(dtype=float)
-            ),
-        }
+    table_html = f"""
+<div style="overflow-x:auto;border-radius:12px;border:1px solid rgba(255,255,255,0.08);margin-top:8px">
+<table style="width:100%;border-collapse:collapse;font-size:13.5px;font-family:monospace">
+<thead><tr style="background:rgba(30,30,50,0.8);color:#94a3b8;font-size:11px;letter-spacing:0.5px">
+{header_cells}
+</tr></thead>
+<tbody>{body_rows}</tbody>
+</table>
+</div>
+"""
+    st.markdown(table_html, unsafe_allow_html=True)
 
-        # ── Technical ─────────────────────────────────────────────────────
-        if 'volume' not in df_price.columns:
-            df_price['volume'] = 0
-        df_price['volume_ma20'] = df_price['volume'].rolling(window=20).mean()
-        df_price['MA20']        = df_price['close_vnd'].rolling(window=20).mean()
-        latest_vol  = float(df_price['volume'].iloc[-1])
-        avg_vol_20d = float(df_price['volume_ma20'].iloc[-1]) \
-            if not pd.isna(df_price['volume_ma20'].iloc[-1]) else 0.0
-        vol_vs_avg_pct = ((latest_vol / avg_vol_20d - 1) * 100) if avg_vol_20d > 0 else 0.0
-        technical_summary = {
-            "latest_volume":     latest_vol,
-            "avg_volume_20d":    avg_vol_20d,
-            "volume_vs_avg_pct": vol_vs_avg_pct,
-            "ma20":              df_price['MA20'].iloc[-1],
-            "oil_correlation":   0.74 if ticker in ['BSR', 'OIL', 'PLX', 'PVD', 'PVS', 'GAS'] else 0.0,
-            "trend_signal":      "KHẢ QUAN (Uptrend)"
-                                 if current_price > df_price['MA20'].iloc[-1]
-                                 else "RỦI RO (Downtrend)",
-        }
+    st.caption(
+        "CAGR = tốc độ tăng trưởng kép giữa kỳ đầu và kỳ cuối có dữ liệu. "
+        "ROE/ROA/ROS hiển thị Δpp (thay đổi điểm %). "
+        "Hàng tím = chỉ số per-share (Số CP, EPS, BVPS). "
+        "Ô '—' = nguồn không cung cấp dữ liệu năm đó."
+    )
+_PBV_CARD_CSS = """
+<style>
+.pbv-hero {
+  border-radius: 20px; padding: 30px 26px; margin-bottom: 20px; text-align: center;
+  background: radial-gradient(circle at 50% 0%, rgba(168,85,247,0.16), rgba(15,15,25,0.35));
+  border: 1px solid rgba(168,85,247,0.25);
+}
+.pbv-hero-eyebrow { color: #d4d4e0; font-size: 16px; font-weight: 700; margin-bottom: 2px; }
+.pbv-hero-sub { color: #9a9aab; font-size: 13px; margin-bottom: 18px; }
+.pbv-hero-value {
+  font-size: 50px; font-weight: 800; font-family: 'Courier New', monospace;
+  background: linear-gradient(90deg, #a855f7, #ec4899);
+  -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
+}
+.pbv-hero-unit { color: #9a9aab; font-size: 13px; margin: 6px 0 18px; }
+.pbv-pill {
+  display: inline-block; padding: 9px 24px; border-radius: 30px;
+  font-weight: 800; font-size: 14px; letter-spacing: 0.5px; margin-bottom: 16px;
+}
+.pbv-pill-cheap { background: #22c55e; color: #052e13; }
+.pbv-pill-fair { background: #fbbf24; color: #3a2a00; }
+.pbv-pill-expensive { background: #f43f5e; color: #3a0512; }
+.pbv-hero-compare { color: #c7c7d6; font-size: 14px; }
 
-        # ── Tin tức ──────────────────────────────────────────────────────
-        vnstock_news = []
-        news_raw = _safe_fetch(lambda: c_engine.news(), default=pd.DataFrame())
-        if news_raw is not None and not news_raw.empty:
-            for _, row in news_raw.head(10).iterrows():
-                vnstock_news.append({
-                    "title":    row.get('news_title',  ''),
-                    "source":   row.get('news_source', 'vnstock'),
-                    "url":      row.get('news_url',    '#'),
-                    "pub_date": "—",
-                })
-        news_list = fetch_news_with_fallback(ticker, vnstock_news)
-        if not news_list:
-            news_list = [{
-                "title":  "Không có sự kiện bất thường trong 30 ngày.",
-                "source": "Hệ thống tự động", "url": "#", "pub_date": "—"}]
+.pbv-card {
+  border-radius: 16px; padding: 18px 20px 20px; margin-bottom: 14px; position: relative;
+  border: 1px solid rgba(255,255,255,0.06); background: rgba(255,255,255,0.03); min-height: 148px;
+}
+.pbv-card-reco {
+  background: linear-gradient(135deg, rgba(168,85,247,0.16), rgba(236,72,153,0.10));
+  border-color: rgba(168,85,247,0.30);
+}
+.pbv-card-badge {
+  position: absolute; top: 14px; right: 16px;
+  background: linear-gradient(90deg, #a855f7, #ec4899); color: white;
+  font-size: 10px; font-weight: 800; padding: 3px 10px; border-radius: 20px; letter-spacing: 0.5px;
+}
+.pbv-card-title { color: #9a9aab; font-size: 12px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; }
+.pbv-card-value { font-size: 27px; font-weight: 800; font-family: 'Courier New', monospace; margin-top: 8px; }
+.pbv-card-pct { font-size: 14px; font-weight: 700; margin-top: 2px; }
+.pbv-bar-track { width: 100%; height: 6px; border-radius: 4px; background: rgba(255,255,255,0.08); margin-top: 12px; overflow: hidden; }
+.pbv-bar-fill { height: 100%; border-radius: 4px; }
+.pbv-card-sub { color: #6b6b7b; font-size: 12px; margin-top: 8px; }
+.val-up { color: #22c55e; } .val-down { color: #f43f5e; }
+</style>
+"""
 
-        reports_pkg = None
 
-        return (
-            df_price, df_5y_table, df_quarter_table, df_balance,
-            clean_metrics, technical_summary,
-            news_list, fundamentals_summary, df_dupont, valuation_package,
-            reports_pkg,
+def render_tab_valuation(valuation_pkg, metrics):
+    st.markdown(_PBV_CARD_CSS, unsafe_allow_html=True)
+    st.markdown("### 💰 PE · PB · BV Trung Bình 5 Năm")
+
+    cp = metrics.get('current_price') or 0
+    price_s = valuation_pkg.get('price_series')
+    eps_adj_s = valuation_pkg.get('eps_series_adj')
+    bvps_adj_s = valuation_pkg.get('bvps_series_adj')
+
+    # FIX Bẫy 5B (mixing base): nếu có price_series + eps/bvps đã split-adjusted
+    # (cùng số CP hiện tại với giá) → tự tính lại PE/PB lịch sử nhất quán,
+    # thay vì dùng thẳng pe_series/pb_series thô từ vendor (có thể lệch base
+    # ở các năm có phát hành CP thưởng/chia tách → PE/PB bị phình hoặc bóp méo).
+    pe_all = pb_all = None
+    if (price_s is not None and not price_s.empty
+            and eps_adj_s is not None and not eps_adj_s.empty):
+        common_y = sorted(set(price_s.index) & set(eps_adj_s.index))
+        vals = {y: price_s[y] / eps_adj_s[y] for y in common_y
+                if eps_adj_s[y] and eps_adj_s[y] > 0}
+        if vals:
+            pe_all = pd.Series(vals).sort_index()
+    if (price_s is not None and not price_s.empty
+            and bvps_adj_s is not None and not bvps_adj_s.empty):
+        common_y = sorted(set(price_s.index) & set(bvps_adj_s.index))
+        vals = {y: price_s[y] / bvps_adj_s[y] for y in common_y
+                if bvps_adj_s[y] and bvps_adj_s[y] > 0}
+        if vals:
+            pb_all = pd.Series(vals).sort_index()
+
+    # Fallback: không có đủ dữ liệu split-adjusted → dùng ratio thô từ vendor
+    if pe_all is None:
+        pe_all = valuation_pkg.get('pe_series')
+    if pb_all is None:
+        pb_all = valuation_pkg.get('pb_series')
+    bvps_s = bvps_adj_s if bvps_adj_s is not None and not bvps_adj_s.empty \
+        else valuation_pkg.get('bvps_series')
+
+    pe_pos = pe_all[pe_all > 0] if pe_all is not None and not pe_all.empty else None
+    pb_pos = pb_all[pb_all > 0] if pb_all is not None and not pb_all.empty else None
+
+    if pb_pos is None or pb_pos.empty or not cp:
+        st.warning("Không đủ dữ liệu lịch sử P/E, P/B để dựng các kịch bản định giá.")
+        return
+
+    bvps_latest = float(bvps_s.iloc[-1]) if bvps_s is not None and not bvps_s.empty else (
+        cp / metrics['pb'] if metrics.get('pb') else 0)
+    eps_latest = float(eps_adj_s.iloc[-1]) if eps_adj_s is not None and not eps_adj_s.empty else (
+        cp / metrics['pe'] if metrics.get('pe') else 0)
+
+    if not bvps_latest:
+        st.warning("Không đủ dữ liệu BVPS để dựng các kịch bản định giá.")
+        return
+
+    latest_year = pb_all.index[-1] if pb_all is not None and not pb_all.empty else "gần nhất"
+    yy = str(latest_year)[-2:]
+    st.caption(f"Áp hệ số tham chiếu lên số liệu {latest_year}")
+
+    pb_med, pb_mean, pb_max = pb_pos.median(), pb_pos.mean(), pb_pos.max()
+    pe_med = pe_pos.median() if pe_pos is not None and not pe_pos.empty else None
+
+    scenarios = [
+        dict(label="PB 1.0x (Sàn)", value=bvps_latest * 1.0,
+             sub=f"BVPS'{yy}", reco=False),
+        dict(label="PB Median 5N", value=bvps_latest * pb_med,
+             sub=f"BVPS'{yy} × PB {pb_med:.2f}x", reco=False),
+        dict(label="PB TB 5N", value=bvps_latest * pb_mean,
+             sub=f"BVPS'{yy} × PB {pb_mean:.2f}x", reco=True),
+    ]
+    if pe_med and eps_latest:
+        scenarios.append(dict(label="PE Median 5N", value=eps_latest * pe_med,
+                               sub=f"EPS'{yy} × PE {pe_med:.2f}x", reco=True))
+    scenarios.append(dict(label="PB Cao Nhất 5N (Trần)", value=bvps_latest * pb_max,
+                           sub=f"BVPS'{yy} × PB {pb_max:.2f}x", reco=False))
+    scenarios = [s for s in scenarios if s['value'] and s['value'] > 0]
+
+    if not scenarios:
+        st.warning("Không đủ dữ liệu để dựng các kịch bản định giá.")
+        return
+
+    # Giá trị hợp lý = trung bình trọng số (kịch bản khuyến nghị x2)
+    w_sum = sum(2 if s['reco'] else 1 for s in scenarios)
+    fair_value = sum(s['value'] * (2 if s['reco'] else 1) for s in scenarios) / w_sum
+    fair_pct = (fair_value / cp - 1) * 100 if cp else 0
+
+    if fair_pct >= 10:
+        pill_cls, pill_label, compare_word = "cheap", "⬇️ UNDERVALUED", "rẻ hơn"
+    elif fair_pct <= -10:
+        pill_cls, pill_label, compare_word = "expensive", "⬆️ OVERVALUED", "đắt hơn"
+    else:
+        pill_cls, pill_label, compare_word = "fair", "⚖️ FAIRLY VALUED", "ngang giá"
+
+    st.markdown(f"""
+<div class="pbv-hero">
+  <div class="pbv-hero-eyebrow">Giá trị hợp lý ước tính</div>
+  <div class="pbv-hero-sub">Trung bình trọng số các kịch bản</div>
+  <div class="pbv-hero-value">đ{_fmt_k(fair_value)}</div>
+  <div class="pbv-hero-unit">nghìn đồng / cổ phiếu</div>
+  <div class="pbv-pill pbv-pill-{pill_cls}">{pill_label}</div>
+  <div class="pbv-hero-compare">Giá hiện đ{_fmt_k(cp)} → {compare_word} ~{abs(fair_pct):.0f}%</div>
+</div>""", unsafe_allow_html=True)
+
+    st.markdown("#### 5 Kịch Bản Định Giá")
+    st.caption("Hệ số PE/PB tham chiếu × EPS & BVPS gần nhất")
+
+    max_val = max(s['value'] for s in scenarios)
+    cols = st.columns(2)
+    for i, s in enumerate(scenarios):
+        pct = (s['value'] / cp - 1) * 100 if cp else 0
+        width = max(15, min(100, s['value'] / max_val * 100)) if max_val else 15
+        if s['reco']:
+            bar_style = "background:linear-gradient(90deg,#a855f7,#ec4899);"
+        elif pct < 0:
+            bar_style = "background:#f43f5e;"
+        else:
+            bar_style = "background:#22c55e;"
+        card_cls = "pbv-card pbv-card-reco" if s['reco'] else "pbv-card"
+        badge_html = '<div class="pbv-card-badge">KHUYẾN NGHỊ</div>' if s['reco'] else ''
+        val_cls = "val-up" if pct >= 0 else "val-down"
+        cols[i % 2].markdown(f"""
+<div class="{card_cls}">
+  {badge_html}
+  <div class="pbv-card-title">{s['label']}</div>
+  <div class="pbv-card-value">{_fmt_k(s['value'])}</div>
+  <div class="pbv-card-pct {val_cls}">{pct:+.0f}%</div>
+  <div class="pbv-bar-track"><div class="pbv-bar-fill" style="width:{width:.0f}%;{bar_style}"></div></div>
+  <div class="pbv-card-sub">{s['sub']}</div>
+</div>""", unsafe_allow_html=True)
+
+    # --- Lịch sử P/E & P/B 5 năm ---
+    if pe_all is not None and not pe_all.empty:
+        latest_pb = pb_all.iloc[-1] if pb_all is not None and not pb_all.empty else None
+        pb_note = ""
+        if latest_pb is not None and pb_med:
+            if latest_pb < pb_med * 0.85:
+                pb_note = f"{latest_year}: P/B đang thấp hơn trung vị lịch sử — vùng \"mua\" theo lịch sử"
+            elif latest_pb > pb_med * 1.15:
+                pb_note = f"{latest_year}: P/B đang cao hơn trung vị lịch sử — cân nhắc thận trọng"
+            else:
+                pb_note = f"{latest_year}: P/B quanh mức trung vị 5 năm"
+
+        st.markdown("#### Lịch Sử P/E & P/B 5 Năm")
+        if pb_note:
+            st.caption(pb_note)
+        fig2 = go.Figure()
+        fig2.add_trace(go.Scatter(x=pe_all.index, y=pe_all.values, name='P/E',
+                                   mode='lines+markers',
+                                   line=dict(color='#a855f7', width=3),
+                                   marker=dict(size=8, color='#a855f7', line=dict(color='white', width=1)),
+                                   yaxis='y1'))
+        if pb_all is not None and not pb_all.empty:
+            fig2.add_trace(go.Scatter(x=pb_all.index, y=pb_all.values, name='P/B',
+                                       mode='lines+markers',
+                                       line=dict(color='#22c55e', width=3),
+                                       marker=dict(size=8, color='#22c55e', line=dict(color='white', width=1)),
+                                       yaxis='y2'))
+        fig2.update_layout(
+            template='plotly_dark',
+            paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+            yaxis=dict(title='P/E (x)', gridcolor='rgba(255,255,255,0.06)'),
+            yaxis2=dict(title='P/B (x)', overlaying='y', side='right'),
+            legend=dict(orientation='h', y=1.15),
+            margin=dict(t=30, b=20),
+        )
+        st.plotly_chart(fig2, use_container_width=True)
+
+    # --- Giá vs Giá trị sổ sách (BVPS) ---
+    if price_s is not None and not price_s.empty and bvps_s is not None and not bvps_s.empty:
+        common_idx = sorted(set(price_s.index) & set(bvps_s.index))
+        if common_idx:
+            last_y = common_idx[-1]
+            last_price = price_s.get(last_y)
+            last_bvps = bvps_s.get(last_y)
+            bvps_note = ""
+            if last_price and last_bvps:
+                premium_pct = (last_price / last_bvps - 1) * 100
+                word = "premium" if premium_pct >= 0 else "chiết khấu"
+                sign = ">" if last_price >= last_bvps else "<"
+                bvps_note = (f"{last_y}: Giá ({last_price:,.0f}đ) {sign} "
+                             f"BVPS ({last_bvps:,.0f}đ) — {word} ~{abs(premium_pct):.0f}%")
+
+            st.markdown("#### Giá vs Giá Trị Sổ Sách (BVPS)")
+            if bvps_note:
+                st.caption(bvps_note)
+            fig3 = go.Figure()
+            fig3.add_trace(go.Bar(x=common_idx, y=[bvps_s.get(y) for y in common_idx],
+                                   name='BVPS (đ)', marker_color='#0ea5e9', opacity=0.55))
+            fig3.add_trace(go.Scatter(x=common_idx, y=[price_s.get(y) for y in common_idx],
+                                       name='Giá (đ)', mode='lines+markers',
+                                       line=dict(color='#ec4899', width=3),
+                                       marker=dict(size=8, color='#ec4899', line=dict(color='white', width=1))))
+            fig3.update_layout(
+                template='plotly_dark',
+                paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+                legend=dict(orientation='h', y=1.15),
+                margin=dict(t=30, b=20),
+            )
+            st.plotly_chart(fig3, use_container_width=True)
+
+
+def _fmt_k(value):
+    if value is None:
+        return "—"
+    try:
+        return f"{value/1000:,.1f}K"
+    except Exception:
+        return "—"
+
+
+_DCF_CARD_CSS = """
+<style>
+.dcf-card {
+border-radius: 16px; padding: 20px 22px; margin-bottom: 14px;
+border: 1px solid rgba(255,255,255,0.06);
+}
+.dcf-card-bear { background: rgba(244, 63, 94, 0.10); border-color: rgba(244,63,94,0.25); }
+.dcf-card-base { background: linear-gradient(135deg, rgba(168,85,247,0.16), rgba(236,72,153,0.10)); border-color: rgba(168,85,247,0.30); }
+.dcf-card-bull { background: rgba(16, 185, 129, 0.10); border-color: rgba(16,185,129,0.28); }
+.dcf-card-neutral{ background: rgba(255,255,255,0.03); }
+.dcf-card-header { display:flex; justify-content:space-between; align-items:center; }
+.dcf-card-title { font-size: 17px; font-weight: 700; color: #f1f1f6; }
+.dcf-card-badge { background: linear-gradient(90deg, #a855f7, #ec4899); color: white; font-size: 11px; font-weight: 700; padding: 3px 10px; border-radius: 20px; letter-spacing: 0.5px; }
+.dcf-card-sub { color: #9a9aab; font-size: 13px; margin-top: 4px; }
+.dcf-card-bottom { display:flex; justify-content:space-between; align-items:flex-end; margin-top: 10px; }
+.dcf-card-value { font-size: 30px; font-weight: 800; font-family: 'Courier New', monospace; }
+.dcf-card-pct { font-size: 14px; font-weight: 700; }
+.val-bear { color: #f43f5e; } .val-base { color: #f1f1f6; } .val-bull { color: #22c55e; }
+.pct-bear { color: #f43f5e; } .pct-base { color: #22c55e; } .pct-bull { color: #22c55e; }
+.simple-card { border-radius: 16px; padding: 20px 22px; margin-bottom: 14px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.06); }
+.simple-card-eyebrow { color: #9a9aab; font-size: 12px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; margin-bottom: 6px; }
+.simple-card-title { font-size: 17px; font-weight: 700; color: #f1f1f6; margin-bottom: 4px; }
+.simple-card-sub { color: #9a9aab; font-size: 13px; margin-bottom: 14px; }
+.graham-row { display:flex; align-items:baseline; gap: 14px; margin-bottom: 16px; }
+.graham-val { font-size: 34px; font-weight: 800; font-family: 'Courier New', monospace; color: #22c55e; }
+.graham-vs { color: #6b6b7b; font-size: 16px; }
+.graham-cur { font-size: 34px; font-weight: 800; font-family: 'Courier New', monospace; color: #f1f1f6; }
+.graham-label { color: #9a9aab; font-size: 12px; display:block; margin-top: 2px; }
+.verdict-pill { border-radius: 12px; padding: 12px 16px; font-weight: 700; font-size: 15px; text-align: center; }
+.verdict-cheap { background: rgba(34,197,94,0.15); color: #22c55e; }
+.verdict-expensive { background: rgba(244,63,94,0.15); color: #f43f5e; }
+.verdict-fair { background: rgba(255,255,255,0.06); color: #d4d4e0; }
+.big-metric-value { font-size: 34px; font-weight: 800; font-family: 'Courier New', monospace; }
+</style>
+"""
+
+
+def render_tab_dcf(valuation_pkg, metrics):
+    st.markdown(_DCF_CARD_CSS, unsafe_allow_html=True)
+    st.markdown("### Định Giá Nội Tại · DCF (FCFF) & Graham")
+
+    sector_labels = {
+        'bank': 'Ngân hàng', 'steel': 'Thép / Công nghiệp nặng',
+        'real_estate': 'Bất động sản', 'retail': 'Bán lẻ / Tiêu dùng',
+        'tech': 'Công nghệ / Viễn thông', 'oil_gas': 'Dầu khí / Hoá chất',
+        'aviation': 'Hàng không / Vận tải', 'default': 'Chưa xác định (dùng WACC mặc định)',
+    }
+    sector = valuation_pkg.get('sector_detected', 'default')
+    wacc_base_pct = valuation_pkg.get('wacc_base_pct')
+    if wacc_base_pct is not None:
+        st.caption(
+            f"📌 Ngành nhận diện: **{sector_labels.get(sector, sector)}** · "
+            f"WACC cơ sở theo ngành: **~{wacc_base_pct:.1f}%** "
+            f"(áp dụng cho kịch bản DCF bên dưới — không dùng chung 10.5% cho mọi mã)."
         )
 
-    except Exception as e:
-        st.error(f"Lỗi Pipeline: {str(e)}")
-        return None
+    current_price = metrics.get('current_price', 0)
+    dcf = valuation_pkg.get('dcf_scenarios')
+
+    if dcf:
+        st.markdown(f"##### DCF — 3 Kịch Bản FCFF")
+        order = [('Bi quan', '🔻', 'bear'), ('Cơ sở', '⚖️', 'base'), ('Tích cực', '🚀', 'bull')]
+        for name, icon, tone in order:
+            res = dcf.get(name)
+            if not res:
+                continue
+            pct = (res['value_per_share'] / current_price - 1) * 100 if current_price else 0
+            wacc_pct = res.get('wacc', 0) * 100
+            g_pct    = res.get('g', 0) * 100
+            badge_html = '<span class="dcf-card-badge">BASE</span>' if tone == 'base' else ''
+            st.markdown(f"""
+<div class="dcf-card dcf-card-{tone}">
+  <div class="dcf-card-header">
+    <span class="dcf-card-title">{icon} {name}</span>{badge_html}
+  </div>
+  <div class="dcf-card-sub">WACC {wacc_pct:.0f}% · g {g_pct:.1f}%</div>
+  <div class="dcf-card-bottom"><span></span>
+    <div style="text-align:right;">
+      <div class="dcf-card-value val-{tone}">{_fmt_k(res['value_per_share'])}</div>
+      <div class="dcf-card-pct pct-{tone}">{pct:+.0f}%</div>
+    </div>
+  </div>
+</div>""", unsafe_allow_html=True)
+    else:
+        st.warning("Không tính được DCF do thiếu dữ liệu dòng tiền.")
+
+    graham = valuation_pkg.get('graham_value')
+    if graham:
+        g_pct = (graham / current_price - 1) * 100 if current_price else 0
+        if g_pct > 10:
+            verdict_class, verdict_text = "verdict-cheap", f"✅ RẺ {g_pct:.0f}% theo Graham Number"
+        elif g_pct < -10:
+            verdict_class, verdict_text = "verdict-expensive", f"⚠️ ĐẮT {abs(g_pct):.0f}% theo Graham Number"
+        else:
+            verdict_class, verdict_text = "verdict-fair", "⚖️ Giá đang quanh mức hợp lý theo Graham Number"
+        st.markdown(f"""
+<div class="simple-card">
+  <div class="simple-card-title">Graham Number √(22.5 × EPS × BVPS)</div>
+  <div class="simple-card-sub">Sanity check đầu tư giá trị</div>
+  <div class="graham-row">
+    <div><div class="graham-val">{_fmt_k(graham)}</div><span class="graham-label">Graham</span></div>
+    <span class="graham-vs">vs</span>
+    <div><div class="graham-cur">{_fmt_k(current_price)}</div><span class="graham-label">Giá hiện tại</span></div>
+  </div>
+  <div class="verdict-pill {verdict_class}">{verdict_text}</div>
+</div>""", unsafe_allow_html=True)
+
+    reverse_g = valuation_pkg.get('reverse_dcf_g_pct')
+    if reverse_g is not None:
+        st.markdown(f"""
+<div class="simple-card">
+  <div class="simple-card-eyebrow">🔄 Reverse DCF</div>
+  <div class="big-metric-value" style="color:#22c55e;">~{reverse_g:.0f}%/năm</div>
+  <div class="simple-card-sub" style="margin-top:8px;margin-bottom:0;">
+    Tại giá {_fmt_k(current_price)}, thị trường đang ngụ ý tốc độ tăng trưởng FCFF ~{reverse_g:.0f}%/năm.
+  </div>
+</div>""", unsafe_allow_html=True)
+
+    ddm = valuation_pkg.get('ddm_value')
+    if ddm:
+        ddm_pct = (ddm / current_price - 1) * 100 if current_price else 0
+        ddm_color = "#22c55e" if ddm_pct >= 0 else "#f43f5e"
+        st.markdown(f"""
+<div class="simple-card">
+  <div class="simple-card-eyebrow">🔋 DDM (Gordon)</div>
+  <div class="big-metric-value" style="color:{ddm_color};">{_fmt_k(ddm)}</div>
+  <div class="simple-card-sub" style="margin-top:8px;margin-bottom:0;">So với giá hiện tại: {ddm_pct:+.0f}%.</div>
+</div>""", unsafe_allow_html=True)
+    else:
+        st.markdown("""
+<div class="simple-card">
+  <div class="simple-card-eyebrow">🔋 DDM (Gordon)</div>
+  <div class="simple-card-sub" style="margin-bottom:0;">Không áp dụng — thiếu DPS hoặc mã không chia cổ tức tiền mặt đều đặn.</div>
+</div>""", unsafe_allow_html=True)
+
+
+def render_tab_dupont(df_dupont):
+    st.markdown("### DuPont · Chất Lượng ROE")
+    st.caption("ROE = Biên Lợi Nhuận × Vòng Quay Tài Sản × Đòn Bẩy Tài Chính")
+
+    if df_dupont is None or df_dupont.empty:
+        st.warning("Không đủ dữ liệu để phân tách DuPont.")
+        return
+
+    COL_MARGIN   = 'Net margin (%)'
+    COL_TURNOVER = 'Asset turnover (x)'
+    COL_LEVERAGE = 'Equity multiplier (x)'
+    COL_ROE      = 'ROE (%)'
+    COL_YEAR     = 'Năm'
+
+    if COL_YEAR in df_dupont.columns:
+        df_dupont = df_dupont.set_index(COL_YEAR)
+
+    fig = go.Figure()
+    if COL_MARGIN in df_dupont.columns:
+        fig.add_trace(go.Bar(x=df_dupont.index, y=df_dupont[COL_MARGIN],
+                             name='Biên LN (%)', marker_color='#a855f7'))
+    if COL_TURNOVER in df_dupont.columns:
+        fig.add_trace(go.Bar(x=df_dupont.index, y=df_dupont[COL_TURNOVER] * 100,
+                             name='Vòng quay TS (×100)', marker_color='#ec4899'))
+    if COL_LEVERAGE in df_dupont.columns:
+        fig.add_trace(go.Bar(x=df_dupont.index, y=df_dupont[COL_LEVERAGE] * 10,
+                             name='Đòn bẩy (×10)', marker_color='#06b6d4'))
+    fig.update_layout(barmode='stack', template='plotly_dark',
+                      paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+                      margin=dict(t=20, b=20))
+    st.plotly_chart(fig, use_container_width=True)
+
+    latest_year = df_dupont.index.max()
+    r = df_dupont.loc[latest_year]
+    d1, d2, d3 = st.columns(3)
+    d1.metric(f"Biên LN {latest_year}",
+              f"{r[COL_MARGIN]:.1f}%" if COL_MARGIN in r and r[COL_MARGIN] == r[COL_MARGIN] else '—')
+    d2.metric("Vòng Quay TS",
+              f"{r[COL_TURNOVER]:.2f}x" if COL_TURNOVER in r and r[COL_TURNOVER] == r[COL_TURNOVER] else '—')
+    d3.metric("Đòn Bẩy",
+              f"{r[COL_LEVERAGE]:.2f}x" if COL_LEVERAGE in r and r[COL_LEVERAGE] == r[COL_LEVERAGE] else '—')
+
+
+def render_tab_technical(df_price, tech, metrics):
+    st.markdown("### 📈 Phân Tích Kỹ Thuật")
+
+    fig_price = go.Figure()
+    fig_price.add_trace(go.Scatter(x=df_price['time'], y=df_price['close_vnd'],
+                                   name='Giá đóng cửa', line=dict(color='#f0f0ff', width=1.5)))
+    if 'MA20' in df_price.columns:
+        fig_price.add_trace(go.Scatter(x=df_price['time'], y=df_price['MA20'],
+                                       name='MA20', line=dict(color='#a855f7', width=1.5, dash='dot')))
+    if 'MA50' in df_price.columns:
+        fig_price.add_trace(go.Scatter(x=df_price['time'], y=df_price['MA50'],
+                                       name='MA50', line=dict(color='#ec4899', width=1.5, dash='dot')))
+    fig_price.update_layout(template='plotly_dark',
+                            paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+                            margin=dict(t=20, b=20), legend=dict(orientation='h', y=1.1))
+    st.plotly_chart(fig_price, use_container_width=True)
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Giá Hiện Tại", f"{metrics.get('current_price', 0):,.0f} đ")
+    c2.metric("MA20", f"{tech.get('ma20', 0):,.0f} đ" if tech.get('ma20') == tech.get('ma20') else "—")
+    c3.metric("MA50", f"{tech.get('ma50', 0):,.0f} đ" if tech.get('ma50') == tech.get('ma50') else "—")
+    c4.metric("Xu Hướng", tech.get('trend_signal', 'N/A'))
+
+    st.markdown("---")
+    st.markdown("#### RSI (14 phiên) — Chỉ Báo Động Lượng")
+    if 'RSI14' in df_price.columns:
+        fig_rsi = go.Figure()
+        fig_rsi.add_trace(go.Scatter(x=df_price['time'], y=df_price['RSI14'],
+                                     name='RSI14', line=dict(color='#06b6d4', width=2)))
+        fig_rsi.add_hline(y=70, line_dash='dash', line_color='#ff4d6d', annotation_text='Quá mua (70)')
+        fig_rsi.add_hline(y=30, line_dash='dash', line_color='#10d98a', annotation_text='Quá bán (30)')
+        fig_rsi.update_layout(template='plotly_dark',
+                              paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+                              yaxis=dict(range=[0, 100]), margin=dict(t=20, b=20))
+        st.plotly_chart(fig_rsi, use_container_width=True)
+
+    r1, r2 = st.columns(2)
+    r1.metric("RSI (14)", f"{tech.get('rsi14', 50):.1f}")
+    r2.metric("Tín Hiệu RSI", tech.get('rsi_signal', 'N/A'))
+
+    st.markdown("---")
+    st.markdown("#### Khối Lượng Giao Dịch 20 Ngày")
+    fig_vol = go.Figure()
+    fig_vol.add_trace(go.Bar(x=df_price['time'], y=df_price['volume'],
+                             name="Khối lượng GD", marker_color='#a855f7', opacity=0.6))
+    if 'volume_ma20' in df_price.columns:
+        fig_vol.add_trace(go.Scatter(x=df_price['time'], y=df_price['volume_ma20'],
+                                     line=dict(color='#ec4899', width=2), name="Volume MA20"))
+    fig_vol.update_layout(template='plotly_dark',
+                          paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+                          margin=dict(t=20, b=20))
+    st.plotly_chart(fig_vol, use_container_width=True)
+
+    v1, v2, v3 = st.columns(3)
+    v1.metric("KL Phiên Gần Nhất", f"{tech['latest_volume']:,.0f} CP")
+    v2.metric("KL TB 20 Ngày",    f"{tech['avg_volume_20d']:,.0f} CP")
+    v3.metric("So Với TB",        f"{tech['volume_vs_avg_pct']:+.1f}%",
+              delta=f"{tech['volume_vs_avg_pct']:+.1f}%")
+    st.caption(f"CP Lưu Hành: **{metrics.get('issue_share_million', 0) or 0:,.1f} Tr CP**")
+
+    if tech.get('oil_correlation', 0.0) != 0.0:
+        st.warning(f"🛢️ Tương quan giá dầu: **{tech['oil_correlation']:.2f}** — mã nhạy cảm với biến động dầu thô WTI.")
+
+
+def render_tab_news(news_cards):
+    for item in news_cards:
+        st.markdown(f"""
+<div style='background:rgba(255,255,255,0.01);padding:16px;border-radius:10px;
+margin-bottom:10px;border-left:4px solid #ec4899;'>
+<small style='color:#a855f7;'>📰 {item['source']}</small><br>
+<strong style='font-size:15px;color:#f1f1f6;'>{item['title']}</strong>
+</div>""", unsafe_allow_html=True)
+
+
+def render_tab_forecast(df_5y_table, fundamentals, metrics, tech, valuation_pkg, period_col='Năm'):
+    st.markdown("### 🔮 Dự Phóng 2026 – 2027 (Ngoại Suy Từ CAGR 5 Năm)")
+
+    if df_5y_table.empty or period_col != 'Năm':
+        st.info("Chỉ hỗ trợ dự phóng theo Năm.")
+        return
+
+    df_years = df_5y_table.dropna(subset=['Năm']).sort_values('Năm')
+    if df_years.empty:
+        st.warning("Không đủ dữ liệu để dự phóng.")
+        return
+
+    last_year   = int(df_years['Năm'].iloc[-1])
+    last_revenue = df_years['Doanh thu thuần (tỷ)'].iloc[-1]
+    last_profit  = df_years['LNST (tỷ)'].iloc[-1]
+    rev_cagr     = fundamentals.get('revenue_cagr_pct')
+    np_cagr      = fundamentals.get('net_profit_cagr_pct')
+
+    if last_revenue is None or last_revenue != last_revenue or rev_cagr is None:
+        st.warning("⚠️ Thiếu Doanh thu/CAGR để dự phóng.")
+        forecast_years = revenue_fc = profit_fc = []
+    else:
+        g_rev = rev_cagr / 100
+        g_np  = (np_cagr / 100) if (np_cagr is not None and np_cagr == np_cagr) else g_rev
+        forecast_years = [last_year + 1, last_year + 2]
+        revenue_fc = [last_revenue * (1 + g_rev) ** i for i in (1, 2)]
+        profit_fc  = [
+            (last_profit * (1 + g_np) ** i)
+            if (last_profit is not None and last_profit == last_profit) else None
+            for i in (1, 2)
+        ]
+
+    if forecast_years:
+        st.caption(
+            f"Ngoại suy cơ học: Doanh thu CAGR 5N ≈ {fmt(rev_cagr, suffix='%')}, "
+            f"LNST CAGR 5N ≈ {fmt(np_cagr, suffix='%')}. "
+            f"⚠️ KHÔNG phải dự báo từ công ty chứng khoán."
+        )
+        chart_years   = [str(last_year)] + [str(y) for y in forecast_years]
+        chart_revenue = [last_revenue] + revenue_fc
+        chart_profit  = [last_profit]  + profit_fc
+
+        fig_fc = go.Figure()
+        fig_fc.add_trace(go.Bar(x=chart_years, y=chart_revenue,
+                                name='Doanh thu (tỷ) — dự phóng từ năm sau',
+                                marker_color=['#a855f7'] + ['#c084fc'] * len(forecast_years)))
+        fig_fc.add_trace(go.Scatter(x=chart_years, y=chart_profit,
+                                    name='LNST dự phóng (tỷ)',
+                                    line=dict(color='#10d98a', width=3), yaxis='y2'))
+        fig_fc.update_layout(
+            template='plotly_dark',
+            paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+            xaxis=dict(type='category'),
+            yaxis=dict(title='Doanh thu (tỷ)'),
+            yaxis2=dict(title='LNST (tỷ)', overlaying='y', side='right'),
+            legend=dict(orientation='h', y=1.1), margin=dict(t=40, b=20),
+        )
+        st.plotly_chart(fig_fc, use_container_width=True)
+
+        cols = st.columns(len(forecast_years))
+        for col, y, rev, np_ in zip(cols, forecast_years, revenue_fc, profit_fc):
+            col.metric(f"Doanh thu {y}", fmt(rev, suffix=" tỷ", decimals=0))
+            col.metric(f"LNST {y}",      fmt(np_, suffix=" tỷ", decimals=0))
+
+    st.markdown("---")
+    st.markdown("### Đánh Giá Tổng Hợp")
+
+    def _score_to_dots(score, max_dots=5):
+        score = max(0, min(max_dots, round(score)))
+        filled = "●" * score
+        empty  = "○" * (max_dots - score)
+        color = "#ec4899" if score >= 4 else ("#fbbf24" if score >= 2 else "#8b8ba7")
+        return (f"<span style='color:{color};letter-spacing:3px;font-size:1.1rem;'>{filled}</span>"
+                f"<span style='color:#3a3a52;letter-spacing:3px;font-size:1.1rem;'>{empty}</span>")
+
+    roe_latest = fundamentals.get('roe_latest') or 0
+    score_financial  = 5 if roe_latest >= 20 else 4 if roe_latest >= 15 else 3 if roe_latest >= 10 else 2 if roe_latest >= 5 else 1
+    pe_now           = metrics.get('pe', 0) or 0
+    score_valuation  = 5 if 0 < pe_now < 8 else 4 if pe_now < 12 else 3 if pe_now < 18 else 2 if pe_now < 25 else 1
+    score_competitive = 4
+    growth_ref       = rev_cagr if (rev_cagr is not None and rev_cagr == rev_cagr) else 0
+    score_outlook    = 5 if growth_ref >= 20 else 4 if growth_ref >= 10 else 3 if growth_ref >= 0 else 2 if growth_ref >= -10 else 1
+    trend            = str(tech.get('trend_signal', '')) if tech else ''
+    score_catalyst   = 4 if ('tăng' in trend.lower() or 'up' in trend.lower()) else 3
+
+    for label, score in [
+        ("Tài chính (5 năm)",      score_financial),
+        (f"Định giá {last_year}",  score_valuation),
+        ("Vị thế cạnh tranh",      score_competitive),
+        ("Triển vọng tăng trưởng", score_outlook),
+        ("Catalyst / Xu hướng giá", score_catalyst),
+    ]:
+        c1, c2 = st.columns([2, 1])
+        c1.markdown(f"<div style='padding-top:0.3rem;'>{label}</div>", unsafe_allow_html=True)
+        c2.markdown(_score_to_dots(score), unsafe_allow_html=True)
+
+    st.caption("ℹ️ Điểm đánh giá suy ra tự động từ ROE, P/E, CAGR doanh thu và xu hướng giá.")
+
+    st.markdown("---")
+    summary = valuation_pkg.get('summary') if valuation_pkg else None
+    if summary:
+        rec           = summary.get('recommendation', '')
+        target_min    = summary.get('target_price_min')
+        target_max    = summary.get('target_price_max')
+        upside_median = summary.get('upside_pct')
+
+        if rec in ('MUA MẠNH', 'MUA'):
+            rec_text, rec_color = "↑ ACCUMULATE · TÍCH LŨY", "#22c55e"
+        elif rec == 'BÁN':
+            rec_text, rec_color = "↓ REDUCE · GIẢM TỈ TRỌNG", "#ef4444"
+        else:
+            rec_text, rec_color = "→ HOLD · NẮM GIỮ", "#fbbf24"
+
+        target_str  = f"₫{target_min:,.0f} – {target_max:,.0f}" if (target_min is not None and target_max is not None) else "—"
+        upside_str  = f"({upside_median:+.0f}%)" if upside_median is not None else ""
+
+        st.markdown(f"""
+<div style="padding:1.2rem 1.4rem;border-radius:16px;
+background:linear-gradient(135deg, rgba(168,85,247,0.12), rgba(236,72,153,0.08));
+border:1px solid rgba(168,85,247,0.25);">
+<div style="opacity:0.7;font-size:0.85rem;letter-spacing:1px;">KHUYẾN NGHỊ (9 PP HỘI TỤ)</div>
+<div style="font-size:1.6rem;font-weight:800;color:{rec_color};margin:0.3rem 0;">{rec_text}</div>
+<div style="opacity:0.85;">Dải mục tiêu: <strong>{target_str}</strong> {upside_str}</div>
+</div>""", unsafe_allow_html=True)
+        st.caption("ℹ️ Tổng hợp từ PE/PB Median 5N, DCF, Graham. Không phải lời khuyên đầu tư.")
+    else:
+        st.info("Chưa đủ dữ liệu để tổng hợp khuyến nghị 9 phương pháp cho mã này.")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ALIAS: app.py gọi render_tab_volume, nội dung giống render_tab_technical
+# ─────────────────────────────────────────────────────────────────────────────
+render_tab_volume = render_tab_technical
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TAB 3: MULTIPLES MỞ RỘNG — Card UI đẹp theo ảnh tham khảo
+# ─────────────────────────────────────────────────────────────────────────────
+
+_MULTIPLES_CSS = """
+<style>
+.mult-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 14px;
+    margin: 18px 0 24px;
+}
+@media (max-width: 640px) {
+    .mult-grid { grid-template-columns: repeat(2, 1fr); }
+}
+.mult-card {
+    background: rgba(255,255,255,0.03);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 18px;
+    padding: 20px 16px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    transition: border 0.2s;
+}
+.mult-card:hover { border-color: rgba(168,85,247,0.45); }
+.mult-card-label {
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.6px;
+    color: #8b8ba7;
+    text-transform: uppercase;
+}
+.mult-card-year {
+    font-size: 11px;
+    color: #555571;
+    margin-top: -4px;
+}
+.mult-card-value {
+    font-size: 32px;
+    font-weight: 800;
+    font-family: 'Courier New', monospace;
+    color: #22c55e;
+    line-height: 1.1;
+    margin: 4px 0 2px;
+}
+.mult-card-value.neutral { color: #c084fc; }
+.mult-card-value.warn    { color: #f59e0b; }
+.mult-card-value.danger  { color: #f43f5e; }
+.mult-card-value.na      { color: #555571; font-size: 18px; }
+.mult-card-sub {
+    font-size: 12px;
+    color: #8b8ba7;
+    line-height: 1.4;
+}
+.mult-card-sub strong { color: #c084fc; }
+.mult-section-title {
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 1.2px;
+    color: #8b8ba7;
+    text-transform: uppercase;
+    margin: 28px 0 4px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+.mult-section-title::before {
+    content: '';
+    display: inline-block;
+    width: 28px;
+    height: 28px;
+    border-radius: 8px;
+    background: linear-gradient(135deg, #a855f7, #ec4899);
+    font-size: 14px;
+    text-align: center;
+    line-height: 28px;
+    color: white;
+    font-weight: 900;
+}
+.mult-note {
+    background: linear-gradient(135deg, rgba(168,85,247,0.10), rgba(236,72,153,0.06));
+    border: 1px solid rgba(168,85,247,0.28);
+    border-radius: 12px;
+    padding: 13px 16px;
+    color: #c4b0ff;
+    font-size: 13px;
+    line-height: 1.6;
+    margin: 8px 0 20px;
+}
+.mult-note strong { color: #e9d5ff; }
+.mult-badge {
+    display: inline-block;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    padding: 2px 8px;
+    border-radius: 20px;
+    margin-left: 6px;
+    vertical-align: middle;
+}
+.badge-cheap   { background: rgba(34,197,94,0.15);  color: #22c55e; }
+.badge-fair    { background: rgba(168,85,247,0.15); color: #c084fc; }
+.badge-dear    { background: rgba(245,158,11,0.15); color: #f59e0b; }
+.badge-pricey  { background: rgba(244,63,94,0.15);  color: #f43f5e; }
+.badge-na      { background: rgba(255,255,255,0.05); color: #555571; }
+</style>
+"""
+
+def _mult_card(label, year, value_str, color_cls, sub_html, badge_html=""):
+    return f"""
+<div class="mult-card">
+  <div class="mult-card-label">{label}{badge_html}</div>
+  <div class="mult-card-year">{year}</div>
+  <div class="mult-card-value {color_cls}">{value_str}</div>
+  <div class="mult-card-sub">{sub_html}</div>
+</div>"""
+
+
+def _pe_color(pe):
+    if pe <= 0:   return "na"
+    if pe < 10:   return ""
+    if pe < 15:   return "neutral"
+    if pe < 20:   return "warn"
+    return "danger"
+
+def _pb_color(pb):
+    if pb <= 0:   return "na"
+    if pb < 1.0:  return ""
+    if pb < 1.5:  return "neutral"
+    if pb < 2.5:  return "warn"
+    return "danger"
+
+def _pe_sub(pe, pe_median_5y):
+    if pe <= 0: return "Không có dữ liệu"
+    m = f"{pe_median_5y:.1f}x" if pe_median_5y else "—"
+    if pe_median_5y and pe < pe_median_5y * 0.85:
+        return f"<strong>Dưới TB 5N</strong> ({m})"
+    if pe_median_5y and pe > pe_median_5y * 1.15:
+        return f"Trên TB 5N ({m})"
+    return f"Quanh TB 5N ({m})"
+
+def _pb_sub(pb, pb_median_5y):
+    if pb <= 0: return "Không có dữ liệu"
+    m = f"{pb_median_5y:.2f}x" if pb_median_5y else "—"
+    if pb_median_5y and pb < pb_median_5y * 0.85:
+        return f"<strong>Dưới TB 5N</strong> ({m})"
+    if pb_median_5y and pb > pb_median_5y * 1.15:
+        return f"Trên TB 5N ({m})"
+    return f"Quanh TB 5N ({m})"
+
+def _badge(pe, pe_med):
+    if not pe_med or pe <= 0: return ""
+    ratio = pe / pe_med
+    if ratio < 0.85:   return '<span class="mult-badge badge-cheap">Rẻ</span>'
+    if ratio < 1.0:    return '<span class="mult-badge badge-cheap">Hơi rẻ</span>'
+    if ratio < 1.15:   return '<span class="mult-badge badge-fair">Hợp lý</span>'
+    if ratio < 1.40:   return '<span class="mult-badge badge-dear">Hơi đắt</span>'
+    return '<span class="mult-badge badge-pricey">Đắt</span>'
+
+def render_tab_multiples(metrics, fundamentals, valuation_pkg):
+    st.markdown(_MULTIPLES_CSS, unsafe_allow_html=True)
+
+    is_bank       = metrics.get("is_bank", False)
+    current_year  = __import__('datetime').datetime.today().year
+    latest_year   = current_year - 1
+
+    pe   = metrics.get("pe",  0.0) or 0.0
+    pb   = metrics.get("pb",  0.0) or 0.0
+    eps  = fundamentals.get("eps_latest",  0.0) or 0.0
+    bvps = fundamentals.get("bvps_latest", 0.0) or 0.0
+
+    pe_series = valuation_pkg.get("pe_series")
+    pb_series = valuation_pkg.get("pb_series")
+
+    def _median5(s):
+        if s is None or s.empty: return None
+        v = pd.to_numeric(s, errors='coerce').dropna()
+        v = v[(v > 0) & (v < 200)]
+        return float(v.median()) if not v.empty else None
+
+    pe_med = _median5(pe_series)
+    pb_med = _median5(pb_series)
+
+    mktcap_b   = metrics.get("market_cap_billion", 0.0) or 0.0
+
+    # ── Doanh thu (tỷ) — ưu tiên metrics, fallback fundamentals ──────────
+    rev_b = (
+        metrics.get("revenue_latest_billion")
+        or metrics.get("revenue_billion")
+        or fundamentals.get("revenue_latest_billion")
+        or fundamentals.get("revenue_latest")   # một số backend để key này
+        or 0.0
+    )
+    rev_b = float(rev_b) if rev_b else 0.0
+
+    # ── Net Profit (tỷ) ───────────────────────────────────────────────────
+    np_b = (
+        metrics.get("net_profit_latest_billion")
+        or metrics.get("net_profit_billion")
+        or fundamentals.get("net_profit_latest_billion")
+        or fundamentals.get("net_profit_latest")
+        or 0.0
+    )
+    np_b = float(np_b) if np_b else 0.0
+
+    # ── Equity / Total Assets (tỷ) ───────────────────────────────────────
+    equity_b = (
+        metrics.get("equity_billion")
+        or fundamentals.get("equity_latest_billion")
+        or fundamentals.get("equity_latest")
+        or 0.0
+    )
+    equity_b = float(equity_b) if equity_b else 0.0
+
+    total_assets_b = (
+        metrics.get("total_assets_billion")
+        or fundamentals.get("total_assets_latest_billion")
+        or fundamentals.get("total_assets_latest")
+        or 0.0
+    )
+    total_assets_b = float(total_assets_b) if total_assets_b else 0.0
+
+    # ── Nợ ròng: Total Debt - Cash (tỷ) ─────────────────────────────────
+    # Ưu tiên key có sẵn, fallback ước tính = Total Assets - Equity - mktcap
+    net_debt_b = (
+        metrics.get("net_debt_billion")
+        or metrics.get("net_debt")
+        or 0.0
+    )
+    net_debt_b = float(net_debt_b) if net_debt_b else 0.0
+    # Nếu vẫn 0, ước tính thô: Tổng TS - VCSH - Vốn hóa (proxy)
+    if net_debt_b == 0.0 and total_assets_b > 0 and equity_b > 0:
+        net_debt_b = max(0.0, total_assets_b - equity_b - mktcap_b * 0.3)
+
+    # ── EBITDA (tỷ): thử key trực tiếp, fallback tính từ net_profit ──────
+    # Theo valuation_formulas.md: EBITDA = EBIT + D&A = LT trước thuế + lãi vay + khấu hao
+    # Proxy khả dụng nhất: EBITDA ≈ net_profit / (1 - tax_rate) * margin_adj
+    # Thực tế đơn giản: EBITDA ≈ net_profit * 1.3~1.5 (ngành chứng khoán/tài chính ~1.1)
+    ebitda_b = (
+        metrics.get("ebitda_latest_billion")
+        or metrics.get("ebitda_billion")
+        or fundamentals.get("ebitda_latest_billion")
+        or fundamentals.get("ebitda_latest")
+        or 0.0
+    )
+    ebitda_b = float(ebitda_b) if ebitda_b else 0.0
+    # Fallback: ước tính EBITDA từ net_profit nếu có
+    _ebitda_estimated = False
+    if ebitda_b == 0.0 and np_b > 0:
+        # Chứng khoán/tài chính: EBITDA ≈ net_profit * 1.15
+        # Sản xuất/thép: EBITDA ≈ net_profit * 1.6
+        # Mặc định 1.3 cho các ngành khác
+        is_securities = metrics.get("is_securities", False)
+        ebitda_mult = 1.15 if is_securities else 1.3
+        ebitda_b = round(np_b * ebitda_mult, 2)
+        _ebitda_estimated = True
+
+    # ── CFO (tỷ): thử key trực tiếp, fallback dùng net_profit làm proxy ─
+    # Theo valuation_formulas.md: P/CF = marketCap / cfo_tỷ
+    cfo_b = (
+        metrics.get("cfo_latest_billion")
+        or metrics.get("cfo_billion")
+        or fundamentals.get("cfo_latest_billion")
+        or fundamentals.get("cfo_latest")
+        or 0.0
+    )
+    cfo_b = float(cfo_b) if cfo_b else 0.0
+    # Fallback: CFO ≈ net_profit (proxy phổ biến khi thiếu cash flow statement)
+    _cfo_estimated = False
+    if cfo_b == 0.0 and np_b > 0:
+        cfo_b = np_b
+        _cfo_estimated = True
+
+    # ── EV = Market Cap + Net Debt ────────────────────────────────────────
+    ev_b = mktcap_b + net_debt_b
+
+    # ── Tính ratio cuối cùng ─────────────────────────────────────────────
+    ev_ebitda_x = (ev_b / ebitda_b)   if (ebitda_b > 0 and ev_b > 0)    else None
+    pcf_x       = (mktcap_b / cfo_b)  if (cfo_b > 0 and mktcap_b > 0)   else None
+    ps_x        = (mktcap_b / rev_b)  if (rev_b > 0 and mktcap_b > 0)   else None
+
+    # ── Section 01: Core multiples ────────────────────────────────────────
+    st.markdown(
+        '<div class="mult-section-title" style="--n:\'01\';">01 &nbsp; Định giá cốt lõi · P/E · P/B · EPS · BVPS</div>',
+        unsafe_allow_html=True
+    )
+
+    pe_badge  = _badge(pe, pe_med)
+    pb_badge  = _badge(pb, pb_med)
+    yr = str(latest_year)
+
+    pe_val_str  = f"{pe:.2f}x"   if pe   > 0 else "N/A"
+    pb_val_str  = f"{pb:.2f}x"   if pb   > 0 else "N/A"
+    eps_val_str = f"{eps:,.0f}đ"  if eps  > 0 else "N/A"
+    bvp_val_str = f"{bvps:,.0f}đ" if bvps > 0 else "N/A"
+
+    cards_01 = (
+        _mult_card("P/E",  yr, pe_val_str,  _pe_color(pe),  _pe_sub(pe, pe_med),  pe_badge)
+      + _mult_card("P/B",  yr, pb_val_str,  _pb_color(pb),  _pb_sub(pb, pb_med),  pb_badge)
+      + _mult_card("EPS",  yr, eps_val_str, "neutral" if eps  > 0 else "na",
+                   "Thu nhập / cổ phiếu"    if eps  > 0 else "Không có dữ liệu")
+      + _mult_card("BVPS", yr, bvp_val_str, "neutral" if bvps > 0 else "na",
+                   "Giá trị sổ sách / CP"   if bvps > 0 else "Không có dữ liệu")
+    )
+    st.markdown(f'<div class="mult-grid">{cards_01}</div>', unsafe_allow_html=True)
+
+    # ── Section 02: Extended multiples ────────────────────────────────────
+    st.markdown(
+        '<div class="mult-section-title">02 &nbsp; Multiples mở rộng · EV/EBITDA · P/CF · P/S</div>',
+        unsafe_allow_html=True
+    )
+
+    if is_bank:
+        st.markdown("""
+<div class="mult-note">
+ℹ️ <strong>P/S và EV/EBITDA không áp dụng cho ngân hàng</strong> —
+khái niệm 'Doanh thu' và 'EBITDA' không phản ánh đúng bản chất kinh doanh
+(thu nhập lãi thuần, chi phí dự phòng rủi ro tín dụng có cấu trúc riêng).
+Với ngân hàng nên dùng <strong>P/B + ROE, NIM, NPL, CAR</strong> thay thế.
+</div>""", unsafe_allow_html=True)
+
+        cards_bank = (
+            _mult_card("P/B", yr, pb_val_str, _pb_color(pb),
+                       "Định giá chính cho ngân hàng", pb_badge)
+          + _mult_card("EPS", yr, eps_val_str, "neutral" if eps > 0 else "na", "—")
+          + _mult_card("P/CF", yr, "N/A", "na", "Không áp dụng ngân hàng")
+          + _mult_card("P/S · EV/EBITDA", yr, "N/A", "na", "Không áp dụng ngân hàng")
+        )
+        st.markdown(f'<div class="mult-grid">{cards_bank}</div>', unsafe_allow_html=True)
+
+    else:
+        def _pcf_sub(pcf):
+            if pcf is None: return "Thiếu dữ liệu"
+            note = " <span style='opacity:0.6;font-size:10px;'>(~LNST)</span>" if _cfo_estimated else ""
+            if pcf < 8:   return f"<strong>Dòng tiền hấp dẫn</strong>{note}"
+            if pcf < 15:  return f"Dòng tiền hợp lý{note}"
+            return f"Dòng tiền đắt{note}"
+
+        def _evebitda_sub(ev_eb):
+            if ev_eb is None: return "Thiếu dữ liệu"
+            note = " <span style='opacity:0.6;font-size:10px;'>(~ước tính)</span>" if _ebitda_estimated else ""
+            if ev_eb < 8:   return f"<strong>Định giá rẻ</strong>{note}"
+            if ev_eb < 12:  return f"Định giá hợp lý{note}"
+            return f"Định giá cao{note}"
+
+        def _ps_sub(ps):
+            if ps is None: return "Thiếu dữ liệu Doanh thu"
+            if ps < 1:    return "<strong>Cạnh tranh tốt</strong>"
+            if ps < 2:    return "Cạnh tranh hợp lý"
+            return "Premium định giá"
+
+        ev_str  = f"{ev_ebitda_x:.2f}x" if ev_ebitda_x is not None else "N/A"
+        pcf_str = f"{pcf_x:.2f}x"       if pcf_x       is not None else "N/A"
+        ps_str  = f"{ps_x:.2f}x"        if ps_x        is not None else "N/A"
+
+        def _val_color(v, thresholds):
+            if v is None: return "na"
+            lo, hi = thresholds
+            if v < lo:  return ""
+            if v < hi:  return "neutral"
+            return "warn"
+
+        # Card thứ 4: Vốn hóa / VCSH — dùng equity_b đã tính ở trên
+        price_to_equity_x = (mktcap_b / equity_b) if equity_b > 0 and mktcap_b > 0 else None
+        pa_str   = f"{price_to_equity_x:.2f}x" if price_to_equity_x is not None else "—"
+        pa_color = _val_color(price_to_equity_x, (1.0, 2.0)) if price_to_equity_x is not None else "na"
+        pa_sub   = (
+            "<strong>Dưới book value</strong>" if price_to_equity_x and price_to_equity_x < 1.0
+            else "Hợp lý" if price_to_equity_x and price_to_equity_x < 2.0
+            else "Premium cao" if price_to_equity_x
+            else "Thiếu dữ liệu Vốn CSH"
+        )
+
+        cards_ext = (
+            _mult_card("EV/EBITDA", yr, ev_str,
+                       _val_color(ev_ebitda_x, (8, 12)), _evebitda_sub(ev_ebitda_x))
+          + _mult_card("P/CF", yr, pcf_str,
+                       _val_color(pcf_x, (8, 15)), _pcf_sub(pcf_x))
+          + _mult_card("P/S", yr, ps_str,
+                       _val_color(ps_x, (1, 2)), _ps_sub(ps_x))
+          + _mult_card("Vốn hóa / VCSH", yr, pa_str, pa_color, pa_sub)
+        )
+        st.markdown(f'<div class="mult-grid">{cards_ext}</div>', unsafe_allow_html=True)
+
+        # Note giải thích khi dùng ước tính
+        notes = []
+        if _ebitda_estimated: notes.append("EV/EBITDA ước tính từ LNST (chưa có D&A từ nguồn API)")
+        if _cfo_estimated:    notes.append("P/CF dùng LNST làm proxy CFO")
+        if ev_ebitda_x is None or pcf_x is None:
+            notes.append("Một số chỉ số cần thêm dữ liệu từ TCBS/CafeF")
+        if notes:
+            st.markdown(f"""
+<div class="mult-note">
+ℹ️ {' · '.join(notes)}.
+</div>""", unsafe_allow_html=True)
+
+    # ── Section 03: So sánh trực quan PE/PB với TB 5 năm ────────────────
+    if pe_med or pb_med:
+        st.markdown(
+            '<div class="mult-section-title">03 &nbsp; So sánh với trung bình 5 năm</div>',
+            unsafe_allow_html=True
+        )
+
+        cats, cur_vals, med_vals = [], [], []
+        if pe > 0 and pe_med:
+            cats.append("P/E"); cur_vals.append(pe); med_vals.append(pe_med)
+        if pb > 0 and pb_med:
+            cats.append("P/B"); cur_vals.append(pb); med_vals.append(pb_med)
+
+        if cats:
+            fig = go.Figure()
+            fig.add_trace(go.Bar(
+                x=cats, y=med_vals, name="TB 5 năm",
+                marker_color="rgba(168,85,247,0.35)",
+                marker_line_color="rgba(168,85,247,0.8)",
+                marker_line_width=1.5,
+            ))
+            fig.add_trace(go.Bar(
+                x=cats, y=cur_vals, name="Hiện tại",
+                marker_color="rgba(34,197,94,0.8)",
+            ))
+            fig.update_layout(
+                barmode="group", template="plotly_dark",
+                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                height=260,
+                margin=dict(t=10, b=10, l=20, r=20),
+                legend=dict(orientation="h", y=1.1),
+                font=dict(color="#c4b0ff"),
+                xaxis=dict(showgrid=False),
+                yaxis=dict(showgrid=True, gridcolor="rgba(255,255,255,0.05)"),
+            )
+            st.plotly_chart(fig, use_container_width=True)
