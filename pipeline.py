@@ -68,17 +68,53 @@ def normalize_to_billion_vnd(series):
     return series.map(_to_ty).dropna()
 
 
+def _normalize_pct_series(s):
+    """
+    Chuẩn hoá series ROE/ROA/ROS về đơn vị % hợp lý (0–200%).
+    3 nhánh:
+      - max_abs > 500 → lỗi đơn vị (VD: LNST triệu / Vốn tỷ → x1000)
+        Thử chia 1000; nếu kết quả <= 200% thì dùng, không thì trả None.
+      - max_abs < 1  → dạng thập phân (0.30 → 30%), nhân 100.
+      - còn lại      → đã là %, giữ nguyên.
+    Khóa cứng: không bao giờ hiển thị ROE/ROA > 200% (sanity cap).
+    """
+    if s is None or s.empty:
+        return s
+    valid = s.dropna()
+    if valid.empty:
+        return s
+    max_abs = valid.abs().max()
+    if max_abs > 500:
+        s_fixed = s / 1000
+        if s_fixed.dropna().abs().max() <= 200:
+            return s_fixed
+        return pd.Series([None] * len(s), index=s.index, dtype=float)
+    if max_abs < 1:
+        return s * 100
+    return s
+
+
 def normalize_net_profit_with_anchor(net_profit_raw, equity_series, roe_series):
+    """
+    Normalize LNST về tỷ VNĐ, dùng equity + roe làm anchor cross-check.
+    CRITICAL: roe_series phải được _normalize_pct_series() trước khi dùng làm anchor,
+    vì API có thể trả dạng thập phân (0.30) hoặc % (30.0) — nếu không normalize
+    sẽ tạo ra expected sai → anchor chia nhầm → LNST sai đơn vị 100x.
+    """
     base = normalize_to_billion_vnd(net_profit_raw)
     if base is None or base.empty:
         return base
+    # Normalize roe_series trước — đây là fix core cho lỗi ROE 30000%
+    roe_norm = _normalize_pct_series(roe_series)
+    if roe_norm is None or roe_norm.dropna().empty:
+        return base  # không có anchor → trả base (đơn vị tỷ)
     fixed = {}
     for year, raw_val in base.items():
-        if (year not in equity_series.index or year not in roe_series.index
-                or pd.isna(equity_series.get(year)) or pd.isna(roe_series.get(year))):
+        if (year not in equity_series.index or year not in roe_norm.index
+                or pd.isna(equity_series.get(year)) or pd.isna(roe_norm.get(year))):
             fixed[year] = raw_val
             continue
-        expected = equity_series[year] * roe_series[year] / 100
+        expected = equity_series[year] * roe_norm[year] / 100
         if expected == 0 or raw_val == 0:
             fixed[year] = raw_val
             continue
@@ -87,8 +123,12 @@ def normalize_net_profit_with_anchor(net_profit_raw, equity_series, roe_series):
             fixed[year] = raw_val
             continue
         power = round(np.log10(ratio))
-        divisor = 10 ** power
-        fixed[year] = round(raw_val / divisor, 2)
+        if power == 0:
+            # ratio ≈ 1x → đơn vị đã đúng, giữ nguyên
+            fixed[year] = raw_val
+        else:
+            divisor = 10 ** power
+            fixed[year] = round(raw_val / divisor, 2)
     return pd.Series(fixed)
 
 
@@ -486,30 +526,11 @@ def execute_equity_research_pipeline(ticker):
         if bvps_latest == 0.0 and issue_share > 0 and not equity_series.empty:
             bvps_latest = get_latest(equity_series, default=0.0) * 1e9 / issue_share
 
-        # PATCH 3 — _normalize_pct(): 3 nhánh: decimal→×100; hợp lệ→giữ; bất thường→None
-        # Lỗi cũ: chỉ check abs(s.iloc[-1]) < 1 → bỏ sót ROE hàng triệu %
-        # (LNST đơn vị đồng / Vốn CSH đơn vị tỷ → ROE = 36,000,000 → không < 1 → giữ nguyên)
-        def _normalize_pct(s):
-            if s is None or s.empty:
-                return s
-            max_abs = s.abs().max()
-            if max_abs > 500:
-                # ROE/ROA > 500% gần như chắc chắn là lỗi đơn vị
-                # (VD: LNST đơn vị triệu / Vốn CSH đơn vị tỷ → ROE x1000)
-                # Thử chia 1000 — nếu kết quả hợp lý (<= 200%) thì dùng
-                s_fixed = s / 1000
-                if s_fixed.abs().max() <= 200:
-                    return s_fixed
-                # Không cứu được → trả None toàn series
-                return pd.Series([None] * len(s), index=s.index, dtype=float)
-            if max_abs < 1:
-                # Dạng thập phân (0.33 → 33%)
-                return s * 100
-            # Đã là %, giữ nguyên
-            return s
-
-        roe_series = _normalize_pct(roe_series)
-        roa_series = _normalize_pct(roa_series)
+        # PATCH 3 — normalize ROE/ROA về % dùng module-level _normalize_pct_series()
+        # (đã fix: threshold 500 thay vì 10000, thử chia 1000 trước khi trả None)
+        _normalize_pct = _normalize_pct_series  # alias để không đổi tên các call bên dưới
+        roe_series = _normalize_pct_series(roe_series)
+        roa_series = _normalize_pct_series(roa_series)
 
         market_cap = market_cap_direct if market_cap_direct > 0 else (
             current_price * issue_share if issue_share > 0 else 0.0)
