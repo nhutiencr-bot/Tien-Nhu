@@ -123,13 +123,29 @@ def _merge_financial_dataframes(dfs: list):
 
     for other in dfs_sorted[1:]:
         other_key_col = 'item' if 'item' in other.columns else other.columns[0]
-        other_year_cols = [c for c in _year_cols(other) if c not in merged.columns]
-        if not other_year_cols:
-            continue
         other = other.copy()
         other['_key_norm'] = other[other_key_col].astype(str).str.lower().str.strip()
-        sub = other[['_key_norm'] + other_year_cols]
-        merged = merged.merge(sub, on='_key_norm', how='left')
+        other_year_cols = _year_cols(other)
+
+        # 1) Thêm hẳn các cột-năm mà merged CHƯA CÓ (giữ hành vi cũ)
+        new_cols = [c for c in other_year_cols if c not in merged.columns]
+        if new_cols:
+            sub_new = other[['_key_norm'] + new_cols]
+            merged = merged.merge(sub_new, on='_key_norm', how='left')
+
+        # 2) PATCH 5 — Với cột-năm ĐÃ tồn tại nhưng đang NaN (nguồn rộng nhất
+        # có cột nhưng thiếu dữ liệu năm đó), lấp bằng nguồn phụ theo từng dòng.
+        # Đây là nguyên nhân khiến 2021 (hoặc năm bất kỳ) hiện "—" dù limit đã đủ.
+        shared_cols = [c for c in other_year_cols if c in merged.columns and c not in new_cols]
+        if shared_cols:
+            other_indexed = other.drop_duplicates('_key_norm').set_index('_key_norm')
+            for col in shared_cols:
+                if col not in other_indexed.columns:
+                    continue
+                fill_map = other_indexed[col]
+                mask = merged[col].isna()
+                if mask.any():
+                    merged.loc[mask, col] = merged.loc[mask, '_key_norm'].map(fill_map)
 
     merged = merged.drop(columns=['_key_norm'])
     return merged
