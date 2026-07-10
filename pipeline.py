@@ -493,8 +493,14 @@ def execute_equity_research_pipeline(ticker):
             if s is None or s.empty:
                 return s
             max_abs = s.abs().max()
-            if max_abs > 10_000:
-                # ROE/ROA hàng triệu % = lỗi đơn vị không thể cứu → trả None toàn series
+            if max_abs > 500:
+                # ROE/ROA > 500% gần như chắc chắn là lỗi đơn vị
+                # (VD: LNST đơn vị triệu / Vốn CSH đơn vị tỷ → ROE x1000)
+                # Thử chia 1000 — nếu kết quả hợp lý (<= 200%) thì dùng
+                s_fixed = s / 1000
+                if s_fixed.abs().max() <= 200:
+                    return s_fixed
+                # Không cứu được → trả None toàn series
                 return pd.Series([None] * len(s), index=s.index, dtype=float)
             if max_abs < 1:
                 # Dạng thập phân (0.33 → 33%)
@@ -646,10 +652,28 @@ def execute_equity_research_pipeline(ticker):
                 bvps_series_filled[y] = equity_series[y] * 1e9 / issue_share
             if (y not in roe_series_filled.index or pd.isna(roe_series_filled.get(y))) \
                     and has_np and has_eq and equity_series[y] != 0:
-                roe_series_filled[y] = net_profit_series[y] / equity_series[y] * 100
+                # Guard: cả 3 series phải cùng đơn vị tỷ VNĐ.
+                # Nếu net_profit lớn hơn equity >1000x → lỗi đơn vị, chia lại.
+                _np_val = float(net_profit_series[y])
+                _eq_val = float(equity_series[y])
+                if abs(_np_val) > 0 and abs(_eq_val) > 0:
+                    _raw_roe = _np_val / _eq_val * 100
+                    if abs(_raw_roe) > 500:
+                        _np_val = _np_val / 1000  # triệu → tỷ
+                        _raw_roe = _np_val / _eq_val * 100
+                    if abs(_raw_roe) <= 200:
+                        roe_series_filled[y] = round(_raw_roe, 2)
             if (y not in roa_series_filled.index or pd.isna(roa_series_filled.get(y))) \
                     and has_np and has_ta and total_assets_series[y] != 0:
-                roa_series_filled[y] = net_profit_series[y] / total_assets_series[y] * 100
+                _np_val2 = float(net_profit_series[y])
+                _ta_val  = float(total_assets_series[y])
+                if abs(_np_val2) > 0 and abs(_ta_val) > 0:
+                    _raw_roa = _np_val2 / _ta_val * 100
+                    if abs(_raw_roa) > 500:
+                        _np_val2 = _np_val2 / 1000
+                        _raw_roa = _np_val2 / _ta_val * 100
+                    if abs(_raw_roa) <= 200:
+                        roa_series_filled[y] = round(_raw_roa, 2)
 
         df_5y_table = pd.DataFrame({'Năm': years_available})
         df_5y_table['Doanh thu thuần (tỷ)'] = df_5y_table['Năm'].map(revenue_series)
@@ -771,12 +795,19 @@ def execute_equity_research_pipeline(ticker):
 
         # 2) Số CP lưu hành – tỷ CP
         # PATCH 4 — outstanding_shares_series đã qua _build_shares_series (back-calc per-year)
+        # Tầng 3 fallback: nếu series vẫn thiếu năm nào đó → dùng issue_share (CP hiện tại)
+        _shares_map = {}
         if outstanding_shares_series is not None and not outstanding_shares_series.empty:
-            _shares_ty = outstanding_shares_series / 1e9
-            df_5y_table['Số CP lưu hành (tỷ)'] = df_5y_table['Năm'].map(
-                lambda y: _shares_ty.get(y, None))
-        else:
-            df_5y_table['Số CP lưu hành (tỷ)'] = None
+            for _y, _v in (outstanding_shares_series / 1e9).items():
+                if pd.notna(_v) and _v > 0:
+                    _shares_map[_y] = round(float(_v), 2)
+        # Fallback: điền issue_share cho năm chưa có (issue_share đã là số CP lẻ)
+        if issue_share > 0:
+            for _y in years_available:
+                if _y not in _shares_map:
+                    _shares_map[_y] = round(issue_share / 1e9, 2)
+        df_5y_table['Số CP lưu hành (tỷ)'] = df_5y_table['Năm'].map(
+            lambda y: _shares_map.get(y, None))
 
         # 3) Biên LNST / ROS (%)
         def _ros_annual(y):
