@@ -23,6 +23,16 @@ DEFAULT_YEAR_LIMIT = 5
 
 
 def normalize_to_billion_vnd(series):
+    """
+    FIX: ngưỡng cũ 1e11 (100 tỷ VNĐ) sai — công ty có doanh thu/LNST raw
+    dưới 100 tỷ VNĐ (vd 44,752,636,000đ = 44.75 tỷ) sẽ KHÔNG được chia,
+    trong khi Vốn CSH/Tổng tài sản (luôn lớn) vẫn chia đúng → lệch đơn vị
+    → ROE/ROA bị nhân lên hàng triệu %.
+    Ngưỡng đúng: 1e7 (10 triệu). Không công ty thật nào có raw VNĐ nằm
+    giữa 10 triệu và 100 tỷ nhưng lại KHÔNG cần chia — mọi số liệu BCTC
+    nguồn trả về đều ở đơn vị "đồng" (>> 10 triệu) hoặc đã ở đơn vị "tỷ"
+    (<< 10 triệu). Đồng bộ với financial_normalizer.normalize_to_billion_vnd.
+    """
     if series is None or series.empty:
         return series
     def _to_ty(val):
@@ -30,7 +40,7 @@ def normalize_to_billion_vnd(series):
             if pd.isna(val):
                 return None
             val = float(val)
-            if abs(val) > 1e11:
+            if abs(val) > 1e7:
                 return round(val / 1e9, 2)
             return round(val, 2)
         except Exception:
@@ -38,10 +48,49 @@ def normalize_to_billion_vnd(series):
     return series.map(_to_ty).dropna()
 
 
+def _normalize_pct(s):
+    """
+    Chuẩn hoá series % về đúng thang 0-100.
+    FIX: trước đây chỉ kiểm tra phần tử CUỐI (s.iloc[-1]) để quyết định
+    nhân *100 cho CẢ series → nếu nguồn dữ liệu trộn lẫn định dạng
+    (VD: vài năm là fraction 0.2059, vài năm đã là percent 20.59) thì
+    sẽ nhân sai hàng loạt. Giờ xử lý TỪNG phần tử độc lập.
+    """
+    if s is None or s.empty:
+        return s
+    def _fix(v):
+        try:
+            if pd.isna(v):
+                return v
+            v = float(v)
+            return v * 100 if abs(v) < 1 else v
+        except Exception:
+            return v
+    return s.map(_fix)
+
+
+def _sanitize_pct_series(s, max_abs=300.0):
+    """
+    Loại bỏ giá trị % vô lý (VD: ROE = 20,000,000% do lỗi parse/đơn vị từ
+    nguồn dữ liệu). ROE/ROA thực tế hầu như không bao giờ vượt quá vài trăm %
+    kể cả với doanh nghiệp đòn bẩy cao — dùng ngưỡng 300% làm giới hạn an toàn.
+    """
+    if s is None or s.empty:
+        return s
+    return s.where(s.abs() <= max_abs)
+
+
 def normalize_net_profit_with_anchor(net_profit_raw, equity_series, roe_series):
     base = normalize_to_billion_vnd(net_profit_raw)
     if base is None or base.empty:
         return base
+    # BUG FIX: roe_series đưa vào trước đây là dữ liệu RAW chưa chuẩn hoá
+    # (có thể là fraction 0.2059 thay vì percent 20.59 tuỳ nguồn/tuỳ năm).
+    # Nếu dùng raw để tính "expected", công thức equity*roe/100 sẽ sai lệch
+    # đúng 100 lần → hàm suy ra sai power/divisor → chia/nhân net_profit
+    # một cách sai lầm, làm hỏng toàn bộ chuỗi LNST.
+    # Chuẩn hoá + sanitize roe_series trước khi dùng làm anchor.
+    roe_series = _sanitize_pct_series(_normalize_pct(roe_series))
     fixed = {}
     for year, raw_val in base.items():
         if (year not in equity_series.index or year not in roe_series.index
@@ -202,17 +251,28 @@ def execute_equity_research_pipeline(ticker):
         allowed_years = set(range(current_year_for_table - DEFAULT_YEAR_LIMIT, current_year_for_table))
 
         end_date   = datetime.today().strftime('%Y-%m-%d')
-        start_date = (datetime.today() - timedelta(days=365 * 3)).strftime('%Y-%m-%d')
+        # BUG FIX: cửa sổ 3 năm không đủ để lấy "Giá cuối năm" cho toàn bộ
+        # allowed_years (5 năm gần nhất, VD 2021-2025). Với 3 năm, giá của
+        # 2021 và phần lớn 2022 bị thiếu hoàn toàn → cột "Giá cuối năm" trống.
+        # Mở rộng lên (DEFAULT_YEAR_LIMIT + 1) năm để có buffer an toàn.
+        start_date = (datetime.today() - timedelta(days=365 * (DEFAULT_YEAR_LIMIT + 1))).strftime('%Y-%m-%d')
 
+        # FIX: fetch dư +2 năm so với DEFAULT_YEAR_LIMIT làm buffer — một số
+        # nguồn tính "limit" theo số kỳ báo cáo đã công bố (kể cả kỳ ước tính
+        # dở dang của năm hiện tại), nên limit=5 đúng nghĩa đôi khi chỉ trả
+        # về 4 năm quá khứ đầy đủ + 1 kỳ hiện tại → 2021 bị rớt khỏi bảng.
+        # allowed_years / _filter_years() ở dưới vẫn giới hạn hiển thị đúng
+        # 5 năm (2021-2025), buffer chỉ để tránh mất dữ liệu ở nguồn.
+        _fetch_limit = DEFAULT_YEAR_LIMIT + 2
         tasks = {
             "price":      lambda: q_engine.history(start=start_date, end=end_date, interval='1D'),
             "overview":   lambda: c_engine.overview(),
-            "income_y":   lambda: _fetch_income_statement(ticker, source_used, period='year',    limit=DEFAULT_YEAR_LIMIT),
-            "cashflow_y": lambda: _fetch_cashflow(ticker,          source_used, period='year',    limit=DEFAULT_YEAR_LIMIT),
-            "ratio_y":    lambda: _fetch_ratio(ticker,             source_used, period='year',    limit=DEFAULT_YEAR_LIMIT),
+            "income_y":   lambda: _fetch_income_statement(ticker, source_used, period='year',    limit=_fetch_limit),
+            "cashflow_y": lambda: _fetch_cashflow(ticker,          source_used, period='year',    limit=_fetch_limit),
+            "ratio_y":    lambda: _fetch_ratio(ticker,             source_used, period='year',    limit=_fetch_limit),
             "income_q":   lambda: _fetch_income_statement(ticker,  source_used, period='quarter', limit=20),
             "ratio_q":    lambda: _fetch_ratio(ticker,             source_used, period='quarter', limit=20),
-            "balance_y":  lambda: _fetch_balance_sheet(ticker,     source_used, period='year',    limit=DEFAULT_YEAR_LIMIT),
+            "balance_y":  lambda: _fetch_balance_sheet(ticker,     source_used, period='year',    limit=_fetch_limit),
             "balance_q":  lambda: _fetch_balance_sheet(ticker,     source_used, period='quarter', limit=20),
             "news":       lambda: c_engine.news(),
         }
@@ -333,6 +393,17 @@ def execute_equity_research_pipeline(ticker):
                     issue_share = implied_from_cap
             else:
                 issue_share = implied_from_cap
+
+        # FIX: nhiều nguồn (VCI/KBS/DNSE) không trả về hàng "outstanding
+        # shares" trong báo cáo tỷ lệ theo từng năm → outstanding_shares_series
+        # rỗng hoàn toàn → cột "Số CP lưu hành" trống mọi năm trong bảng 5 năm.
+        # Fallback: nếu không có chuỗi theo năm nhưng có issue_share (giá trị
+        # mới nhất, lấy từ overview/vốn điều lệ), dùng giá trị đó cho MỌI năm
+        # trong allowed_years — số CP có thể có sai lệch nhỏ ở các năm cũ nếu
+        # DN có phát hành thêm/chia tách, nhưng còn hơn để trống hoàn toàn.
+        if outstanding_shares_series.empty and issue_share > 0:
+            outstanding_shares_series = pd.Series(
+                {y: issue_share for y in sorted(allowed_years)})
 
         eps_latest  = get_latest(eps_series,  default=0.0)
         bvps_latest = get_latest(bvps_series, default=0.0)
