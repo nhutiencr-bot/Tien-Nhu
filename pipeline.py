@@ -37,14 +37,21 @@ def normalize_to_billion_vnd(series):
     Chuẩn hoá series về đơn vị tỷ VNĐ.
 
     Phân biệt 3 đơn vị API có thể trả:
-      - Đơn vị ĐỒNG:  median > 5e10  → chia 1e9
-      - Đơn vị TRIỆU: median > 5e4   → chia 1e3
-      - Đơn vị TỶ:    median <= 5e4  → giữ nguyên
+      - Đơn vị ĐỒNG:  median > 5e11  → chia 1e9
+      - Đơn vị TRIỆU: median > 5e5   → chia 1e3
+      - Đơn vị TỶ:    median <= 5e5  → giữ nguyên
 
-    Ví dụ VCB thu nhập lãi 88,112 tỷ:
-      API đồng   → 88,112,700,000,000 → median ~9e13 → /1e9 → 88,112 tỷ ✓
-      API triệu  → 88,112,700         → median ~9e7  → /1e3 → 88,112 tỷ ✓
-      API tỷ     → 88,112.70          → median ~9e4  → /1   → 88,112 tỷ ✓
+    Ngưỡng nâng từ 5e10/5e4 lên 5e11/5e5 để phân biệt đúng:
+      - Ngân hàng lớn (VCB) equity ~140,000 tỷ: API tỷ → median=140k → <= 5e5 → /1 ✓
+        (ngưỡng cũ 5e4=50k → 140k > 50k → bị chia 1000 → 140 tỷ SAI)
+      - LNST VCB đơn vị triệu: median ~30,000,000 > 5e5 → /1e3 → 30,000 tỷ ✓
+      - Giá CP đơn vị đồng: ~25,000đ/CP → nếu series này thì median ~25k <= 5e5
+        → giữ nguyên (giá CP không qua hàm này vì không normalize về tỷ)
+
+    Boundary cases:
+      - Công ty nhỏ revenue 50 tỷ (= median 50k) → dùng > 5e5 safe, không bị chia nhầm
+      - Công ty lớn revenue 200,000 tỷ (đơn vị tỷ) → median 200k <= 5e5 → /1 ✓
+      - LNST đơn vị triệu cho công ty nhỏ: median ~50,000 triệu = 5e7 > 5e5 → /1e3 → 50 tỷ ✓
     """
     if series is None or series.empty:
         return series
@@ -52,11 +59,11 @@ def normalize_to_billion_vnd(series):
     if numeric.empty:
         return series
     median_abs = numeric.abs().median()
-    if median_abs > 5e10:
+    if median_abs > 5e11:      # đơn vị ĐỒNG (VD: 88,112,700,000,000)
         divisor = 1e9
-    elif median_abs > 5e4:
+    elif median_abs > 5e5:     # đơn vị TRIỆU (VD: 88,112,700 triệu)
         divisor = 1e3
-    else:
+    else:                      # đơn vị TỶ (VD: 88,112 tỷ) — giữ nguyên
         divisor = 1.0
     def _to_ty(val):
         try:
@@ -416,9 +423,9 @@ def execute_equity_research_pipeline(ticker):
         if equity_series.empty or total_assets_series.empty:
             cafef_data = fetch_cafef_balance_sheet_5y(ticker)
             if equity_series.empty and isinstance(cafef_data, dict) and not cafef_data.get('equity', pd.Series()).empty:
-                equity_series = _filter_years(cafef_data['equity'])
+                equity_series = _filter_years(normalize_to_billion_vnd(cafef_data['equity']))
             if total_assets_series.empty and isinstance(cafef_data, dict) and not cafef_data.get('total_assets', pd.Series()).empty:
-                total_assets_series = _filter_years(cafef_data['total_assets'])
+                total_assets_series = _filter_years(normalize_to_billion_vnd(cafef_data['total_assets']))
 
         # ── CafeF fallback: income (revenue + net_profit) cho năm thiếu ─
         # Gọi khi 2021 vẫn thiếu sau khi fetch 3 nguồn API
@@ -472,6 +479,45 @@ def execute_equity_research_pipeline(ticker):
         _missing_years = sorted(_expected_years - _years_have)
         if _missing_years:
             st.warning(f"⚠️ {ticker}: cả 3 nguồn VCI/KBS/DNSE đều không có dữ liệu năm {_missing_years}.")
+
+        # ── Cross-unit sanity check ───────────────────────────────────────
+        # Nếu LNST > Revenue hoặc LNST > 80% Equity → đơn vị vẫn lệch sau normalize
+        # Ví dụ: revenue=45 tỷ (đơn vị tỷ đúng) nhưng LNST=27,504 tỷ (triệu chưa chia)
+        # → re-normalize LNST, revenue, equity, total_assets từng series một
+        def _cross_unit_recheck(np_s, rev_s, eq_s):
+            """Trả về True nếu cần re-normalize net_profit."""
+            if np_s.empty or (rev_s.empty and eq_s.empty):
+                return False
+            common = np_s.index
+            if not rev_s.empty:
+                common = common.intersection(rev_s.index)
+                if len(common) > 0:
+                    np_med = np_s.loc[common].abs().median()
+                    rev_med = rev_s.loc[common].abs().median()
+                    if rev_med > 0 and np_med / rev_med > 500:
+                        return True  # LNST/Revenue > 500x → đơn vị lệch ~1000x
+            if not eq_s.empty:
+                common2 = np_s.index.intersection(eq_s.index)
+                if len(common2) > 0:
+                    np_med2 = np_s.loc[common2].abs().median()
+                    eq_med2 = eq_s.loc[common2].abs().median()
+                    if eq_med2 > 0 and np_med2 / eq_med2 > 5:
+                        return True  # LNST > 5× Equity → vô lý
+            return False
+
+        if _cross_unit_recheck(net_profit_series, revenue_series, equity_series):
+            # Re-normalize: LNST đang ở triệu, chia thêm 1000
+            net_profit_series = net_profit_series / 1000
+
+        # Revenue cross-check: nếu revenue < net_profit → revenue đơn vị nghìn tỷ (thiếu x1000)
+        if not revenue_series.empty and not net_profit_series.empty:
+            common_ry = revenue_series.index.intersection(net_profit_series.index)
+            if len(common_ry) >= 2:
+                rev_med = revenue_series.loc[common_ry].abs().median()
+                np_med  = net_profit_series.loc[common_ry].abs().median()
+                if rev_med > 0 and np_med / rev_med > 2:
+                    # LNST > 2× Doanh thu → vô lý → revenue bị thiếu factor 1000
+                    revenue_series = revenue_series * 1000
 
         market_cap_series_raw = fin5.get('market_cap', pd.Series(dtype=float))
         market_cap_direct = get_latest(market_cap_series_raw, default=0.0)
@@ -808,9 +854,17 @@ def execute_equity_research_pipeline(ticker):
                 lambda y: bvps_adj.get(y, None) if y in bvps_adj.index else None)
 
         # 1) LCFD HĐKD (CFO) – tỷ VND
+        # Cross-check: CFO không được lớn hơn Revenue 10x (nếu có)
         _cfo_s = cfo_series_for_multiples if (
             cfo_series_for_multiples is not None and not cfo_series_for_multiples.empty
         ) else pd.Series(dtype=float)
+        if not _cfo_s.empty and not revenue_series.empty:
+            _common_cr = _cfo_s.index.intersection(revenue_series.index)
+            if len(_common_cr) >= 2:
+                _cfo_med = _cfo_s.loc[_common_cr].abs().median()
+                _rev_med = revenue_series.loc[_common_cr].abs().median()
+                if _rev_med > 0 and _cfo_med / _rev_med > 10:
+                    _cfo_s = _cfo_s / 1000
         df_5y_table['LCFD HĐKD (tỷ)'] = df_5y_table['Năm'].map(
             lambda y: _cfo_s.get(y, None) if not _cfo_s.empty else None)
 
