@@ -16,7 +16,7 @@ from valuation import (
     graham_number, ddm_gordon, nine_methods_valuation, summarize_valuation,
     detect_stock_dividend_years, normalize_eps_bvps_series, estimate_wacc,
 )
-from cafef_fallback import fetch_cafef_balance_sheet_5y
+from cafef_fallback import fetch_cafef_balance_sheet_5y, fetch_cafef_yearly_full
 
 SOURCE_FALLBACK_ORDER = ['KBS', 'VCI', 'DNSE']
 
@@ -419,59 +419,111 @@ def execute_equity_research_pipeline(ticker):
                     equity_series = (total_assets_series.loc[common_years]
                                      - total_liab_series.loc[common_years])
 
-        # ── CafeF fallback: balance sheet ────────────────────────────────
-        if equity_series.empty or total_assets_series.empty:
-            cafef_data = fetch_cafef_balance_sheet_5y(ticker)
-            if equity_series.empty and isinstance(cafef_data, dict) and not cafef_data.get('equity', pd.Series()).empty:
-                equity_series = _filter_years(normalize_to_billion_vnd(cafef_data['equity']))
-            if total_assets_series.empty and isinstance(cafef_data, dict) and not cafef_data.get('total_assets', pd.Series()).empty:
-                total_assets_series = _filter_years(normalize_to_billion_vnd(cafef_data['total_assets']))
-
-        # ── CafeF fallback: income (revenue + net_profit) cho năm thiếu ─
-        # Gọi khi 2021 vẫn thiếu sau khi fetch 3 nguồn API
+        # ══════════════════════════════════════════════════════════════════
+        # CafeF FALLBACK — Lấy đủ 3 BCTC cho các năm thiếu (thường là 2021)
+        # Dùng fetch_cafef_yearly_full() thay vì fetch_cafef_balance_sheet_5y()
+        # vì cần cả income_statement (revenue, net_profit) + cash_flow (CFO)
+        # n_years=6 để đảm bảo CafeF trả đủ từ 2020-2025 (lấy thừa rồi filter)
+        # ══════════════════════════════════════════════════════════════════
         _years_have_income = set(revenue_series.index) | set(net_profit_series.index)
-        _missing_income = sorted(allowed_years - _years_have_income)
-        if _missing_income:
-            try:
-                cafef_income = fetch_cafef_balance_sheet_5y(ticker)
-                # cafef_fallback trả dict — lấy revenue/net_profit nếu có
-                if isinstance(cafef_income, dict):
-                    if not cafef_income.get('revenue', pd.Series()).empty:
-                        _rev_cf = _filter_years(normalize_to_billion_vnd(cafef_income['revenue']))
-                        for yr in _rev_cf.index:
-                            if yr not in revenue_series.index:
-                                revenue_series[yr] = _rev_cf[yr]
-                        revenue_series = revenue_series.sort_index()
-                    if not cafef_income.get('net_profit', pd.Series()).empty:
-                        _np_cf = _filter_years(normalize_to_billion_vnd(cafef_income['net_profit']))
-                        for yr in _np_cf.index:
-                            if yr not in net_profit_series.index:
-                                net_profit_series[yr] = _np_cf[yr]
-                        net_profit_series = net_profit_series.sort_index()
-            except Exception:
-                pass
+        _years_have_bs     = set(equity_series.index)  | set(total_assets_series.index)
+        _missing_any = sorted(allowed_years - (_years_have_income & _years_have_bs))
 
-        # ── CafeF fallback: balance sheet cho năm thiếu (bổ sung equity/total_assets) ─
-        _years_have_bs = set(equity_series.index) | set(total_assets_series.index)
-        _missing_bs = sorted(allowed_years - _years_have_bs)
-        if _missing_bs:
+        # Khởi tạo trước để dùng được ở CFO fallback sau khi cfo_series_for_multiples được tính
+        _cf_cf = pd.DataFrame()
+
+        def _cafef_extract_series(df, keywords, exclude=None):
+            """Tìm dòng theo keyword trong CafeF DataFrame (index=chỉ tiêu, col=năm)."""
+            if df is None or df.empty:
+                return pd.Series(dtype=float)
+            for kw in keywords:
+                matches = [i for i in df.index if kw.lower() in str(i).lower()]
+                if exclude:
+                    matches = [i for i in matches
+                               if not any(ex.lower() in str(i).lower() for ex in exclude)]
+                if not matches:
+                    continue
+                row = df.loc[matches[0]]
+                s = {}
+                for col in row.index:
+                    try:
+                        yr = int(str(col).strip().split('/')[0])
+                        val = row[col]
+                        if val is not None and str(val).strip() not in ('', 'None', 'nan'):
+                            s[yr] = float(str(val).replace(',', ''))
+                    except Exception:
+                        pass
+                if s:
+                    return pd.Series(s, dtype=float)
+            return pd.Series(dtype=float)
+
+        if _missing_any:
             try:
-                cafef_bs = fetch_cafef_balance_sheet_5y(ticker)
-                if isinstance(cafef_bs, dict):
-                    if not cafef_bs.get('equity', pd.Series()).empty:
-                        _eq_cf = _filter_years(normalize_to_billion_vnd(cafef_bs['equity']))
-                        for yr in _eq_cf.index:
-                            if yr not in equity_series.index:
-                                equity_series[yr] = _eq_cf[yr]
-                        equity_series = equity_series.sort_index()
-                    if not cafef_bs.get('total_assets', pd.Series()).empty:
-                        _ta_cf = _filter_years(normalize_to_billion_vnd(cafef_bs['total_assets']))
-                        for yr in _ta_cf.index:
-                            if yr not in total_assets_series.index:
-                                total_assets_series[yr] = _ta_cf[yr]
-                        total_assets_series = total_assets_series.sort_index()
+                _cafef_full = fetch_cafef_yearly_full(ticker, n_years=5)
+                _cf_income  = _cafef_full.get("income_statement",  pd.DataFrame())
+                _cf_bs      = _cafef_full.get("balance_sheet",     pd.DataFrame())
+                _cf_cf      = _cafef_full.get("cash_flow",         pd.DataFrame())
+
+                # ── Income statement fallback ─────────────────────────────
+                if not _cf_income.empty:
+                    # Revenue: dùng từ khóa đặc thù theo ngành
+                    if is_bank:
+                        _rev_kw = ['thu nhập lãi và các khoản thu nhập tương tự',
+                                   'tổng thu nhập hoạt động', 'thu nhập lãi thuần']
+                    else:
+                        _rev_kw = ['doanh thu thuần', 'tổng doanh thu', 'net revenue',
+                                   'doanh thu bán hàng', 'revenue']
+                    _rev_cf = _filter_years(normalize_to_billion_vnd(
+                        _cafef_extract_series(_cf_income, _rev_kw,
+                                              exclude=['giá vốn', 'chi phí'])))
+                    for yr in _rev_cf.index:
+                        if yr not in revenue_series.index:
+                            revenue_series[yr] = _rev_cf[yr]
+                    revenue_series = revenue_series.sort_index()
+
+                    # Net profit: LNST thuộc CĐ mẹ (Bẫy 3)
+                    _np_kw = ['lợi nhuận sau thuế của cổ đông của công ty mẹ',
+                              'lợi nhuận sau thuế', 'lãi sau thuế',
+                              'profit after tax', 'net profit', 'net income']
+                    _np_cf = _filter_years(normalize_to_billion_vnd(
+                        _cafef_extract_series(_cf_income, _np_kw,
+                                              exclude=['trước thuế', 'thiểu số', 'minority'])))
+                    for yr in _np_cf.index:
+                        if yr not in net_profit_series.index:
+                            net_profit_series[yr] = _np_cf[yr]
+                    net_profit_series = net_profit_series.sort_index()
+
+                # ── Balance sheet fallback ────────────────────────────────
+                if not _cf_bs.empty:
+                    _eq_kw = ['vốn chủ sở hữu', 'equity', 'total equity',
+                              'tổng vốn chủ sở hữu', "vốn của cổ đông"]
+                    _eq_cf = _filter_years(normalize_to_billion_vnd(
+                        _cafef_extract_series(_cf_bs, _eq_kw,
+                                              exclude=['thiểu số', 'minority'])))
+                    for yr in _eq_cf.index:
+                        if yr not in equity_series.index:
+                            equity_series[yr] = _eq_cf[yr]
+                    equity_series = equity_series.sort_index()
+
+                    _ta_kw = ['tổng cộng tài sản', 'tổng tài sản', 'total assets']
+                    _ta_cf = _filter_years(normalize_to_billion_vnd(
+                        _cafef_extract_series(_cf_bs, _ta_kw)))
+                    for yr in _ta_cf.index:
+                        if yr not in total_assets_series.index:
+                            total_assets_series[yr] = _ta_cf[yr]
+                    total_assets_series = total_assets_series.sort_index()
+
+                # ── EPS/BVPS fallback từ income_statement CafeF ──────────
+                if not _cf_income.empty:
+                    _eps_kw = ['lãi cơ bản trên cổ phiếu', 'eps', 'earnings per share']
+                    _eps_cf = _filter_years(_cafef_extract_series(_cf_income, _eps_kw))
+                    for yr in _eps_cf.index:
+                        if yr not in eps_series.index:
+                            eps_series[yr] = _eps_cf[yr]
+                    eps_series = eps_series.sort_index()
+
             except Exception:
-                pass
+                pass  # CafeF không khả dụng → giữ nguyên data từ API
 
         _expected_years = allowed_years
         _years_have = (set(revenue_series.index) | set(net_profit_series.index)
@@ -630,6 +682,22 @@ def execute_equity_research_pipeline(ticker):
              'net cash generated from operating activities',
              'cash flow from operations', 'operating cash flow']))
         cfo_series_for_multiples = _filter_years(cfo_series_for_multiples)
+
+        # ── CFO CafeF fallback: bổ sung năm thiếu từ _cf_cf ─────────────
+        if not _cf_cf.empty:
+            try:
+                _cfo_kw = ['lưu chuyển tiền thuần từ hoạt động kinh doanh',
+                           'lưu chuyển tiền thuần từ hđkd',
+                           'lưu chuyển tiền tệ ròng từ các hoạt động',
+                           'net cash from operating', 'operating cash flow']
+                _cfo_cf_fb = _filter_years(normalize_to_billion_vnd(
+                    _cafef_extract_series(_cf_cf, _cfo_kw)))
+                for yr in _cfo_cf_fb.index:
+                    if yr not in cfo_series_for_multiples.index:
+                        cfo_series_for_multiples[yr] = _cfo_cf_fb[yr]
+                cfo_series_for_multiples = cfo_series_for_multiples.sort_index()
+            except Exception:
+                pass
 
         # ── BẪY ĐƠN VỊ: CFO vs Equity cross-check ───────────────────────
         # CFO từ cashflow thường cùng đơn vị với revenue → nếu revenue bị triệu
