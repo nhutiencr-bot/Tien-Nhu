@@ -17,6 +17,7 @@ from valuation import (
     detect_stock_dividend_years, normalize_eps_bvps_series, estimate_wacc,
 )
 from cafef_fallback import fetch_cafef_balance_sheet_5y, fetch_cafef_yearly_full
+from website_scraper import fetch_website_financial_data
 
 SOURCE_FALLBACK_ORDER = ['KBS', 'VCI', 'DNSE']
 
@@ -512,12 +513,119 @@ def execute_equity_research_pipeline(ticker):
             except Exception:
                 pass
 
+        # ─────────────────────────────────────────────────────────────────
+        # TẦNG 3 — Website scraping (Vietstock → CafeF HTML → Stockbiz → Wichart)
+        # Kích hoạt khi vẫn còn năm thiếu sau vnstock + CafeF AJAX
+        # ─────────────────────────────────────────────────────────────────
+        _years_have_after_cafef = (
+            set(revenue_series.index) | set(net_profit_series.index)
+            | set(equity_series.index) | set(total_assets_series.index)
+        )
+        _missing_after_cafef = sorted(allowed_years - _years_have_after_cafef)
+
+        if _missing_after_cafef:
+            try:
+                _ws_full = fetch_website_financial_data(
+                    ticker,
+                    n_years=FETCH_LIMIT_YEAR,
+                    required_years=allowed_years,
+                )
+                _ws_income = _ws_full.get("income_statement", pd.DataFrame())
+                _ws_bs     = _ws_full.get("balance_sheet",    pd.DataFrame())
+                _ws_cf_    = _ws_full.get("cash_flow",        pd.DataFrame())
+
+                def _ws_extract(df: pd.DataFrame, keywords: list,
+                                 exclude: list | None = None) -> "pd.Series":
+                    """Tìm dòng theo keyword trong website-scraped DataFrame."""
+                    if df is None or df.empty:
+                        return pd.Series(dtype=float)
+                    for kw in keywords:
+                        matches = [i for i in df.index if kw.lower() in str(i).lower()]
+                        if exclude:
+                            matches = [i for i in matches
+                                       if not any(ex.lower() in str(i).lower()
+                                                  for ex in exclude)]
+                        if not matches:
+                            continue
+                        row = df.loc[matches[0]]
+                        s = {}
+                        for col in row.index:
+                            yr = _parse_year_from_col(str(col))
+                            if yr is None:
+                                continue
+                            try:
+                                val = row[col]
+                                if val is not None and str(val).strip() not in ('', 'None', 'nan'):
+                                    s[yr] = float(str(val).replace(',', ''))
+                            except Exception:
+                                pass
+                        if s:
+                            return pd.Series(s, dtype=float)
+                    return pd.Series(dtype=float)
+
+                if not _ws_income.empty:
+                    if is_bank:
+                        _ws_rev_kw = ['thu nhập lãi và các khoản thu nhập tương tự',
+                                      'tổng thu nhập hoạt động', 'thu nhập lãi thuần']
+                    else:
+                        _ws_rev_kw = ['doanh thu thuần', 'tổng doanh thu', 'net revenue',
+                                      'doanh thu bán hàng', 'revenue']
+                    _ws_rev = _filter_years(normalize_to_billion_vnd(
+                        _ws_extract(_ws_income, _ws_rev_kw, exclude=['giá vốn', 'chi phí'])))
+                    for yr in _ws_rev.index:
+                        if yr not in revenue_series.index:
+                            revenue_series[yr] = _ws_rev[yr]
+                    revenue_series = revenue_series.sort_index()
+
+                    _ws_np_kw = ['lợi nhuận sau thuế của cổ đông của công ty mẹ',
+                                 'lợi nhuận sau thuế', 'lãi sau thuế',
+                                 'profit after tax', 'net profit', 'net income']
+                    _ws_np = _filter_years(normalize_to_billion_vnd(
+                        _ws_extract(_ws_income, _ws_np_kw,
+                                    exclude=['trước thuế', 'thiểu số', 'minority'])))
+                    for yr in _ws_np.index:
+                        if yr not in net_profit_series.index:
+                            net_profit_series[yr] = _ws_np[yr]
+                    net_profit_series = net_profit_series.sort_index()
+
+                    _ws_eps_kw = ['lãi cơ bản trên cổ phiếu', 'eps', 'earnings per share']
+                    _ws_eps = _filter_years(_ws_extract(_ws_income, _ws_eps_kw))
+                    for yr in _ws_eps.index:
+                        if yr not in eps_series.index:
+                            eps_series[yr] = _ws_eps[yr]
+                    eps_series = eps_series.sort_index()
+
+                if not _ws_bs.empty:
+                    _ws_eq_kw = ['vốn chủ sở hữu', 'equity', 'total equity',
+                                 'tổng vốn chủ sở hữu', 'vốn của cổ đông']
+                    _ws_eq = _filter_years(normalize_to_billion_vnd(
+                        _ws_extract(_ws_bs, _ws_eq_kw, exclude=['thiểu số', 'minority'])))
+                    for yr in _ws_eq.index:
+                        if yr not in equity_series.index:
+                            equity_series[yr] = _ws_eq[yr]
+                    equity_series = equity_series.sort_index()
+
+                    _ws_ta_kw = ['tổng cộng tài sản', 'tổng tài sản', 'total assets']
+                    _ws_ta = _filter_years(normalize_to_billion_vnd(
+                        _ws_extract(_ws_bs, _ws_ta_kw)))
+                    for yr in _ws_ta.index:
+                        if yr not in total_assets_series.index:
+                            total_assets_series[yr] = _ws_ta[yr]
+                    total_assets_series = total_assets_series.sort_index()
+
+                # CFO từ website scraper
+                if not _ws_cf_.empty and _cf_cf.empty:
+                    _cf_cf = _ws_cf_
+
+            except Exception:
+                pass
+
         _expected_years = allowed_years
         _years_have = (set(revenue_series.index) | set(net_profit_series.index)
                        | set(equity_series.index) | set(total_assets_series.index))
         _missing_years = sorted(_expected_years - _years_have)
         if _missing_years:
-            st.warning(f"⚠️ {ticker}: cả 3 nguồn VCI/KBS/DNSE đều không có dữ liệu năm {_missing_years}.")
+            st.warning(f"⚠️ {ticker}: không lấy được dữ liệu năm {_missing_years} từ tất cả nguồn (vnstock / CafeF / website).")
 
         def _cross_unit_recheck(np_s, rev_s, eq_s):
             if np_s.empty or (rev_s.empty and eq_s.empty):
