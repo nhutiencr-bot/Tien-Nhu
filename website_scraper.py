@@ -526,6 +526,25 @@ def _count_years(result: dict[str, pd.DataFrame]) -> int:
     return len(years)
 
 
+def _missing_required_years(result: dict[str, pd.DataFrame],
+                             required_years: set[int]) -> list[int]:
+    """
+    BUG FIX 6: kiểm tra ĐÚNG từng năm trong required_years có mặt hay chưa,
+    thay vì chỉ đếm TỔNG SỐ năm khác nhau (_count_years). Đếm tổng số bị lỗi
+    vì 1 nguồn có thể trả về 5 năm bất kỳ (vd 2019,2020,2022,2023,2024) mà
+    KHÔNG có 2021 — "5 >= 5" vẫn đúng nên cascade dừng sớm, 2021 không bao
+    giờ được các tầng sau (CafeF/Stockbiz/Wichart) bù vào.
+    """
+    found_years: set[int] = set()
+    for df in result.values():
+        if not df.empty:
+            for c in df.columns:
+                y = _year_from_str(str(c))
+                if y:
+                    found_years.add(int(y))
+    return sorted(y for y in required_years if y not in found_years)
+
+
 def fetch_website_financial_data(ticker: str, n_years: int = 5,
                                  required_years: set[int] | None = None) -> dict[str, pd.DataFrame]:
     """
@@ -554,7 +573,10 @@ def fetch_website_financial_data(ticker: str, n_years: int = 5,
     except Exception as e:
         logger.debug("Vietstock failed for %s: %s", ticker, e)
 
-    if required_years and _count_years(result) >= len(required_years):
+    # BUG FIX 6: dùng _missing_required_years() thay vì _count_years() để
+    # dừng sớm ĐÚNG khi mọi năm bắt buộc (kể cả 2021) đã có, không phải khi
+    # tổng số năm khác nhau đã đủ 5 (có thể toàn năm khác, thiếu đúng 2021).
+    if required_years and not _missing_required_years(result, required_years):
         return result
 
     # ── Tầng 2: CafeF HTML
@@ -564,7 +586,7 @@ def fetch_website_financial_data(ticker: str, n_years: int = 5,
     except Exception as e:
         logger.debug("CafeF HTML failed for %s: %s", ticker, e)
 
-    if required_years and _count_years(result) >= len(required_years):
+    if required_years and not _missing_required_years(result, required_years):
         return result
 
     # ── Tầng 3: Stockbiz
@@ -574,7 +596,7 @@ def fetch_website_financial_data(ticker: str, n_years: int = 5,
     except Exception as e:
         logger.debug("Stockbiz failed for %s: %s", ticker, e)
 
-    if required_years and _count_years(result) >= len(required_years):
+    if required_years and not _missing_required_years(result, required_years):
         return result
 
     # ── Tầng 4: Wichart
