@@ -423,7 +423,7 @@ def execute_equity_research_pipeline(ticker):
         # CafeF FALLBACK — Lấy đủ 3 BCTC cho các năm thiếu (thường là 2021)
         # Dùng fetch_cafef_yearly_full() thay vì fetch_cafef_balance_sheet_5y()
         # vì cần cả income_statement (revenue, net_profit) + cash_flow (CFO)
-        # n_years=6 để đảm bảo CafeF trả đủ từ 2020-2025 (lấy thừa rồi filter)
+        # n_years=5: CafeF period=5 & periodType=Y → 5 kỳ gần nhất = 2021-2025
         # ══════════════════════════════════════════════════════════════════
         _years_have_income = set(revenue_series.index) | set(net_profit_series.index)
         _years_have_bs     = set(equity_series.index)  | set(total_assets_series.index)
