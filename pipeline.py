@@ -1,9 +1,6 @@
 import pandas as pd
 import numpy as np
 import streamlit as st
-# BYPASS vnai hard-cap 4 kỳ — phải gọi TRƯỚC mọi Finance() call
-from unpatch_vnai import apply_unpatch
-apply_unpatch()
 from news_fetcher import fetch_news_with_fallback
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
