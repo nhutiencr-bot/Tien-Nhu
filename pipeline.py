@@ -335,7 +335,15 @@ def execute_equity_research_pipeline(ticker):
         df_ratio_q   = results.get("ratio_q",    pd.DataFrame())
         df_balance   = results.get("balance_y",  pd.DataFrame())
         df_balance_q = results.get("balance_q",  pd.DataFrame())
-
+        
+        # DEBUG TẠM — xóa sau khi fix xong
+if not df_income.empty:
+    _yr_cols = [c for c in df_income.columns if str(c).isdigit() and len(str(c)) == 4]
+    st.write(f"🔍 income_y years từ VCI/KBS: {sorted(_yr_cols)}")
+if not df_balance.empty:
+    _yr_cols_b = [c for c in df_balance.columns if str(c).isdigit() and len(str(c)) == 4]
+    st.write(f"🔍 balance_y years từ VCI/KBS: {sorted(_yr_cols_b)}")
+    
         if df_price is None or df_price.empty:
             st.error(f"Không có dữ liệu giá lịch sử cho mã {ticker}.")
             return None
