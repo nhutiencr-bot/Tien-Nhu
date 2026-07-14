@@ -362,11 +362,11 @@ def execute_equity_research_pipeline(ticker):
         net_profit_series         = normalize_net_profit_with_anchor(
             fin5['net_profit'], equity_series, fin5['roe'])
         eps_series                = fin5['eps']
-        bvps_series               = fin5['bvps']
-        roe_series                = fin5['roe']
-        roa_series                = fin5['roa']
-        pe_series                 = fin5['pe']
-        pb_series                 = fin5['pb']
+        bvps_series                = fin5['bvps']
+        roe_series                 = fin5['roe']
+        roa_series                 = fin5['roa']
+        pe_series                  = fin5['pe']
+        pb_series                  = fin5['pb']
         outstanding_shares_series = fin5['outstanding_shares']
 
         def _filter_years(s):
@@ -387,11 +387,11 @@ def execute_equity_research_pipeline(ticker):
         total_assets_series   = _filter_years(total_assets_series)
         net_profit_series     = _filter_years(net_profit_series)
         eps_series            = _filter_years(eps_series)
-        bvps_series           = _filter_years(bvps_series)
-        roe_series            = _filter_years(roe_series)
-        roa_series            = _filter_years(roa_series)
-        pe_series             = _filter_years(pe_series)
-        pb_series             = _filter_years(pb_series)
+        bvps_series            = _filter_years(bvps_series)
+        roe_series             = _filter_years(roe_series)
+        roa_series             = _filter_years(roa_series)
+        pe_series              = _filter_years(pe_series)
+        pb_series              = _filter_years(pb_series)
         outstanding_shares_series = _filter_years(outstanding_shares_series)
 
         outstanding_shares_series = _build_shares_series(
@@ -410,9 +410,17 @@ def execute_equity_research_pipeline(ticker):
                     equity_series = (total_assets_series.loc[common_years]
                                      - total_liab_series.loc[common_years])
 
-        _years_have_income = set(revenue_series.index) | set(net_profit_series.index)
-        _years_have_bs     = set(equity_series.index)  | set(total_assets_series.index)
-        _missing_any = sorted(allowed_years - (_years_have_income & _years_have_bs))
+        # BUG FIX 4 (root cause của "thiếu dữ liệu 2021"): trước đây dùng
+        # (union income) & (union balance) → 1 năm chỉ cần CÓ MẶT ở bất kỳ
+        # field nào trong mỗi nhóm là bị coi là "đã đủ", nên nếu 2021 có
+        # revenue nhưng thiếu net_profit/equity/total_assets thì vẫn không
+        # được xem là "missing" → fallback CafeF không bao giờ được gọi để
+        # bổ sung phần còn thiếu của 2021. Nay yêu cầu ĐỦ CẢ 4 field mới
+        # tính là năm đã có dữ liệu, thiếu 1 trong 4 là phải fallback.
+        _missing_any = sorted(allowed_years - (
+            set(revenue_series.index) & set(net_profit_series.index)
+            & set(equity_series.index) & set(total_assets_series.index)
+        ))
 
         # Khởi tạo _cf_cf ở ngoài if để CFO fallback block luôn có thể dùng
         _cf_cf = pd.DataFrame()
@@ -517,11 +525,14 @@ def execute_equity_research_pipeline(ticker):
         # TẦNG 3 — Website scraping (Vietstock → CafeF HTML → Stockbiz → Wichart)
         # Kích hoạt khi vẫn còn năm thiếu sau vnstock + CafeF AJAX
         # ─────────────────────────────────────────────────────────────────
-        _years_have_after_cafef = (
-            set(revenue_series.index) | set(net_profit_series.index)
-            | set(equity_series.index) | set(total_assets_series.index)
-        )
-        _missing_after_cafef = sorted(allowed_years - _years_have_after_cafef)
+        # BUG FIX 4 (tiếp): áp dụng cùng cách tính "thiếu" chặt chẽ (AND thay
+        # vì OR) cho tầng fallback thứ 3 (website scraping), để nếu 2021 vẫn
+        # còn thiếu 1 trong 4 field sau khi đã thử CafeF thì vẫn kích hoạt
+        # tiếp fallback website thay vì bị bỏ qua.
+        _missing_after_cafef = sorted(allowed_years - (
+            set(revenue_series.index) & set(net_profit_series.index)
+            & set(equity_series.index) & set(total_assets_series.index)
+        ))
 
         if _missing_after_cafef:
             try:
