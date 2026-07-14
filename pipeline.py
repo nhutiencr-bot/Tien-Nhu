@@ -541,6 +541,7 @@ def execute_equity_research_pipeline(ticker):
         # ── BẪY ĐƠN VỊ: CFO vs Equity cross-check ────────────────────────
         # CFO (từ df_cashflow) cùng nguồn với revenue → có thể cùng bị sai đơn vị
         # Kiểm tra sau khi CFO được tính ở block dưới (cfo_series_for_multiples)
+        market_cap_series_raw = fin5.get('market_cap', pd.Series(dtype=float))
         market_cap_direct = get_latest(market_cap_series_raw, default=0.0)
         if market_cap_direct > 0 and current_price > 0:
             implied_check = market_cap_direct / current_price
