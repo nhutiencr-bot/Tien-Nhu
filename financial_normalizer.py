@@ -47,10 +47,13 @@ def _get_year_columns(df: pd.DataFrame):
     for c in df.columns:
         if c in meta_cols:
             continue
+        # Normalize: strip whitespace, strip trailing ".0" for float columns (e.g. 2021.0 → 2021)
         c_str = str(c).strip()
+        if c_str.endswith('.0'):
+            c_str = c_str[:-2]
         if re.fullmatch(r'\d{4}', c_str):
             year_cols.append(c)
-    return sorted(year_cols, key=lambda x: int(str(x).strip()))
+    return sorted(year_cols, key=lambda x: int(str(x).strip().rstrip('.0') or '0'))
 
 
 def _quarter_sort_key(c):
@@ -337,12 +340,27 @@ def build_5y_financial_table(df_income, df_balance, df_ratio=None, ticker=None):
 
 
 def normalize_to_billion_vnd(series: pd.Series, label=""):
+    """
+    Chuẩn hóa series về đơn vị tỷ VNĐ.
+
+    Logic 3 nhánh theo median tuyệt đối:
+      - median > 1e12  → đơn vị đồng  (ví dụ 40,698 tỷ đồng ≈ 4.07e13) → chia 1e9
+      - median > 1e6   → đơn vị triệu (ví dụ 40,698 tỷ = 40,698,000 triệu) → chia 1e3
+      - còn lại        → đã là tỷ, giữ nguyên
+
+    Ngưỡng 1e12 bắt đúng cả revenue ngân hàng lớn (VCB ~170,000 tỷ/năm = 1.7e14 đồng)
+    và tránh nhầm với revenue công ty nhỏ đã là tỷ (~ vài trăm tỷ = 2..3e2).
+    """
     if series is None or series.empty:
         return series
     median_abs = series.abs().median()
-    if median_abs > 10_000_000:
-        return series / 1e9
-    return series
+    if median_abs == 0:
+        return series
+    if median_abs > 1_000_000_000_000:   # > 1 nghìn tỷ → đơn vị đồng
+        return series / 1_000_000_000    # ÷ 1e9
+    if median_abs > 1_000_000:           # > 1 triệu → đơn vị triệu VNĐ
+        return series / 1_000            # ÷ 1e3
+    return series                        # đã là tỷ, giữ nguyên
 
 
 def get_latest(series: pd.Series, default=0.0):
