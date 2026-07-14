@@ -519,7 +519,28 @@ def execute_equity_research_pipeline(ticker):
                     # LNST > 2× Doanh thu → vô lý → revenue bị thiếu factor 1000
                     revenue_series = revenue_series * 1000
 
-        market_cap_series_raw = fin5.get('market_cap', pd.Series(dtype=float))
+        # ── BẪY ĐƠN VỊ: Revenue vs Equity cross-check ────────────────────
+        # Trường hợp ngân hàng lớn (ACB, VCB...): revenue từ CafeF fallback
+        # hoặc API trả đơn vị TRIỆU nhưng normalize_to_billion_vnd detect sai
+        # (vì chỉ có 1-2 năm trong series → median không đại diện đủ).
+        # Dấu hiệu: revenue >> equity × 1000 (vô lý vì ngân hàng revenue ~ 30-80% equity)
+        # Ví dụ ACB: revenue_series = 40,698,834 tỷ, equity = 58,439 tỷ
+        #   → ratio = 40,698,834 / 58,439 = 696 → bất thường → chia thêm 1000
+        # Ngưỡng an toàn: revenue / equity > 100 → sai đơn vị (triệu thay vì tỷ)
+        # Ngưỡng thấp nhất hợp lý: ngân hàng revenue ~0.4x equity, phi tài chính ~2-5x equity
+        if not revenue_series.empty and not equity_series.empty:
+            common_re = revenue_series.index.intersection(equity_series.index)
+            if len(common_re) >= 1:
+                rev_med_re = revenue_series.loc[common_re].abs().median()
+                eq_med_re  = equity_series.loc[common_re].abs().median()
+                if eq_med_re > 0 and rev_med_re / eq_med_re > 100:
+                    # Revenue lớn hơn equity > 100 lần → revenue đang ở triệu, equity ở tỷ
+                    # → chia thêm 1000 để về tỷ
+                    revenue_series = revenue_series / 1000
+
+        # ── BẪY ĐƠN VỊ: CFO vs Equity cross-check ────────────────────────
+        # CFO (từ df_cashflow) cùng nguồn với revenue → có thể cùng bị sai đơn vị
+        # Kiểm tra sau khi CFO được tính ở block dưới (cfo_series_for_multiples)
         market_cap_direct = get_latest(market_cap_series_raw, default=0.0)
         if market_cap_direct > 0 and current_price > 0:
             implied_check = market_cap_direct / current_price
@@ -607,6 +628,19 @@ def execute_equity_research_pipeline(ticker):
              'cash flow from operating activities', 'cash flows from operating activities',
              'net cash generated from operating activities',
              'cash flow from operations', 'operating cash flow']))
+        cfo_series_for_multiples = _filter_years(cfo_series_for_multiples)
+
+        # ── BẪY ĐƠN VỊ: CFO vs Equity cross-check ───────────────────────
+        # CFO từ cashflow thường cùng đơn vị với revenue → nếu revenue bị triệu
+        # thì CFO cũng bị triệu. Kiểm tra: CFO / equity > 50 → sai đơn vị
+        if not cfo_series_for_multiples.empty and not equity_series.empty:
+            common_ce = cfo_series_for_multiples.index.intersection(equity_series.index)
+            if len(common_ce) >= 1:
+                cfo_med_ce = cfo_series_for_multiples.loc[common_ce].abs().median()
+                eq_med_ce  = equity_series.loc[common_ce].abs().median()
+                if eq_med_ce > 0 and cfo_med_ce / eq_med_ce > 50:
+                    # CFO > 50× equity → đang ở triệu, equity ở tỷ → chia 1000
+                    cfo_series_for_multiples = cfo_series_for_multiples / 1000
 
         cfo_latest = get_latest(cfo_series_for_multiples, default=None) \
             if not cfo_series_for_multiples.empty else None
