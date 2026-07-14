@@ -406,8 +406,8 @@ def execute_equity_research_pipeline(ticker):
         # thì AND không coi là "missing" → CafeF không được gọi → 2021 vẫn trống.
         # ─────────────────────────────────────────────────────────────────
         _missing_any = sorted(allowed_years - (
-            set(revenue_series.index) | set(net_profit_series.index)
-            | set(equity_series.index) | set(total_assets_series.index)
+            set(revenue_series.index) & set(net_profit_series.index)
+            | set(equity_series.index) & set(total_assets_series.index)
         ))
 
         # Khởi tạo _cf_cf ở ngoài if để CFO fallback block luôn có thể dùng
@@ -452,10 +452,10 @@ def execute_equity_research_pipeline(ticker):
 
                 # Với fetch_cafef_yearly_full trả về dict dạng {"revenue": Series, ...}
                 # (không phải DataFrame), cần xử lý trực tiếp từ Series trả về.
-                _rev_cf   = _filter_years(normalize_to_billion_vnd(_cafef_full.get("revenue",    pd.Series(dtype=float))))
-                _np_cf    = _filter_years(normalize_to_billion_vnd(_cafef_full.get("net_profit", pd.Series(dtype=float))))
-                _eq_cf    = _filter_years(normalize_to_billion_vnd(_cafef_full.get("equity",     pd.Series(dtype=float))))
-                _ta_cf    = _filter_years(normalize_to_billion_vnd(_cafef_full.get("total_assets", pd.Series(dtype=float))))
+                _rev_cf   = _filter_years(_cafef_full.get("revenue",    pd.Series(dtype=float))))
+                _np_cf    = _filter_years(_cafef_full.get("net_profit", pd.Series(dtype=float))))
+                _eq_cf    = _filter_years(_cafef_full.get("equity",     pd.Series(dtype=float))))
+                _ta_cf    = _filter_years(_cafef_full.get("total_assets", pd.Series(dtype=float))))
 
                 for yr in _rev_cf.index:
                     if yr not in revenue_series.index:
