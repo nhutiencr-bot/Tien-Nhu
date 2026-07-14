@@ -500,8 +500,8 @@ def execute_equity_research_pipeline(ticker):
                             eps_series[yr] = _eps_cf[yr]
                     eps_series = eps_series.sort_index()
 
-            except Exception:
-                pass
+            except Exception as _e_cafef:
+                st.warning(f"⚠️ CafeF fallback lỗi ({ticker}): {_e_cafef}")
 
         # ─────────────────────────────────────────────────────────────────
         # Tầng 3 — Website scraping
@@ -607,15 +607,110 @@ def execute_equity_research_pipeline(ticker):
                 if not _ws_cf_.empty and _cf_cf.empty:
                     _cf_cf = _ws_cf_
 
-            except Exception:
-                pass
+            except Exception as _e_ws:
+                st.warning(f"⚠️ Website scraper fallback lỗi ({ticker}): {_e_ws}")
+
+        # ─────────────────────────────────────────────────────────────────
+        # Tầng 4 — Cộng dồn từ dữ liệu QUARTER để lấp năm còn thiếu.
+        # Trường hợp thực tế: 2025 chưa có BCTC năm trên CafeF/vnstock,
+        # nhưng đã có Q1+Q2+Q3+Q4/2025 từ df_income_q và df_balance_q.
+        #
+        # Quy tắc:
+        #   - Revenue, LNST (Income Statement): CỘNG DỒN tất cả quý trong năm
+        #   - Equity, Total Assets (Balance Sheet): lấy GIÁ TRỊ CUỐI KỲ (quý mới nhất)
+        #   - Chỉ lấp nếu năm ĐÓ vẫn còn thiếu ít nhất 1 trong 4 field
+        # ─────────────────────────────────────────────────────────────────
+        _missing_after_ws = sorted(allowed_years - (
+            set(revenue_series.index)
+            & set(net_profit_series.index)
+            & set(equity_series.index)
+            & set(total_assets_series.index)
+        ))
+
+        if _missing_after_ws and not df_income_q.empty:
+            try:
+                fin_q_annual = build_financial_table(
+                    df_income_q, df_balance_q, df_ratio_q,
+                    ticker=ticker, period='quarter')
+
+                rev_q_raw = normalize_to_billion_vnd(fin_q_annual['revenue'])
+                np_q_raw  = normalize_net_profit_with_anchor(
+                    fin_q_annual['net_profit'],
+                    normalize_to_billion_vnd(fin_q_annual['equity']),
+                    fin_q_annual['roe'])
+                eq_q_raw  = normalize_to_billion_vnd(fin_q_annual['equity'])
+                ta_q_raw  = normalize_to_billion_vnd(fin_q_annual['total_assets'])
+                eps_q_raw = fin_q_annual['eps']
+
+                def _parse_quarter_key(k):
+                    """'2025-Q3' → (2025, 3)"""
+                    try:
+                        parts = str(k).split('-Q')
+                        return int(parts[0]), int(parts[1])
+                    except Exception:
+                        return None, None
+
+                for missing_yr in _missing_after_ws:
+                    # Lọc các quý thuộc năm missing_yr
+                    def _qkeys_of_year(s, yr):
+                        return [k for k in s.index
+                                if _parse_quarter_key(k)[0] == yr
+                                and pd.notna(s.get(k))]
+
+                    # Revenue & LNST: cộng dồn tất cả quý
+                    if missing_yr not in revenue_series.index or pd.isna(revenue_series.get(missing_yr)):
+                        _qk_rev = _qkeys_of_year(rev_q_raw, missing_yr)
+                        if _qk_rev:
+                            _sum_rev = rev_q_raw.loc[_qk_rev].sum()
+                            if _sum_rev > 0:
+                                revenue_series[missing_yr] = round(_sum_rev, 2)
+                                revenue_series = revenue_series.sort_index()
+
+                    if missing_yr not in net_profit_series.index or pd.isna(net_profit_series.get(missing_yr)):
+                        _qk_np = _qkeys_of_year(np_q_raw, missing_yr)
+                        if _qk_np:
+                            _sum_np = np_q_raw.loc[_qk_np].sum()
+                            if _sum_np != 0:
+                                net_profit_series[missing_yr] = round(_sum_np, 2)
+                                net_profit_series = net_profit_series.sort_index()
+
+                    # Equity & Total Assets: lấy cuối kỳ (quý có số thứ tự lớn nhất)
+                    if missing_yr not in equity_series.index or pd.isna(equity_series.get(missing_yr)):
+                        _qk_eq = _qkeys_of_year(eq_q_raw, missing_yr)
+                        if _qk_eq:
+                            _qk_eq_sorted = sorted(_qk_eq, key=lambda k: _parse_quarter_key(k)[1])
+                            _last_eq = eq_q_raw.get(_qk_eq_sorted[-1])
+                            if _last_eq is not None and pd.notna(_last_eq) and _last_eq > 0:
+                                equity_series[missing_yr] = round(float(_last_eq), 2)
+                                equity_series = equity_series.sort_index()
+
+                    if missing_yr not in total_assets_series.index or pd.isna(total_assets_series.get(missing_yr)):
+                        _qk_ta = _qkeys_of_year(ta_q_raw, missing_yr)
+                        if _qk_ta:
+                            _qk_ta_sorted = sorted(_qk_ta, key=lambda k: _parse_quarter_key(k)[1])
+                            _last_ta = ta_q_raw.get(_qk_ta_sorted[-1])
+                            if _last_ta is not None and pd.notna(_last_ta) and _last_ta > 0:
+                                total_assets_series[missing_yr] = round(float(_last_ta), 2)
+                                total_assets_series = total_assets_series.sort_index()
+
+                    # EPS: cộng dồn quý hoặc tính lại từ LNST / CP lưu hành
+                    if missing_yr not in eps_series.index or pd.isna(eps_series.get(missing_yr)):
+                        _qk_eps = _qkeys_of_year(eps_q_raw, missing_yr)
+                        if _qk_eps:
+                            _sum_eps = eps_q_raw.loc[_qk_eps].sum()
+                            if _sum_eps > 0:
+                                eps_series[missing_yr] = round(_sum_eps, 2)
+                                eps_series = eps_series.sort_index()
+
+            except Exception as _e_q4:
+                st.warning(f"⚠️ Tầng 4 (cộng dồn quý) lỗi: {_e_q4}")
 
         _expected_years = allowed_years
         _years_have = (set(revenue_series.index) | set(net_profit_series.index)
                        | set(equity_series.index) | set(total_assets_series.index))
         _missing_years = sorted(_expected_years - _years_have)
         if _missing_years:
-            st.warning(f"⚠️ {ticker}: không lấy được dữ liệu năm {_missing_years} từ tất cả nguồn (vnstock / CafeF / website).")
+            st.warning(f"⚠️ {ticker}: không lấy được dữ liệu năm {_missing_years} từ tất cả nguồn (vnstock / CafeF / website / quý).")
 
         def _cross_unit_recheck(np_s, rev_s, eq_s):
             if np_s.empty or (rev_s.empty and eq_s.empty):
