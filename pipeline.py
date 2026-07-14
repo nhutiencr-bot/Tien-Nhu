@@ -40,18 +40,6 @@ def normalize_to_billion_vnd(series):
       - Đơn vị ĐỒNG:  median > 5e11  → chia 1e9
       - Đơn vị TRIỆU: median > 5e5   → chia 1e3
       - Đơn vị TỶ:    median <= 5e5  → giữ nguyên
-
-    Ngưỡng nâng từ 5e10/5e4 lên 5e11/5e5 để phân biệt đúng:
-      - Ngân hàng lớn (VCB) equity ~140,000 tỷ: API tỷ → median=140k → <= 5e5 → /1 ✓
-        (ngưỡng cũ 5e4=50k → 140k > 50k → bị chia 1000 → 140 tỷ SAI)
-      - LNST VCB đơn vị triệu: median ~30,000,000 > 5e5 → /1e3 → 30,000 tỷ ✓
-      - Giá CP đơn vị đồng: ~25,000đ/CP → nếu series này thì median ~25k <= 5e5
-        → giữ nguyên (giá CP không qua hàm này vì không normalize về tỷ)
-
-    Boundary cases:
-      - Công ty nhỏ revenue 50 tỷ (= median 50k) → dùng > 5e5 safe, không bị chia nhầm
-      - Công ty lớn revenue 200,000 tỷ (đơn vị tỷ) → median 200k <= 5e5 → /1 ✓
-      - LNST đơn vị triệu cho công ty nhỏ: median ~50,000 triệu = 5e7 > 5e5 → /1e3 → 50 tỷ ✓
     """
     if series is None or series.empty:
         return series
@@ -59,11 +47,11 @@ def normalize_to_billion_vnd(series):
     if numeric.empty:
         return series
     median_abs = numeric.abs().median()
-    if median_abs > 5e11:      # đơn vị ĐỒNG (VD: 88,112,700,000,000)
+    if median_abs > 5e11:
         divisor = 1e9
-    elif median_abs > 5e5:     # đơn vị TRIỆU (VD: 88,112,700 triệu)
+    elif median_abs > 5e5:
         divisor = 1e3
-    else:                      # đơn vị TỶ (VD: 88,112 tỷ) — giữ nguyên
+    else:
         divisor = 1.0
     def _to_ty(val):
         try:
@@ -78,12 +66,6 @@ def normalize_to_billion_vnd(series):
 def _normalize_pct_series(s):
     """
     Chuẩn hoá series ROE/ROA/ROS về đơn vị % hợp lý (0–200%).
-    3 nhánh:
-      - max_abs > 500 → lỗi đơn vị (VD: LNST triệu / Vốn tỷ → x1000)
-        Thử chia 1000; nếu kết quả <= 200% thì dùng, không thì trả None.
-      - max_abs < 1  → dạng thập phân (0.30 → 30%), nhân 100.
-      - còn lại      → đã là %, giữ nguyên.
-    Khóa cứng: không bao giờ hiển thị ROE/ROA > 200% (sanity cap).
     """
     if s is None or s.empty:
         return s
@@ -104,17 +86,13 @@ def _normalize_pct_series(s):
 def normalize_net_profit_with_anchor(net_profit_raw, equity_series, roe_series):
     """
     Normalize LNST về tỷ VNĐ, dùng equity + roe làm anchor cross-check.
-    CRITICAL: roe_series phải được _normalize_pct_series() trước khi dùng làm anchor,
-    vì API có thể trả dạng thập phân (0.30) hoặc % (30.0) — nếu không normalize
-    sẽ tạo ra expected sai → anchor chia nhầm → LNST sai đơn vị 100x.
     """
     base = normalize_to_billion_vnd(net_profit_raw)
     if base is None or base.empty:
         return base
-    # Normalize roe_series trước — đây là fix core cho lỗi ROE 30000%
     roe_norm = _normalize_pct_series(roe_series)
     if roe_norm is None or roe_norm.dropna().empty:
-        return base  # không có anchor → trả base (đơn vị tỷ)
+        return base
     fixed = {}
     for year, raw_val in base.items():
         if (year not in equity_series.index or year not in roe_norm.index
@@ -131,7 +109,6 @@ def normalize_net_profit_with_anchor(net_profit_raw, equity_series, roe_series):
             continue
         power = round(np.log10(ratio))
         if power == 0:
-            # ratio ≈ 1x → đơn vị đã đúng, giữ nguyên
             fixed[year] = raw_val
         else:
             divisor = 10 ** power
@@ -275,15 +252,12 @@ def _build_shares_series(outstanding_shares_series, net_profit_series, eps_serie
     PATCH 4 — Trả về Series số CP lưu hành (đơn vị: cổ phiếu lẻ) theo từng năm.
     Tầng 1: từ ratio API (outstanding_shares_series).
     Tầng 2: back-calc LNST(tỷ)*1e9 / EPS(đ) cho từng năm còn thiếu.
-    Verify HPG 2021: LNST=34,521 tỷ, EPS=5,937đ → 34521e9/5937 ≈ 5.82 tỷ CP ✓
     """
     result = {}
-    # Tầng 1: từ API
     if outstanding_shares_series is not None and not outstanding_shares_series.empty:
         for yr, val in outstanding_shares_series.items():
             if pd.notna(val) and val > 0:
                 result[yr] = float(val)
-    # Tầng 2: back-calc các năm còn thiếu
     if net_profit_series is not None and not net_profit_series.empty \
             and eps_series is not None and not eps_series.empty:
         for yr in net_profit_series.index:
@@ -294,12 +268,33 @@ def _build_shares_series(outstanding_shares_series, net_profit_series, eps_serie
             if (np_ty is not None and eps_d is not None
                     and pd.notna(np_ty) and pd.notna(eps_d)
                     and eps_d > 0 and np_ty > 0):
-                backcalc = (np_ty * 1e9) / eps_d  # đơn vị: cổ phiếu lẻ
-                if 1e8 < backcalc < 1e11:          # sanity: 100 triệu – 100 tỷ CP
+                backcalc = (np_ty * 1e9) / eps_d
+                if 1e8 < backcalc < 1e11:
                     result[yr] = backcalc
     if not result:
         return pd.Series(dtype=float)
     return pd.Series(result, dtype=float).sort_index()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BUG FIX 3: _cafef_extract_series — hỗ trợ cả 2 định dạng cột CafeF:
+#   "2021"      → split('/')[0] = "2021" ✓
+#   "2021/12"   → split('/')[0] = "2021" ✓
+#   "12/2021"   → split('/')[0] = "12"  ✗ BUG CŨ → fix: thử cả split('/')[1]
+#   "31/12/2021"→ split('/')[0] = "31"  ✗ BUG CŨ → fix: lấy phần tử 4 chữ số
+# ─────────────────────────────────────────────────────────────────────────────
+def _parse_year_from_col(col_str: str):
+    """
+    Trích xuất năm (int) từ tên cột CafeF — xử lý đủ mọi định dạng:
+      "2021", "2021/12", "12/2021", "31/12/2021", "Q1/2021", "2021-Q1"
+    Trả về int năm nếu tìm được, None nếu không.
+    """
+    import re as _re
+    # Tìm chuỗi 4 chữ số đầu tiên có dạng 20xx hoặc 19xx
+    matches = _re.findall(r'\b((?:19|20)\d{2})\b', str(col_str).strip())
+    if matches:
+        return int(matches[0])
+    return None
 
 
 @st.cache_data(ttl=1800)
@@ -307,9 +302,6 @@ def execute_equity_research_pipeline(ticker):
     try:
         q_engine, f_engine, c_engine, source_used = _build_engines_with_fallback(ticker)
 
-        # PATCH 1 — Dùng ALLOWED_YEARS khóa cứng 2021–2025 thay vì tính động
-        # (tránh mất 2021 khi current_year=2026, range(2026-5,2026)={2021..2025}
-        #  nhưng nếu đổi DEFAULT_YEAR_LIMIT hay năm tham chiếu sẽ lệch)
         allowed_years = ALLOWED_YEARS  # {2021, 2022, 2023, 2024, 2025}
 
         end_date   = datetime.today().strftime('%Y-%m-%d')
@@ -318,7 +310,6 @@ def execute_equity_research_pipeline(ticker):
         tasks = {
             "price":      lambda: q_engine.history(start=start_date, end=end_date, interval='1D'),
             "overview":   lambda: c_engine.overview(),
-            # PATCH 2 — limit=FETCH_LIMIT_YEAR (7) để chắc lấy đủ từ 2021
             "income_y":   lambda: _fetch_income_statement(ticker, source_used, period='year',    limit=FETCH_LIMIT_YEAR),
             "cashflow_y": lambda: _fetch_cashflow(ticker,          source_used, period='year',    limit=FETCH_LIMIT_YEAR),
             "ratio_y":    lambda: _fetch_ratio(ticker,             source_used, period='year',    limit=FETCH_LIMIT_YEAR),
@@ -380,9 +371,9 @@ def execute_equity_research_pipeline(ticker):
         def _filter_years(s):
             if s is None or s.empty:
                 return s
-            # Chuẩn hóa index về int — API trả về string '2021', float 2021.0,
-            # hoặc int 2021 tuỳ nguồn → isin(allowed_years) với set int sẽ miss
-            # nếu index là string/float → đây là root cause mất 2021 toàn bộ mã
+            # BUG FIX 1 (root cause chính): chuẩn hoá index về int
+            # API/CafeF có thể trả index dạng str '2021', float 2021.0, int 2021
+            # → isin(allowed_years={int}) sẽ miss nếu index là str hoặc float
             try:
                 s = s.copy()
                 s.index = s.index.map(lambda x: int(str(x).strip().split('.')[0].split('-')[0]))
@@ -402,7 +393,6 @@ def execute_equity_research_pipeline(ticker):
         pb_series             = _filter_years(pb_series)
         outstanding_shares_series = _filter_years(outstanding_shares_series)
 
-        # PATCH 4 — bổ sung back-calc per-year cho Số CP lưu hành
         outstanding_shares_series = _build_shares_series(
             outstanding_shares_series, net_profit_series, eps_series)
         outstanding_shares_series = _filter_years(outstanding_shares_series)
@@ -419,21 +409,19 @@ def execute_equity_research_pipeline(ticker):
                     equity_series = (total_assets_series.loc[common_years]
                                      - total_liab_series.loc[common_years])
 
-        # ══════════════════════════════════════════════════════════════════
-        # CafeF FALLBACK — Lấy đủ 3 BCTC cho các năm thiếu (thường là 2021)
-        # Dùng fetch_cafef_yearly_full() thay vì fetch_cafef_balance_sheet_5y()
-        # vì cần cả income_statement (revenue, net_profit) + cash_flow (CFO)
-        # n_years=5: CafeF period=5 & periodType=Y → 5 kỳ gần nhất = 2021-2025
-        # ══════════════════════════════════════════════════════════════════
         _years_have_income = set(revenue_series.index) | set(net_profit_series.index)
         _years_have_bs     = set(equity_series.index)  | set(total_assets_series.index)
         _missing_any = sorted(allowed_years - (_years_have_income & _years_have_bs))
 
-        # Khởi tạo trước để dùng được ở CFO fallback sau khi cfo_series_for_multiples được tính
+        # Khởi tạo _cf_cf ở ngoài if để CFO fallback block luôn có thể dùng
         _cf_cf = pd.DataFrame()
 
+        # ─────────────────────────────────────────────────────────────────
+        # BUG FIX 3 (cafef column parsing): dùng _parse_year_from_col()
+        # thay vì split('/')[0] để xử lý đúng "12/2021", "31/12/2021"
+        # ─────────────────────────────────────────────────────────────────
         def _cafef_extract_series(df, keywords, exclude=None):
-            """Tìm dòng theo keyword trong CafeF DataFrame (index=chỉ tiêu, col=năm)."""
+            """Tìm dòng theo keyword trong CafeF DataFrame."""
             if df is None or df.empty:
                 return pd.Series(dtype=float)
             for kw in keywords:
@@ -446,8 +434,11 @@ def execute_equity_research_pipeline(ticker):
                 row = df.loc[matches[0]]
                 s = {}
                 for col in row.index:
+                    # BUG FIX 3: dùng _parse_year_from_col thay vì split('/')[0]
+                    yr = _parse_year_from_col(str(col))
+                    if yr is None:
+                        continue
                     try:
-                        yr = int(str(col).strip().split('/')[0])
                         val = row[col]
                         if val is not None and str(val).strip() not in ('', 'None', 'nan'):
                             s[yr] = float(str(val).replace(',', ''))
@@ -464,9 +455,7 @@ def execute_equity_research_pipeline(ticker):
                 _cf_bs      = _cafef_full.get("balance_sheet",     pd.DataFrame())
                 _cf_cf      = _cafef_full.get("cash_flow",         pd.DataFrame())
 
-                # ── Income statement fallback ─────────────────────────────
                 if not _cf_income.empty:
-                    # Revenue: dùng từ khóa đặc thù theo ngành
                     if is_bank:
                         _rev_kw = ['thu nhập lãi và các khoản thu nhập tương tự',
                                    'tổng thu nhập hoạt động', 'thu nhập lãi thuần']
@@ -481,7 +470,6 @@ def execute_equity_research_pipeline(ticker):
                             revenue_series[yr] = _rev_cf[yr]
                     revenue_series = revenue_series.sort_index()
 
-                    # Net profit: LNST thuộc CĐ mẹ (Bẫy 3)
                     _np_kw = ['lợi nhuận sau thuế của cổ đông của công ty mẹ',
                               'lợi nhuận sau thuế', 'lãi sau thuế',
                               'profit after tax', 'net profit', 'net income']
@@ -493,7 +481,6 @@ def execute_equity_research_pipeline(ticker):
                             net_profit_series[yr] = _np_cf[yr]
                     net_profit_series = net_profit_series.sort_index()
 
-                # ── Balance sheet fallback ────────────────────────────────
                 if not _cf_bs.empty:
                     _eq_kw = ['vốn chủ sở hữu', 'equity', 'total equity',
                               'tổng vốn chủ sở hữu', "vốn của cổ đông"]
@@ -513,7 +500,6 @@ def execute_equity_research_pipeline(ticker):
                             total_assets_series[yr] = _ta_cf[yr]
                     total_assets_series = total_assets_series.sort_index()
 
-                # ── EPS/BVPS fallback từ income_statement CafeF ──────────
                 if not _cf_income.empty:
                     _eps_kw = ['lãi cơ bản trên cổ phiếu', 'eps', 'earnings per share']
                     _eps_cf = _filter_years(_cafef_extract_series(_cf_income, _eps_kw))
@@ -523,7 +509,7 @@ def execute_equity_research_pipeline(ticker):
                     eps_series = eps_series.sort_index()
 
             except Exception:
-                pass  # CafeF không khả dụng → giữ nguyên data từ API
+                pass
 
         _expected_years = allowed_years
         _years_have = (set(revenue_series.index) | set(net_profit_series.index)
@@ -532,12 +518,7 @@ def execute_equity_research_pipeline(ticker):
         if _missing_years:
             st.warning(f"⚠️ {ticker}: cả 3 nguồn VCI/KBS/DNSE đều không có dữ liệu năm {_missing_years}.")
 
-        # ── Cross-unit sanity check ───────────────────────────────────────
-        # Nếu LNST > Revenue hoặc LNST > 80% Equity → đơn vị vẫn lệch sau normalize
-        # Ví dụ: revenue=45 tỷ (đơn vị tỷ đúng) nhưng LNST=27,504 tỷ (triệu chưa chia)
-        # → re-normalize LNST, revenue, equity, total_assets từng series một
         def _cross_unit_recheck(np_s, rev_s, eq_s):
-            """Trả về True nếu cần re-normalize net_profit."""
             if np_s.empty or (rev_s.empty and eq_s.empty):
                 return False
             common = np_s.index
@@ -547,52 +528,35 @@ def execute_equity_research_pipeline(ticker):
                     np_med = np_s.loc[common].abs().median()
                     rev_med = rev_s.loc[common].abs().median()
                     if rev_med > 0 and np_med / rev_med > 500:
-                        return True  # LNST/Revenue > 500x → đơn vị lệch ~1000x
+                        return True
             if not eq_s.empty:
                 common2 = np_s.index.intersection(eq_s.index)
                 if len(common2) > 0:
                     np_med2 = np_s.loc[common2].abs().median()
                     eq_med2 = eq_s.loc[common2].abs().median()
                     if eq_med2 > 0 and np_med2 / eq_med2 > 5:
-                        return True  # LNST > 5× Equity → vô lý
+                        return True
             return False
 
         if _cross_unit_recheck(net_profit_series, revenue_series, equity_series):
-            # Re-normalize: LNST đang ở triệu, chia thêm 1000
             net_profit_series = net_profit_series / 1000
 
-        # Revenue cross-check: nếu revenue < net_profit → revenue đơn vị nghìn tỷ (thiếu x1000)
         if not revenue_series.empty and not net_profit_series.empty:
             common_ry = revenue_series.index.intersection(net_profit_series.index)
             if len(common_ry) >= 2:
                 rev_med = revenue_series.loc[common_ry].abs().median()
                 np_med  = net_profit_series.loc[common_ry].abs().median()
                 if rev_med > 0 and np_med / rev_med > 2:
-                    # LNST > 2× Doanh thu → vô lý → revenue bị thiếu factor 1000
                     revenue_series = revenue_series * 1000
 
-        # ── BẪY ĐƠN VỊ: Revenue vs Equity cross-check ────────────────────
-        # Trường hợp ngân hàng lớn (ACB, VCB...): revenue từ CafeF fallback
-        # hoặc API trả đơn vị TRIỆU nhưng normalize_to_billion_vnd detect sai
-        # (vì chỉ có 1-2 năm trong series → median không đại diện đủ).
-        # Dấu hiệu: revenue >> equity × 1000 (vô lý vì ngân hàng revenue ~ 30-80% equity)
-        # Ví dụ ACB: revenue_series = 40,698,834 tỷ, equity = 58,439 tỷ
-        #   → ratio = 40,698,834 / 58,439 = 696 → bất thường → chia thêm 1000
-        # Ngưỡng an toàn: revenue / equity > 100 → sai đơn vị (triệu thay vì tỷ)
-        # Ngưỡng thấp nhất hợp lý: ngân hàng revenue ~0.4x equity, phi tài chính ~2-5x equity
         if not revenue_series.empty and not equity_series.empty:
             common_re = revenue_series.index.intersection(equity_series.index)
             if len(common_re) >= 1:
                 rev_med_re = revenue_series.loc[common_re].abs().median()
                 eq_med_re  = equity_series.loc[common_re].abs().median()
                 if eq_med_re > 0 and rev_med_re / eq_med_re > 100:
-                    # Revenue lớn hơn equity > 100 lần → revenue đang ở triệu, equity ở tỷ
-                    # → chia thêm 1000 để về tỷ
                     revenue_series = revenue_series / 1000
 
-        # ── BẪY ĐƠN VỊ: CFO vs Equity cross-check ────────────────────────
-        # CFO (từ df_cashflow) cùng nguồn với revenue → có thể cùng bị sai đơn vị
-        # Kiểm tra sau khi CFO được tính ở block dưới (cfo_series_for_multiples)
         market_cap_series_raw = fin5.get('market_cap', pd.Series(dtype=float))
         market_cap_direct = get_latest(market_cap_series_raw, default=0.0)
         if market_cap_direct > 0 and current_price > 0:
@@ -600,24 +564,20 @@ def execute_equity_research_pipeline(ticker):
             if not (1_000_000 <= implied_check <= 50_000_000_000):
                 market_cap_direct = 0.0
 
-        # PATCH 4 — issue_share: 3 tầng fallback khóa chặt không bao giờ ra 0
         issue_share = get_latest(outstanding_shares_series, default=0.0)
 
-        # Tầng 2: từ overview
         if issue_share == 0.0 and not df_overview.empty:
             for col in ['issue_share', 'outstanding_shares', 'listed_volume']:
                 if col in df_overview.columns and pd.notna(df_overview[col].iloc[0]):
                     issue_share = float(df_overview[col].iloc[0])
                     break
 
-        # Tầng 2b: charter_capital fallback
         if issue_share == 0.0 and not df_overview.empty and 'charter_capital' in df_overview.columns:
             try:
                 issue_share = float(df_overview['charter_capital'].iloc[0]) / 10000
             except Exception:
                 pass
 
-        # Tầng 3: back-calc từ LNST(tỷ) × 1e9 / EPS(đ) (giá trị latest)
         if issue_share == 0.0 and not net_profit_series.empty and not eps_series.empty:
             for yr in sorted(net_profit_series.index, reverse=True):
                 np_ty = net_profit_series.get(yr)
@@ -646,9 +606,10 @@ def execute_equity_research_pipeline(ticker):
         if bvps_latest == 0.0 and issue_share > 0 and not equity_series.empty:
             bvps_latest = get_latest(equity_series, default=0.0) * 1e9 / issue_share
 
-        # PATCH 3 — normalize ROE/ROA về % dùng module-level _normalize_pct_series()
-        # (đã fix: threshold 500 thay vì 10000, thử chia 1000 trước khi trả None)
-        _normalize_pct = _normalize_pct_series  # alias để không đổi tên các call bên dưới
+        # BUG FIX 2: định nghĩa _normalize_pct alias TRƯỚC khi dùng ở bảng quý
+        # Code cũ gán alias sau block issue_share → NameError khi bảng quý gọi _normalize_pct()
+        _normalize_pct = _normalize_pct_series
+
         roe_series = _normalize_pct_series(roe_series)
         roa_series = _normalize_pct_series(roa_series)
 
@@ -665,7 +626,6 @@ def execute_equity_research_pipeline(ticker):
             "source_used":         source_used,
         }
 
-        # ── Multiples mở rộng ────────────────────────────────────────────
         revenue_latest = get_latest(revenue_series, default=0.0) if not revenue_series.empty else 0.0
 
         cfo_series_for_multiples = normalize_to_billion_vnd(find_row_series(
@@ -683,7 +643,6 @@ def execute_equity_research_pipeline(ticker):
              'cash flow from operations', 'operating cash flow']))
         cfo_series_for_multiples = _filter_years(cfo_series_for_multiples)
 
-        # ── CFO CafeF fallback: bổ sung năm thiếu từ _cf_cf ─────────────
         if not _cf_cf.empty:
             try:
                 _cfo_kw = ['lưu chuyển tiền thuần từ hoạt động kinh doanh',
@@ -699,16 +658,12 @@ def execute_equity_research_pipeline(ticker):
             except Exception:
                 pass
 
-        # ── BẪY ĐƠN VỊ: CFO vs Equity cross-check ───────────────────────
-        # CFO từ cashflow thường cùng đơn vị với revenue → nếu revenue bị triệu
-        # thì CFO cũng bị triệu. Kiểm tra: CFO / equity > 50 → sai đơn vị
         if not cfo_series_for_multiples.empty and not equity_series.empty:
             common_ce = cfo_series_for_multiples.index.intersection(equity_series.index)
             if len(common_ce) >= 1:
                 cfo_med_ce = cfo_series_for_multiples.loc[common_ce].abs().median()
                 eq_med_ce  = equity_series.loc[common_ce].abs().median()
                 if eq_med_ce > 0 and cfo_med_ce / eq_med_ce > 50:
-                    # CFO > 50× equity → đang ở triệu, equity ở tỷ → chia 1000
                     cfo_series_for_multiples = cfo_series_for_multiples / 1000
 
         cfo_latest = get_latest(cfo_series_for_multiples, default=None) \
@@ -799,9 +754,6 @@ def execute_equity_research_pipeline(ticker):
             "excl_extended_multiples": is_bank,
         })
 
-        # ── Bảng 5 năm ───────────────────────────────────────────────────
-        # PATCH 1 — years_available luôn là [2021,2022,2023,2024,2025]
-        # Năm nào thiếu data sẽ hiển thị — (None) thay vì biến mất khỏi bảng
         years_available = sorted(allowed_years)
 
         eps_series_filled  = eps_series.copy()  if eps_series  is not None else pd.Series(dtype=float)
@@ -822,14 +774,12 @@ def execute_equity_research_pipeline(ticker):
                 bvps_series_filled[y] = equity_series[y] * 1e9 / issue_share
             if (y not in roe_series_filled.index or pd.isna(roe_series_filled.get(y))) \
                     and has_np and has_eq and equity_series[y] != 0:
-                # Guard: cả 3 series phải cùng đơn vị tỷ VNĐ.
-                # Nếu net_profit lớn hơn equity >1000x → lỗi đơn vị, chia lại.
                 _np_val = float(net_profit_series[y])
                 _eq_val = float(equity_series[y])
                 if abs(_np_val) > 0 and abs(_eq_val) > 0:
                     _raw_roe = _np_val / _eq_val * 100
                     if abs(_raw_roe) > 500:
-                        _np_val = _np_val / 1000  # triệu → tỷ
+                        _np_val = _np_val / 1000
                         _raw_roe = _np_val / _eq_val * 100
                     if abs(_raw_roe) <= 200:
                         roe_series_filled[y] = round(_raw_roe, 2)
@@ -872,6 +822,7 @@ def execute_equity_research_pipeline(ticker):
         }
 
         # ── Bảng quý ─────────────────────────────────────────────────────
+        # BUG FIX 2: _normalize_pct đã được gán ở trên → block này không còn NameError
         df_quarter_table = pd.DataFrame()
         try:
             fin_q  = build_financial_table(df_income_q, df_balance_q, df_ratio_q,
@@ -882,7 +833,7 @@ def execute_equity_research_pipeline(ticker):
             np_q   = normalize_net_profit_with_anchor(fin_q['net_profit'], eq_q, fin_q['roe'])
             eps_q  = fin_q['eps']
             bvps_q = fin_q['bvps']
-            roe_q  = _normalize_pct(fin_q['roe'])
+            roe_q  = _normalize_pct(fin_q['roe'])   # ← dùng alias đã được gán đúng chỗ
             roa_q  = _normalize_pct(fin_q['roa'])
             quarters = sorted(
                 set(rev_q.index) | set(np_q.index) | set(eq_q.index) | set(ta_q.index),
@@ -949,15 +900,12 @@ def execute_equity_research_pipeline(ticker):
         eps_adj, bvps_adj = normalize_eps_bvps_series(
             eps_series_filled, bvps_series_filled, outstanding_shares_series)
 
-        # ── BẪY 5B FIX + 4 CỘT MỚI ──────────────────────────────────────
         if dilution_years:
             df_5y_table['EPS (đ)']  = df_5y_table['Năm'].map(
                 lambda y: eps_adj.get(y, None)  if y in eps_adj.index  else None)
             df_5y_table['BVPS (đ)'] = df_5y_table['Năm'].map(
                 lambda y: bvps_adj.get(y, None) if y in bvps_adj.index else None)
 
-        # 1) LCFD HĐKD (CFO) – tỷ VND
-        # Cross-check: CFO không được lớn hơn Revenue 10x (nếu có)
         _cfo_s = cfo_series_for_multiples if (
             cfo_series_for_multiples is not None and not cfo_series_for_multiples.empty
         ) else pd.Series(dtype=float)
@@ -971,15 +919,11 @@ def execute_equity_research_pipeline(ticker):
         df_5y_table['LCFD HĐKD (tỷ)'] = df_5y_table['Năm'].map(
             lambda y: _cfo_s.get(y, None) if not _cfo_s.empty else None)
 
-        # 2) Số CP lưu hành – tỷ CP
-        # PATCH 4 — outstanding_shares_series đã qua _build_shares_series (back-calc per-year)
-        # Tầng 3 fallback: nếu series vẫn thiếu năm nào đó → dùng issue_share (CP hiện tại)
         _shares_map = {}
         if outstanding_shares_series is not None and not outstanding_shares_series.empty:
             for _y, _v in (outstanding_shares_series / 1e9).items():
                 if pd.notna(_v) and _v > 0:
                     _shares_map[_y] = round(float(_v), 2)
-        # Fallback: điền issue_share cho năm chưa có (issue_share đã là số CP lẻ)
         if issue_share > 0:
             for _y in years_available:
                 if _y not in _shares_map:
@@ -987,7 +931,6 @@ def execute_equity_research_pipeline(ticker):
         df_5y_table['Số CP lưu hành (tỷ)'] = df_5y_table['Năm'].map(
             lambda y: _shares_map.get(y, None))
 
-        # 3) Biên LNST / ROS (%)
         def _ros_annual(y):
             rev = revenue_series.get(y)    if y in revenue_series.index    else None
             np_ = net_profit_series.get(y) if y in net_profit_series.index else None
@@ -997,7 +940,6 @@ def execute_equity_research_pipeline(ticker):
             return None
         df_5y_table['ROS (%)'] = df_5y_table['Năm'].map(_ros_annual)
 
-        # 4) Giá cuối năm (đ) – split-adjusted
         _price_eoy: dict = {}
         if (df_price is not None and not df_price.empty
                 and 'time' in df_price.columns and 'close_vnd' in df_price.columns):
@@ -1009,7 +951,6 @@ def execute_equity_research_pipeline(ticker):
                     _price_eoy[int(_yr)] = float(_last)
         df_5y_table['Giá cuối năm (đ)'] = df_5y_table['Năm'].map(
             lambda y: _price_eoy.get(int(y), None))
-        # ── KẾT THÚC BẪY 5B FIX + 4 CỘT MỚI ────────────────────────────
 
         dps_series = fin5.get('dps', pd.Series(dtype=float))
         dps_series = _filter_years(dps_series)
@@ -1058,7 +999,6 @@ def execute_equity_research_pipeline(ticker):
             ),
         }
 
-        # ── Technical ─────────────────────────────────────────────────────
         if 'volume' not in df_price.columns:
             df_price['volume'] = 0
         df_price['volume_ma20'] = df_price['volume'].rolling(window=20).mean()
@@ -1078,7 +1018,6 @@ def execute_equity_research_pipeline(ticker):
                                  else "RỦI RO (Downtrend)",
         }
 
-        # ── Tin tức ──────────────────────────────────────────────────────
         vnstock_news = []
         news_raw = _safe_fetch(lambda: c_engine.news(), default=pd.DataFrame())
         if news_raw is not None and not news_raw.empty:
