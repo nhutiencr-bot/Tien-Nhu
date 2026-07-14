@@ -449,12 +449,18 @@ def execute_equity_research_pipeline(ticker):
             return pd.Series(dtype=float)
 
         if _missing_any:
-            try:
-                _cafef_full = fetch_cafef_yearly_full(ticker, n_years=5)
-                _cf_income  = _cafef_full.get("income_statement",  pd.DataFrame())
-                _cf_bs      = _cafef_full.get("balance_sheet",     pd.DataFrame())
-                _cf_cf      = _cafef_full.get("cash_flow",         pd.DataFrame())
-
+    try:
+        _cafef_full = fetch_cafef_yearly_full(ticker, n_years=5)
+        
+        _cf_income = _cafef_full.get("income_statement", pd.DataFrame())
+        _cf_bs     = _cafef_full.get("balance_sheet",    pd.DataFrame())
+        _cf_cf     = _cafef_full.get("cash_flow",        pd.DataFrame())
+        st.write("🔍 DEBUG CafeF income columns:", list(_cf_income.columns) if not _cf_income.empty else "EMPTY")
+        st.write("🔍 DEBUG CafeF income index[:5]:", list(_cf_income.index[:5]) if not _cf_income.empty else "EMPTY")
+        st.write("🔍 DEBUG CafeF bs columns:", list(_cf_bs.columns) if not _cf_bs.empty else "EMPTY")
+        st.write("🔍 DEBUG _missing_any:", _missing_any)        
+        _cf_income  = _cafef_full.get("income_statement",  pd.DataFrame())
+        
                 if not _cf_income.empty:
                     if is_bank:
                         _rev_kw = ['thu nhập lãi và các khoản thu nhập tương tự',
