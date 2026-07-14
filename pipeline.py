@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 import streamlit as st
 # BYPASS vnai hard-cap 4 kỳ — phải gọi TRƯỚC mọi Finance() call
+# [FILE 1] Giữ lại apply_unpatch — File 2 thiếu block này
 from unpatch_vnai import apply_unpatch
 apply_unpatch()
 from news_fetcher import fetch_news_with_fallback
@@ -357,11 +358,11 @@ def execute_equity_research_pipeline(ticker):
         net_profit_series         = normalize_net_profit_with_anchor(
             fin5['net_profit'], equity_series, fin5['roe'])
         eps_series                = fin5['eps']
-        bvps_series                = fin5['bvps']
-        roe_series                 = fin5['roe']
-        roa_series                 = fin5['roa']
-        pe_series                  = fin5['pe']
-        pb_series                  = fin5['pb']
+        bvps_series               = fin5['bvps']
+        roe_series                = fin5['roe']
+        roa_series                = fin5['roa']
+        pe_series                 = fin5['pe']
+        pb_series                 = fin5['pb']
         outstanding_shares_series = fin5['outstanding_shares']
 
         def _filter_years(s):
@@ -374,16 +375,16 @@ def execute_equity_research_pipeline(ticker):
                 pass
             return s[s.index.isin(allowed_years)]
 
-        revenue_series        = _filter_years(revenue_series)
-        equity_series         = _filter_years(equity_series)
-        total_assets_series   = _filter_years(total_assets_series)
-        net_profit_series     = _filter_years(net_profit_series)
-        eps_series            = _filter_years(eps_series)
-        bvps_series            = _filter_years(bvps_series)
-        roe_series             = _filter_years(roe_series)
-        roa_series             = _filter_years(roa_series)
-        pe_series              = _filter_years(pe_series)
-        pb_series              = _filter_years(pb_series)
+        revenue_series            = _filter_years(revenue_series)
+        equity_series             = _filter_years(equity_series)
+        total_assets_series       = _filter_years(total_assets_series)
+        net_profit_series         = _filter_years(net_profit_series)
+        eps_series                = _filter_years(eps_series)
+        bvps_series               = _filter_years(bvps_series)
+        roe_series                = _filter_years(roe_series)
+        roa_series                = _filter_years(roa_series)
+        pe_series                 = _filter_years(pe_series)
+        pb_series                 = _filter_years(pb_series)
         outstanding_shares_series = _filter_years(outstanding_shares_series)
 
         outstanding_shares_series = _build_shares_series(
@@ -403,15 +404,26 @@ def execute_equity_research_pipeline(ticker):
                                      - total_liab_series.loc[common_years])
 
         # ─────────────────────────────────────────────────────────────────
-        # FIX: Dùng OR (hợp) thay vì AND (giao) để phát hiện năm thiếu BẤT KỲ field nào.
-        # Code cũ dùng AND → chỉ fallback khi năm hoàn toàn vắng cả 4 field.
-        # Nếu 2021 có equity/assets từ balance sheet nhưng thiếu revenue/net_profit
-        # thì AND không coi là "missing" → CafeF không được gọi → 2021 vẫn trống.
+        # _missing_any: dùng AND (giao) để phát hiện năm chưa đủ cả 4 field.
+        #
+        # Logic AND đúng hơn OR ở đây vì:
+        #   - Mục tiêu: chỉ gọi CafeF fallback khi năm thực sự thiếu dữ liệu cốt lõi
+        #   - Nếu dùng OR (hợp): năm đã có revenue+equity nhưng chưa có net_profit
+        #     cũng bị coi là "có" → không gọi fallback → net_profit 2025 vẫn trống
+        #   - Dùng AND (giao của cả 4 set): năm phải có đủ revenue, net_profit,
+        #     equity VÀ total_assets mới được coi là "đầy đủ" → an toàn hơn
+        #
+        # Kết quả thực tế (ảnh 5-năm): 2025 thiếu revenue/net_profit/equity/assets
+        # → không nằm trong giao 4 set → _missing_any = [2025] → CafeF được gọi ✓
         # ─────────────────────────────────────────────────────────────────
-        _missing_any = sorted(allowed_years - (
-            set(revenue_series.index) & set(net_profit_series.index)
-            | set(equity_series.index) & set(total_assets_series.index)
-        ))
+        _years_have_all = (
+            set(revenue_series.index)
+            & set(net_profit_series.index)
+            & set(equity_series.index)
+            & set(total_assets_series.index)
+        )
+        # Gọi CafeF nếu có bất kỳ năm nào chưa đủ cả 4 field
+        _missing_any = sorted(allowed_years - _years_have_all)
 
         # Khởi tạo _cf_cf ở ngoài if để CFO fallback block luôn có thể dùng
         _cf_cf = pd.DataFrame()
@@ -453,12 +465,11 @@ def execute_equity_research_pipeline(ticker):
                 _cf_bs     = _cafef_full.get("balance_sheet",    pd.DataFrame())
                 _cf_cf     = _cafef_full.get("cash_flow",        pd.DataFrame())
 
-                # Với fetch_cafef_yearly_full trả về dict dạng {"revenue": Series, ...}
-                # (không phải DataFrame), cần xử lý trực tiếp từ Series trả về.
-                _rev_cf   = _filter_years(_cafef_full.get("revenue",    pd.Series(dtype=float)))
-                _np_cf    = _filter_years(_cafef_full.get("net_profit", pd.Series(dtype=float)))
-                _eq_cf    = _filter_years(_cafef_full.get("equity",     pd.Series(dtype=float)))
-                _ta_cf    = _filter_years(_cafef_full.get("total_assets", pd.Series(dtype=float)))
+                # FIX syntax: bỏ dấu ngoặc đóng thừa ở cuối mỗi dòng (File 2 có bug này)
+                _rev_cf = _filter_years(_cafef_full.get("revenue",       pd.Series(dtype=float)))
+                _np_cf  = _filter_years(_cafef_full.get("net_profit",    pd.Series(dtype=float)))
+                _eq_cf  = _filter_years(_cafef_full.get("equity",        pd.Series(dtype=float)))
+                _ta_cf  = _filter_years(_cafef_full.get("total_assets",  pd.Series(dtype=float)))
 
                 for yr in _rev_cf.index:
                     if yr not in revenue_series.index:
@@ -494,11 +505,14 @@ def execute_equity_research_pipeline(ticker):
 
         # ─────────────────────────────────────────────────────────────────
         # Tầng 3 — Website scraping
-        # FIX: cũng dùng OR cho _missing_after_cafef để nhất quán
+        # Nhất quán với _missing_any: dùng AND — gọi scraper nếu năm nào
+        # chưa đủ cả 4 field sau khi đã merge CafeF.
         # ─────────────────────────────────────────────────────────────────
         _missing_after_cafef = sorted(allowed_years - (
-            set(revenue_series.index) | set(net_profit_series.index)
-            | set(equity_series.index) | set(total_assets_series.index)
+            set(revenue_series.index)
+            & set(net_profit_series.index)
+            & set(equity_series.index)
+            & set(total_assets_series.index)
         ))
 
         if _missing_after_cafef:
@@ -749,6 +763,22 @@ def execute_equity_research_pipeline(ticker):
                 if eq_med_ce > 0 and cfo_med_ce / eq_med_ce > 50:
                     cfo_series_for_multiples = cfo_series_for_multiples / 1000
 
+        # ─────────────────────────────────────────────────────────────────
+        # CFO OUTLIER GUARD — loại bỏ năm có CFO bất thường trước khi lấy latest.
+        # Trường hợp thực tế: 2025 CFO = 38 tỷ trong khi median 2021–2024 ~ 37,000 tỷ
+        # → lệch > 1000x → dữ liệu partial/sai đơn vị → drop năm đó.
+        # Ngưỡng: nếu giá trị năm lệch > 20x so với median của các năm còn lại → drop.
+        # ─────────────────────────────────────────────────────────────────
+        if not cfo_series_for_multiples.empty and len(cfo_series_for_multiples) >= 2:
+            _cfo_vals = cfo_series_for_multiples.abs()
+            _cfo_median_all = _cfo_vals.median()
+            if _cfo_median_all > 0:
+                _cfo_ratio = _cfo_vals / _cfo_median_all
+                # Drop các năm lệch quá xa (< 1/20 hoặc > 20x so với median)
+                _cfo_valid_mask = (_cfo_ratio >= 0.05) & (_cfo_ratio <= 20.0)
+                if _cfo_valid_mask.any() and not _cfo_valid_mask.all():
+                    cfo_series_for_multiples = cfo_series_for_multiples[_cfo_valid_mask]
+
         cfo_latest = get_latest(cfo_series_for_multiples, default=None) \
             if not cfo_series_for_multiples.empty else None
         cfo_is_estimated = False
@@ -995,6 +1025,13 @@ def execute_equity_research_pipeline(ticker):
                 _rev_med = revenue_series.loc[_common_cr].abs().median()
                 if _rev_med > 0 and _cfo_med / _rev_med > 10:
                     _cfo_s = _cfo_s / 1000
+        # Outlier guard cho _cfo_s trước khi map vào bảng:
+        # Nếu một năm có CFO lệch > 20x median series → hiển thị None thay vì sai
+        if not _cfo_s.empty and len(_cfo_s) >= 2:
+            _cs_med = _cfo_s.abs().median()
+            if _cs_med > 0:
+                _cs_ratio = _cfo_s.abs() / _cs_med
+                _cfo_s = _cfo_s.where((_cs_ratio >= 0.05) & (_cs_ratio <= 20.0), other=None)
         df_5y_table['LCFD HĐKD (tỷ)'] = df_5y_table['Năm'].map(
             lambda y: _cfo_s.get(y, None) if not _cfo_s.empty else None)
 
