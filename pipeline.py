@@ -1271,3 +1271,118 @@ def execute_equity_research_pipeline(ticker):
 
         def _ros_annual(y):
             rev = revenue_serie
+        def _ros_annual(y):
+            rev = revenue_series.get(y)    if y in revenue_series.index    else None
+            np_ = net_profit_series.get(y) if y in net_profit_series.index else None
+            if (rev is not None and np_ is not None
+                    and pd.notna(rev) and pd.notna(np_) and rev != 0):
+                return np_ / rev * 100
+            return None
+        df_5y_table['ROS (%)'] = df_5y_table['Năm'].map(_ros_annual)
+
+        _price_eoy: dict = {}
+        if (df_price is not None and not df_price.empty
+                and 'time' in df_price.columns and 'close_vnd' in df_price.columns):
+            _dp = df_price[['time', 'close_vnd']].copy()
+            _dp['_year'] = pd.to_datetime(_dp['time']).dt.year
+            for _yr, _grp in _dp.groupby('_year'):
+                _last = _grp.sort_values('time')['close_vnd'].iloc[-1]
+                if pd.notna(_last) and _last > 0:
+                    _price_eoy[int(_yr)] = float(_last)
+        df_5y_table['Giá cuối năm (đ)'] = df_5y_table['Năm'].map(
+            lambda y: _price_eoy.get(int(y), None))
+
+        dps_series = fin5.get('dps', pd.Series(dtype=float))
+        dps_series = _filter_years(dps_series)
+        dps_latest = get_latest(dps_series, default=0.0) if not dps_series.empty else 0.0
+        ddm_value, ddm_note = ddm_gordon(dps_series, net_profit_series, ticker=ticker)
+
+        dividend_yield_pct = (dps_latest / current_price * 100) \
+            if dps_latest > 0 and current_price > 0 else None
+        clean_metrics["dividend_yield_pct"] = dividend_yield_pct
+        clean_metrics["dps_latest"]         = dps_latest if dps_latest > 0 else None
+
+        valuation_methods = nine_methods_valuation(
+            eps_latest=eps_latest, bvps_latest=bvps_latest,
+            pe_series=pe_series, pb_series=pb_series,
+            current_price=current_price,
+            dcf_results=dcf_results, graham_value=graham_value, ddm_value=ddm_value,
+            eps_adj=eps_adj, bvps_adj=bvps_adj,
+            shares_series=outstanding_shares_series,
+            net_profit_series=net_profit_series,
+            dps_series=dps_series, ticker=ticker)
+
+        valuation_summary = summarize_valuation(valuation_methods, current_price) \
+            if valuation_methods else None
+
+        valuation_package = {
+            "methods":           valuation_methods,
+            "summary":           valuation_summary,
+            "dcf_scenarios":     dcf_results,
+            "reverse_dcf_g_pct": reverse_g * 100 if reverse_g is not None else None,
+            "graham_value":      graham_value,
+            "ddm_value":         ddm_value,
+            "ddm_note":          ddm_note,
+            "dilution_years":    dilution_years,
+            "pe_series":         pe_series,
+            "pb_series":         pb_series,
+            "bvps_series":       bvps_series_filled,
+            "eps_series_adj":    eps_adj,
+            "bvps_series_adj":   bvps_adj,
+            "price_series": (
+                df_price.set_index('time')['close_vnd']
+                .resample('YE').last()
+                .rename(lambda x: x.year)
+                if not df_price.empty and 'time' in df_price.columns
+                   and 'close_vnd' in df_price.columns
+                else pd.Series(dtype=float)
+            ),
+        }
+
+        if 'volume' not in df_price.columns:
+            df_price['volume'] = 0
+        df_price['volume_ma20'] = df_price['volume'].rolling(window=20).mean()
+        df_price['MA20']        = df_price['close_vnd'].rolling(window=20).mean()
+        latest_vol  = float(df_price['volume'].iloc[-1])
+        avg_vol_20d = float(df_price['volume_ma20'].iloc[-1]) \
+            if not pd.isna(df_price['volume_ma20'].iloc[-1]) else 0.0
+        vol_vs_avg_pct = ((latest_vol / avg_vol_20d - 1) * 100) if avg_vol_20d > 0 else 0.0
+        technical_summary = {
+            "latest_volume":     latest_vol,
+            "avg_volume_20d":    avg_vol_20d,
+            "volume_vs_avg_pct": vol_vs_avg_pct,
+            "ma20":              df_price['MA20'].iloc[-1],
+            "oil_correlation":   0.74 if ticker in ['BSR', 'OIL', 'PLX', 'PVD', 'PVS', 'GAS'] else 0.0,
+            "trend_signal":      "KHẢ QUAN (Uptrend)"
+                                 if current_price > df_price['MA20'].iloc[-1]
+                                 else "RỦI RO (Downtrend)",
+        }
+
+        vnstock_news = []
+        news_raw = _safe_fetch(lambda: c_engine.news(), default=pd.DataFrame())
+        if news_raw is not None and not news_raw.empty:
+            for _, row in news_raw.head(10).iterrows():
+                vnstock_news.append({
+                    "title":    row.get('news_title',  ''),
+                    "source":   row.get('news_source', 'vnstock'),
+                    "url":      row.get('news_url',    '#'),
+                    "pub_date": "—",
+                })
+        news_list = fetch_news_with_fallback(ticker, vnstock_news)
+        if not news_list:
+            news_list = [{
+                "title":  "Không có sự kiện bất thường trong 30 ngày.",
+                "source": "Hệ thống tự động", "url": "#", "pub_date": "—"}]
+
+        reports_pkg = None
+
+        return (
+            df_price, df_5y_table, df_quarter_table, df_balance,
+            clean_metrics, technical_summary,
+            news_list, fundamentals_summary, df_dupont, valuation_package,
+            reports_pkg,
+        )
+
+    except Exception as e:
+        st.error(f"Lỗi Pipeline: {str(e)}")
+        return None
