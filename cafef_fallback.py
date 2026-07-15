@@ -178,34 +178,34 @@ def fetch_cafef_balance_sheet_5y(
     end_year: int | None = None,
 ) -> dict[str, pd.Series]:
     """
-    Public API: lấy Vốn CSH + Tổng TS từ CafeF cho ~5 năm gần nhất.
+    Public API: lấy Vốn CSH + Tổng TS từ CafeF cho 2021–2025.
 
-    Trả về:
-    {
-      'equity':       pd.Series (index=năm, values=tỷ VNĐ),
-      'total_assets': pd.Series (index=năm, values=tỷ VNĐ),
-    }
-
-    Nếu lỗi → trả về 2 Series rỗng (không crash pipeline).
+    Tầng 1 — AJAX page 1+2 (luôn fetch cả 2 vì 4 năm/trang, 2021 ở page 2).
+    Tầng 2 — HTML scraping fallback.
     """
     empty = {'equity': pd.Series(dtype=float), 'total_assets': pd.Series(dtype=float)}
     try:
-        data = _scrape_cafef_balance(ticker, year=0)
+        # Tầng 1: AJAX (đáng tin, JSON sạch)
+        ajax = _fetch_cafef_ajax_full(ticker, need_old_years=True)
+        eq_d = dict(ajax.get('equity', {}))
+        ta_d = dict(ajax.get('total_assets', {}))
 
-        # CafeF default trả 5 năm gần nhất (2022–2026 khi đang ở 2026).
-        # Merge thêm trang year=2021 để đảm bảo có đủ 2021–2025.
-        data_old = _scrape_cafef_balance(ticker, year=2021)
-        for k in ('equity', 'total_assets'):
-            for yr, val in data_old.get(k, {}).items():
-                data.setdefault(k, {})[yr] = data[k].get(yr) or val
+        # Tầng 2: HTML bổ sung năm còn thiếu
+        if not eq_d or not ta_d:
+            data = _scrape_cafef_balance(ticker, year=0)
+            data_old = _scrape_cafef_balance(ticker, year=2021)
+            for k in ('equity', 'total_assets'):
+                for yr, val in data_old.get(k, {}).items():
+                    data[k].setdefault(yr, val)
+            for yr, val in data.get('equity', {}).items():
+                eq_d.setdefault(yr, val)
+            for yr, val in data.get('total_assets', {}).items():
+                ta_d.setdefault(yr, val)
 
-        eq_series = pd.Series(data.get('equity', {}), dtype=float).sort_index()
-        ta_series = pd.Series(data.get('total_assets', {}), dtype=float).sort_index()
-
-        # Sanity check: loại bỏ giá trị bất thường (< 0 hoặc > 50,000 tỷ cho từng chỉ số)
+        eq_series = pd.Series(eq_d, dtype=float).sort_index()
+        ta_series = pd.Series(ta_d, dtype=float).sort_index()
         eq_series = eq_series[(eq_series > 0) & (eq_series < 5e7)]
         ta_series = ta_series[(ta_series > 0) & (ta_series < 5e7)]
-
         return {'equity': eq_series, 'total_assets': ta_series}
 
     except Exception:
@@ -274,40 +274,236 @@ def _scrape_cafef_income(ticker: str, year: int = 0) -> dict:
     return {'revenue': rev_vals, 'net_profit': np_vals}
 
 
+def _fetch_cafef_ajax_page(ticker: str, report_type: int, page: int) -> list | None:
+    """
+    Gọi CafeF AJAX API (JSON) — đáng tin hơn HTML scraping.
+
+    report_type: 1=KQKD, 2=CDKT, 3=LCTT
+    page: 1 = 5 năm gần nhất (2022-2026), 2 = trang tiếp (2017-2021)
+    """
+    url = (
+        f"https://s.cafef.vn/Handlers/AjaxFinancialData.ashx"
+        f"?symbol={ticker.upper()}&type={report_type}"
+        f"&period={page}&periodType=Y"
+    )
+    try:
+        r = _SESSION.get(url, timeout=12)
+        r.raise_for_status()
+        data = r.json()
+        items = data.get("Data", {}).get("ListFinancialData")
+        return items if items else None
+    except Exception:
+        return None
+
+
+def _ajax_extract(items: list, keywords: list, exclude: list | None = None) -> dict[int, float]:
+    """
+    Trích xuất {năm: giá_trị_tỷ} từ JSON AJAX CafeF theo keyword.
+
+    Lưu ý: CafeF trả 4 năm/trang (không phải 5). page=1 → 2022-2025,
+    page=2 → 2018-2021. Hàm này gom TẤT CẢ năm từ row khớp đầu tiên
+    CÓ dữ liệu — bỏ qua row khớp nhưng Data rỗng thay vì return {} sớm.
+    """
+    if not items:
+        return {}
+    for item in items:
+        name = str(item.get("Name", "")).lower().strip()
+        if not any(k in name for k in keywords):
+            continue
+        if exclude and any(k in name for k in exclude):
+            continue
+        unit_raw = str(item.get("Unit", "")).lower()
+        if "tỷ" in unit_raw:
+            divisor = 1.0
+        elif "triệu" in unit_raw or "million" in unit_raw:
+            divisor = 1e3
+        else:
+            divisor = 1e3  # CafeF mặc định: triệu VNĐ
+        result = {}
+        for pd_item in item.get("Data", []):
+            period = str(pd_item.get("Period", "")).strip()
+            m = re.search(r'(20\d{2})', period)
+            if not m:
+                continue
+            yr = int(m.group(1))
+            raw_val = pd_item.get("Value")
+            if raw_val is None:
+                continue
+            try:
+                val = float(raw_val)
+                result[yr] = round(val / divisor, 2)
+            except (ValueError, TypeError):
+                pass
+        # BUG FIX: chỉ return khi thực sự có data; nếu rỗng thử row tiếp theo
+        if result:
+            return result
+    return {}
+
+
+def _ajax_extract_raw(items: list, keywords: list, exclude: list | None = None) -> dict[int, float]:
+    """
+    Giống _ajax_extract nhưng KHÔNG chia đơn vị (giữ nguyên giá trị gốc).
+
+    Dùng cho các chỉ tiêu tính theo ĐỒNG/cổ phiếu như EPS ("Lãi cơ bản trên
+    cổ phiếu (VND)") — vốn KHÔNG ở đơn vị triệu/tỷ nên chia 1e3 sẽ sai.
+    """
+    if not items:
+        return {}
+    for item in items:
+        name = str(item.get("Name", "")).lower().strip()
+        if not any(k in name for k in keywords):
+            continue
+        if exclude and any(k in name for k in exclude):
+            continue
+        result = {}
+        for pd_item in item.get("Data", []):
+            period = str(pd_item.get("Period", "")).strip()
+            m = re.search(r'(20\d{2})', period)
+            if not m:
+                continue
+            yr = int(m.group(1))
+            raw_val = pd_item.get("Value")
+            if raw_val is None:
+                continue
+            try:
+                result[yr] = round(float(raw_val), 2)
+            except (ValueError, TypeError):
+                pass
+        if result:
+            return result
+    return {}
+
+
+def _fetch_cafef_ajax_full(ticker: str, need_old_years: bool = False) -> dict:
+    """
+    Lấy equity, total_assets, revenue, net_profit, eps từ AJAX API CafeF.
+
+    CafeF trả 4 năm/trang (không phải 5):
+      page=1 → 2022, 2023, 2024, 2025
+      page=2 → 2018, 2019, 2020, 2021
+
+    Luôn fetch cả 2 trang để đảm bảo có đủ 2021–2025. Tham số
+    need_old_years giữ lại để tương thích ngược nhưng không còn
+    ảnh hưởng hành vi (vì 2021 nằm trên page 2 nên luôn cần).
+    """
+    REPORT_INCOME  = 1
+    REPORT_BALANCE = 2
+
+    equity_d: dict[int, float] = {}
+    ta_d:     dict[int, float] = {}
+    rev_d:    dict[int, float] = {}
+    np_d:     dict[int, float] = {}
+    eps_d:    dict[int, float] = {}
+
+    for page in (1, 2):  # luôn fetch cả 2 trang
+        # Balance sheet
+        bs_items = _fetch_cafef_ajax_page(ticker, REPORT_BALANCE, page)
+        if bs_items:
+            for yr, val in _ajax_extract(bs_items,
+                    ['vốn chủ sở hữu', "owner's equity", 'equity'],
+                    exclude=['vốn điều lệ', 'thiểu số', 'minority']).items():
+                equity_d.setdefault(yr, val)
+            for yr, val in _ajax_extract(bs_items,
+                    ['tổng cộng tài sản', 'tổng tài sản', 'total assets']).items():
+                ta_d.setdefault(yr, val)
+
+        # Income statement
+        inc_items = _fetch_cafef_ajax_page(ticker, REPORT_INCOME, page)
+        if inc_items:
+            for yr, val in _ajax_extract(inc_items,
+                    ['doanh thu thuần', 'tổng doanh thu', 'net revenue',
+                     'doanh thu bán hàng', 'tổng thu nhập hoạt động',
+                     'thu nhập lãi thuần'],
+                    exclude=['giá vốn', 'chi phí lãi']).items():
+                rev_d.setdefault(yr, val)
+            for yr, val in _ajax_extract(inc_items,
+                    ['lợi nhuận sau thuế thu nhập doanh nghiệp',
+                     'lợi nhuận sau thuế', 'lnst', 'lãi sau thuế',
+                     'profit after tax', 'net income'],
+                    exclude=['trước thuế', 'thiểu số', 'minority']).items():
+                np_d.setdefault(yr, val)
+            # EPS — đơn vị ĐỒNG/cổ phiếu, KHÔNG chia đơn vị
+            for yr, val in _ajax_extract_raw(inc_items,
+                    ['lãi cơ bản trên cổ phiếu', 'lãi trên cổ phiếu',
+                     'earnings per share', 'eps'],
+                    exclude=['pha loãng', 'diluted']).items():
+                eps_d.setdefault(yr, val)
+
+    return {
+        'equity':       equity_d,
+        'total_assets': ta_d,
+        'revenue':      rev_d,
+        'net_profit':   np_d,
+        'eps':          eps_d,
+    }
+
+
 def fetch_cafef_yearly_full(ticker: str, years: list = None, debug: bool = False) -> dict:
     """
     Lấy đủ 4 chỉ tiêu (equity, total_assets, revenue, net_profit) từ CafeF.
-    Trả về dict: mỗi key là pd.Series(index=năm, values=tỷ VNĐ).
+    Trả về dict: mỗi key là pd.Series(index=năm int, values=tỷ VNĐ).
+
+    Chiến lược 2 tầng:
+      Tầng 1 — AJAX API (JSON): đáng tin, không bị ảnh hưởng bởi thay đổi HTML.
+               page=1 → 5 năm gần nhất (hiện tại: 2022-2026).
+               page=2 → 5 năm trước đó (2017-2021) — bắt buộc nếu cần 2021.
+      Tầng 2 — HTML scraping: fallback khi AJAX trả rỗng (hiếm gặp).
     """
     empty_s = pd.Series(dtype=float)
+    need_old = bool(years and any(y <= 2021 for y in years))
+
     try:
-        bs  = _scrape_cafef_balance(ticker, year=0)
-        inc = _scrape_cafef_income(ticker, year=0)
+        # ── Tầng 1: AJAX API ─────────────────────────────────────────────
+        ajax = _fetch_cafef_ajax_full(ticker, need_old_years=need_old)
 
-        # CafeF default (year=0) trả về 5 năm gần nhất — trong 2026 đó là
-        # 2022–2026. Nếu caller yêu cầu năm 2021 thì phải fetch thêm trang
-        # cũ hơn bằng cách truyền year=2021 vào URL.
-        if years and any(y <= 2021 for y in years):
-            bs_old  = _scrape_cafef_balance(ticker, year=2021)
-            inc_old = _scrape_cafef_income(ticker, year=2021)
-            for k in ('equity', 'total_assets'):
-                for yr, val in bs_old.get(k, {}).items():
-                    bs.setdefault(k, {})[yr] = bs[k].get(yr) or val
-            for k in ('revenue', 'net_profit'):
-                for yr, val in inc_old.get(k, {}).items():
-                    inc.setdefault(k, {})[yr] = inc[k].get(yr) or val
-
-        result = {
-            'equity':       pd.Series(bs.get('equity', {}),       dtype=float).sort_index(),
-            'total_assets': pd.Series(bs.get('total_assets', {}), dtype=float).sort_index(),
-            'revenue':      pd.Series(inc.get('revenue', {}),     dtype=float).sort_index(),
-            'net_profit':   pd.Series(inc.get('net_profit', {}),  dtype=float).sort_index(),
+        merged: dict[str, dict[int, float]] = {
+            'equity':       dict(ajax.get('equity',       {})),
+            'total_assets': dict(ajax.get('total_assets', {})),
+            'revenue':      dict(ajax.get('revenue',      {})),
+            'net_profit':   dict(ajax.get('net_profit',   {})),
+            'eps':          dict(ajax.get('eps',          {})),
         }
+
+        # ── Tầng 2: HTML scraping (fallback bù các năm AJAX bỏ sót) ─────
+        # Chỉ chạy nếu AJAX thiếu dữ liệu cho ít nhất 1 năm yêu cầu.
+        def _ajax_has_years(field: str) -> set[int]:
+            return set(merged[field].keys())
+
+        need_html = (
+            not years  # không có yêu cầu cụ thể → luôn bổ sung
+            or any(y not in _ajax_has_years('net_profit') for y in years)
+            or any(y not in _ajax_has_years('equity')     for y in years)
+        )
+
+        if need_html:
+            bs  = _scrape_cafef_balance(ticker, year=0)
+            inc = _scrape_cafef_income(ticker, year=0)
+            if need_old:
+                bs_old  = _scrape_cafef_balance(ticker, year=2021)
+                inc_old = _scrape_cafef_income(ticker, year=2021)
+                for k in ('equity', 'total_assets'):
+                    for yr, val in bs_old.get(k, {}).items():
+                        bs[k].setdefault(yr, val)
+                for k in ('revenue', 'net_profit'):
+                    for yr, val in inc_old.get(k, {}).items():
+                        inc[k].setdefault(yr, val)
+
+            # Chỉ dùng HTML để bổ sung năm AJAX còn thiếu
+            for k in ('equity', 'total_assets'):
+                for yr, val in bs.get(k, {}).items():
+                    merged[k].setdefault(yr, val)
+            for k in ('revenue', 'net_profit'):
+                for yr, val in inc.get(k, {}).items():
+                    merged[k].setdefault(yr, val)
+
+        result = {k: pd.Series(v, dtype=float).sort_index() for k, v in merged.items()}
+
         if years:
             for k in result:
                 s = result[k]
                 result[k] = s[s.index.isin(years)] if not s.empty else s
         return result
+
     except Exception:
         return {'equity': empty_s, 'total_assets': empty_s,
-                'revenue': empty_s, 'net_profit': empty_s}
+                'revenue': empty_s, 'net_profit': empty_s, 'eps': empty_s}

@@ -34,39 +34,97 @@ RETAIL_TICKERS = {
 
 REAL_ESTATE_TICKERS = {'VRE', 'NLG', 'DXG', 'KDH', 'PDR', 'CEO', 'BCM'}
 
+# Chứng khoán/bảo hiểm — dùng để pipeline phân biệt EBITDA có ý nghĩa hay không.
+# Alias sang FINANCIAL_TICKERS (đã gồm CTCK + bảo hiểm) để pipeline import an toàn.
+SECURITIES_TICKERS = set(FINANCIAL_TICKERS)
+
 TARGET_YEARS = list(range(2021, 2026))
 
 
-def _get_year_columns(df: pd.DataFrame):
+def _parse_quarter_key(col_str):
+    """
+    Chuẩn hoá tên cột quý về dạng 'YYYY-Qn'.
+    Chấp nhận: '2025-Q1', '2025Q1', 'Q1/2025', 'Q1 2025', '2025-1', '1-2025'.
+    Trả về None nếu không nhận diện được (không phải cột quý).
+    """
+    s = str(col_str).strip()
+    ym = re.search(r'(20\d{2})', s)
+    if not ym:
+        return None
+    year = ym.group(1)
+    qm = re.search(r'[Qq]\s*([1-4])\b', s)
+    if qm:
+        return f"{year}-Q{qm.group(1)}"
+    # Fallback: token 1-4 tách biệt với năm (VD '2025-1' → year=2025, q=1)
+    for tok in re.split(r'[-_/\s.]+', s):
+        tok = tok.strip()
+        if tok and tok != year and re.fullmatch(r'[1-4]', tok):
+            return f"{year}-Q{tok}"
+    return None
+
+
+def _get_period_columns(df: pd.DataFrame, period='year'):
+    """
+    Trả về list [(col, key)] cho các cột kỳ báo cáo.
+      - period='year'    → key = int năm (VD 2025)
+      - period='quarter' → key = 'YYYY-Qn' (VD '2025-Q1')
+    Bỏ qua cột meta (item/item_en/item_id).
+    """
     meta_cols = {'item', 'item_en', 'item_id'}
-    year_cols = []
+    out = []
     for c in df.columns:
         if c in meta_cols:
             continue
         c_str = str(c).strip()
-        # Chấp nhận '2021', '2021.0', 2021 (int), 2021.0 (float)
-        if re.match(r'^20\d{2}(\.0+)?$', c_str):
-            year_cols.append(c)
-    def _col_to_year(x):
-        m = re.match(r'^(20\d{2})', str(x).strip())
-        return int(m.group(1)) if m else 0
-    return sorted(year_cols, key=_col_to_year)
+        if period == 'quarter':
+            key = _parse_quarter_key(c_str)
+            if key is not None:
+                out.append((c, key))
+        else:
+            # Chấp nhận '2021', '2021.0', 2021 (int), 2021.0 (float)
+            if re.match(r'^20\d{2}(\.0+)?$', c_str):
+                m = re.match(r'^(20\d{2})', c_str)
+                out.append((c, int(m.group(1))))
+    if period == 'quarter':
+        out.sort(key=lambda t: (int(t[1].split('-Q')[0]), int(t[1].split('-Q')[1])))
+    else:
+        out.sort(key=lambda t: t[1])
+    return out
+
+
+def _get_year_columns(df: pd.DataFrame):
+    """Giữ tương thích ngược — chỉ trả về danh sách cột năm (period='year')."""
+    return [c for c, _ in _get_period_columns(df, 'year')]
+
+
+def _key_year(key):
+    """Năm (int) của một period key (int năm hoặc 'YYYY-Qn')."""
+    try:
+        return int(str(key).split('-Q')[0])
+    except Exception:
+        return None
 
 
 def find_row_series(df: pd.DataFrame, keywords, exclude_keywords=None,
-                    item_ids=None, prefer_top_level=True):
+                    item_ids=None, prefer_top_level=True, period='year'):
     """
-    Tìm dòng phù hợp trong DataFrame BCTC vnstock (CHỈ THEO NĂM).
+    Tìm dòng phù hợp trong DataFrame BCTC vnstock.
 
-    FIX: Khi có nhiều dòng khớp, chọn dòng có nhiều năm data nhất
-         (ưu tiên dòng phủ đủ 2021-2025).
+    period='year'    → Series index = int năm.
+    period='quarter' → Series index = 'YYYY-Qn' (VD '2025-Q1').
+
+    FIX: Khi có nhiều dòng khớp, chọn dòng có nhiều kỳ data nhất trong khung
+         TARGET_YEARS (ưu tiên dòng phủ đủ 2021-2025 / các quý gần đây).
     """
     if df is None or df.empty:
         return pd.Series(dtype=float)
 
-    year_cols = _get_year_columns(df)
-    if not year_cols:
+    period_cols = _get_period_columns(df, period)
+    if not period_cols:
         return pd.Series(dtype=float)
+
+    col_key = dict(period_cols)                 # col -> key
+    all_cols = [c for c, _ in period_cols]
 
     search_cols = [c for c in ['item', 'item_en', 'item_id'] if c in df.columns]
     if not search_cols:
@@ -94,23 +152,46 @@ def find_row_series(df: pd.DataFrame, keywords, exclude_keywords=None,
     if matched.empty:
         return pd.Series(dtype=float)
 
+    # ── Chọn dòng tốt nhất ────────────────────────────────────────────────
+    # Chỉ chấm điểm coverage TRONG khung TARGET_YEARS (2021-2025), tie-break
+    # ưu tiên dòng chứa kỳ MỚI NHẤT. KHÔNG gộp giá trị giữa các dòng khớp khác
+    # nhau — vì cùng keyword có thể khớp 2 chỉ tiêu khác nhau (VD "lợi nhuận sau
+    # thuế" vs "lợi nhuận sau thuế của cổ đông công ty mẹ"), gộp sẽ trộn nhầm số.
+    target_cols = [c for c in all_cols if _key_year(col_key[c]) in TARGET_YEARS]
+    score_cols = target_cols if target_cols else all_cols
+
+    def _rank_key(col):
+        """Thứ tự thời gian của cột để chọn kỳ mới nhất."""
+        k = col_key[col]
+        if period == 'quarter':
+            yr = int(str(k).split('-Q')[0])
+            q  = int(str(k).split('-Q')[1])
+            return yr * 4 + q
+        return int(k)
+
     row = matched.iloc[0]
     if len(matched) > 1:
-        non_na_counts = matched[year_cols].notna().sum(axis=1)
-        row = matched.loc[non_na_counts.idxmax()]
+        def _row_rank(idx):
+            r = matched.loc[idx]
+            vals = pd.to_numeric(r[score_cols], errors='coerce')
+            coverage = int(vals.notna().sum())
+            latest = max((_rank_key(c) for c in score_cols
+                          if pd.notna(pd.to_numeric(pd.Series([r[c]]), errors='coerce').iloc[0])),
+                         default=0)
+            return (coverage, latest)
+        best_idx = max(matched.index, key=_row_rank)
+        row = matched.loc[best_idx]
 
     result = {}
-    for yc in year_cols:
-        val = pd.to_numeric(pd.Series([row[yc]]), errors='coerce').iloc[0]
+    for c in all_cols:
+        val = pd.to_numeric(pd.Series([row[c]]), errors='coerce').iloc[0]
         if pd.notna(val):
-            m = re.match(r'^(20\d{2})', str(yc).strip())
-            if m:
-                result[int(m.group(1))] = float(val)
+            result[col_key[c]] = float(val)
 
     return pd.Series(result).sort_index()
 
 
-def _find_revenue_for_bank(df_income):
+def _find_revenue_for_bank(df_income, period='year'):
     """Ngân hàng/bảo hiểm/chứng khoán — dùng thu nhập thay doanh thu."""
     bank_revenue_keywords = [
         (['tổng thu nhập hoạt động', 'total operating income', 'net operating income'], ['chi phí', 'expense']),
@@ -122,13 +203,14 @@ def _find_revenue_for_bank(df_income):
     ]
     for keywords, excludes in bank_revenue_keywords:
         s = find_row_series(df_income, keywords,
-                            exclude_keywords=excludes if excludes else None)
+                            exclude_keywords=excludes if excludes else None,
+                            period=period)
         if not s.empty:
             return s
     return pd.Series(dtype=float)
 
 
-def _find_revenue_for_retail(df_income):
+def _find_revenue_for_retail(df_income, period='year'):
     """Bán lẻ / phân phối — keyword rộng hơn, không exclude "dịch vụ"."""
     retail_keywords_list = [
         (['doanh thu thuần về bán hàng và cung cấp dịch vụ'], ['giá vốn']),
@@ -140,13 +222,14 @@ def _find_revenue_for_retail(df_income):
     ]
     for keywords, excludes in retail_keywords_list:
         s = find_row_series(df_income, keywords,
-                            exclude_keywords=excludes if excludes else None)
+                            exclude_keywords=excludes if excludes else None,
+                            period=period)
         if not s.empty:
             return s
     return pd.Series(dtype=float)
 
 
-def _find_revenue_for_realestate(df_income):
+def _find_revenue_for_realestate(df_income, period='year'):
     """BĐS cho thuê (VRE, NLG...)."""
     re_keywords_list = [
         (['doanh thu cho thuê', 'rental revenue', 'rental income'], []),
@@ -156,16 +239,20 @@ def _find_revenue_for_realestate(df_income):
     ]
     for keywords, excludes in re_keywords_list:
         s = find_row_series(df_income, keywords,
-                            exclude_keywords=excludes if excludes else None)
+                            exclude_keywords=excludes if excludes else None,
+                            period=period)
         if not s.empty:
             return s
     return pd.Series(dtype=float)
 
 
-def build_financial_table(df_income, df_balance, df_ratio=None, ticker=None):
+def build_financial_table(df_income, df_balance, df_ratio=None, ticker=None,
+                          period='year'):
     """
-    Tổng hợp chỉ tiêu BCTC theo NĂM. ticker bắt buộc phải truyền vào để
-    detect ngành.
+    Tổng hợp chỉ tiêu BCTC. ticker bắt buộc phải truyền vào để detect ngành.
+
+    period='year'    → index Series = int năm.
+    period='quarter' → index Series = 'YYYY-Qn' (VD '2025-Q1').
     """
     data = {}
 
@@ -175,11 +262,11 @@ def build_financial_table(df_income, df_balance, df_ratio=None, ticker=None):
     is_realestate = ticker in REAL_ESTATE_TICKERS if ticker else False
 
     if is_bank or is_financial:
-        data['revenue'] = _find_revenue_for_bank(df_income)
+        data['revenue'] = _find_revenue_for_bank(df_income, period=period)
     elif is_realestate:
-        data['revenue'] = _find_revenue_for_realestate(df_income)
+        data['revenue'] = _find_revenue_for_realestate(df_income, period=period)
     elif is_retail:
-        data['revenue'] = _find_revenue_for_retail(df_income)
+        data['revenue'] = _find_revenue_for_retail(df_income, period=period)
     else:
         data['revenue'] = find_row_series(
             df_income,
@@ -187,9 +274,10 @@ def build_financial_table(df_income, df_balance, df_ratio=None, ticker=None):
              'doanh thu bán hàng', 'tổng doanh thu', 'total revenue'],
             exclude_keywords=['giá vốn', 'cost of', 'chi phí lãi'],
             item_ids=['revenue', 'net_revenue', 'net_sales'],
+            period=period,
         )
         if data['revenue'].empty:
-            data['revenue'] = _find_revenue_for_retail(df_income)
+            data['revenue'] = _find_revenue_for_retail(df_income, period=period)
 
     data['net_profit'] = find_row_series(
         df_income,
@@ -197,12 +285,14 @@ def build_financial_table(df_income, df_balance, df_ratio=None, ticker=None):
          'lợi nhuận thuần', 'lãi sau thuế'],
         exclude_keywords=['trước thuế', 'before tax', 'thiểu số', 'minority'],
         item_ids=['net_profit', 'net_profit_after_tax', 'profit_after_tax'],
+        period=period,
     )
 
     data['eps_income_stmt'] = find_row_series(
         df_income,
         ['lãi cơ bản trên cổ phiếu', 'earnings per share', 'eps'],
         item_ids=['eps'],
+        period=period,
     )
 
     data['equity'] = find_row_series(
@@ -210,11 +300,13 @@ def build_financial_table(df_income, df_balance, df_ratio=None, ticker=None):
         ['vốn chủ sở hữu', "owner's equity", 'owners equity', 'total equity',
          'equity', 'vcsh'],
         exclude_keywords=['vốn điều lệ', 'charter', 'cổ phần ưu đãi'],
+        period=period,
     )
 
     data['total_assets'] = find_row_series(
         df_balance,
         ['tổng cộng tài sản', 'total assets', 'tổng tài sản'],
+        period=period,
     )
 
     ratio_fields = [
@@ -236,7 +328,7 @@ def build_financial_table(df_income, df_balance, df_ratio=None, ticker=None):
 
     if df_ratio is not None and not df_ratio.empty:
         for field_name, keywords in ratio_fields:
-            data[field_name] = find_row_series(df_ratio, keywords)
+            data[field_name] = find_row_series(df_ratio, keywords, period=period)
     else:
         for field_name, _ in ratio_fields:
             data[field_name] = pd.Series(dtype=float)
@@ -265,7 +357,7 @@ def build_5y_financial_table(df_income, df_balance, df_ratio=None, ticker=None):
     """
     return build_financial_table(
         df_income, df_balance, df_ratio,
-        ticker=ticker,
+        ticker=ticker, period='year',
     )
 
 

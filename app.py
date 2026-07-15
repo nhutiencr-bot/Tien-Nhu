@@ -67,7 +67,7 @@ if pipeline_output is None:
     st.error(f"Không thể tải dữ liệu cho mã {ticker_input}. Vui lòng thử mã khác.")
     st.stop()
 
-(df_price_clean, df_5y_table, df_balance_table,
+(df_price_clean, df_5y_table, df_quarter_table, df_balance_table,
  metrics, tech, news_cards, fundamentals, df_dupont,
  valuation_pkg, reports_pkg) = pipeline_output
 
@@ -81,9 +81,10 @@ st.caption(
 render_kpi_cards(metrics, fundamentals)
 
 # --- Tabs ---
-(tab_kqkd, tab_valuation, tab_multiples, tab_dcf, tab_dupont,
+(tab_kqkd, tab_quarter, tab_valuation, tab_multiples, tab_dcf, tab_dupont,
  tab_insights, tab_forecast, tab_technical, tab_news, tab_report) = st.tabs([
     "📋 KQKD 5 Năm",
+    "🗓️ KQKD theo Quý",
     "💰 Định Giá PE/PB · 9PP",
     "📐 Multiples Mở Rộng",
     "🧮 DCF & Graham",
@@ -98,6 +99,16 @@ render_kpi_cards(metrics, fundamentals)
 # ── Tab 1: KQKD ──────────────────────────────────────────────────────────────
 with tab_kqkd:
     render_tab_kqkd(df_5y_table, fundamentals, period_col="Năm")
+
+# ── Tab: KQKD theo Quý ────────────────────────────────────────────────────────
+with tab_quarter:
+    if df_quarter_table is not None and not df_quarter_table.empty:
+        render_tab_kqkd(df_quarter_table, fundamentals, period_col="Quý")
+    else:
+        st.info(
+            "Chưa lấy được dữ liệu quý cho mã này (nguồn chưa công bố hoặc "
+            "bị chặn). Bảng 5 năm ở tab trước vẫn dùng được bình thường."
+        )
 
 # ── Tab 2: Định giá PE/PB ─────────────────────────────────────────────────────
 with tab_valuation:

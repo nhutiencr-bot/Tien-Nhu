@@ -1,7 +1,9 @@
-import re
 import pandas as pd
 import numpy as np
 import streamlit as st
+# BYPASS vnai hard-cap 4 kỳ — phải gọi TRƯỚC mọi Finance() call
+from unpatch_vnai import apply_unpatch
+apply_unpatch()
 from news_fetcher import fetch_news_with_fallback
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -9,7 +11,7 @@ from vnstock.api.quote import Quote
 from vnstock.api.financial import Finance
 from vnstock.api.company import Company
 from financial_normalizer import (
-    find_row_series, build_5y_financial_table,
+    find_row_series, build_5y_financial_table, build_financial_table,
     get_latest, get_latest_n_years, cagr,
 )
 from valuation import (
@@ -18,42 +20,97 @@ from valuation import (
     detect_stock_dividend_years, normalize_eps_bvps_series, estimate_wacc,
 )
 from cafef_fallback import fetch_cafef_balance_sheet_5y, fetch_cafef_yearly_full
+from website_scraper import fetch_website_financial_data
 
-# Thử KBS trước (hoạt động ổn định qua mọi lần test) — VCI hay fail/timeout,
-# đưa lên đầu gây chờ vô ích trước khi fallback. Đây là fix tốc độ chính.
+# ════════════════════════════════════════════════════════════════════════
+# PATCH 1 — Khóa cứng khoảng năm bảng 5 năm: 2021–2025
+# Năm nào trong ALLOWED_YEARS mà không lấy được sẽ hiển thị None (trắng).
+# ════════════════════════════════════════════════════════════════════════
+TABLE_START_YEAR = 2021
+TABLE_END_YEAR   = 2025
+ALLOWED_YEARS    = set(range(TABLE_START_YEAR, TABLE_END_YEAR + 1))  # {2021,2022,2023,2024,2025}
+
+# PATCH 2 — Fetch 7 năm để dự phòng, sau đó _filter_years() cắt về đúng khoảng
+FETCH_LIMIT_YEAR = 7
+
+# SOURCE_FALLBACK_ORDER: thứ tự thử nguồn vnstock (Quote/Finance) khi nguồn
+# chính fail. KBS đưa lên đầu vì hoạt động ổn định qua mọi lần test — VCI hay
+# fail/timeout, đưa lên đầu gây chờ vô ích. DNSE vẫn tham gia ở đây, ĐỒNG THỜI
+# có tầng JSON riêng (Tầng 2) không cần auth.
 SOURCE_FALLBACK_ORDER = ['KBS', 'VCI', 'DNSE']
+
+# Giữ lại tên cũ để không break code khác dùng DEFAULT_YEAR_LIMIT
 DEFAULT_YEAR_LIMIT = 5
-FETCH_YEAR_LIMIT = 10                          # cào dư kỳ để chắc chắn có năm xa nhất (2021)
-TABLE_YEARS = [2021, 2022, 2023, 2024, 2025]   # khung hiển thị CỐ ĐỊNH đúng 5 năm
 
 
 def normalize_to_billion_vnd(series):
+    """
+    Chuẩn hoá series về đơn vị tỷ VNĐ.
+
+    Phân biệt 3 đơn vị API có thể trả:
+      - Đơn vị ĐỒNG:  median > 5e11  → chia 1e9
+      - Đơn vị TRIỆU: median > 5e5   → chia 1e3
+      - Đơn vị TỶ:    median <= 5e5  → giữ nguyên
+    """
     if series is None or series.empty:
         return series
+    numeric = pd.to_numeric(series, errors='coerce').dropna()
+    if numeric.empty:
+        return series
+    median_abs = numeric.abs().median()
+    if median_abs > 5e11:
+        divisor = 1e9
+    elif median_abs > 5e5:
+        divisor = 1e3
+    else:
+        divisor = 1.0
     def _to_ty(val):
         try:
             if pd.isna(val):
                 return None
-            val = float(val)
-            if abs(val) > 1e11:
-                return round(val / 1e9, 2)
-            return round(val, 2)
+            return round(float(val) / divisor, 2)
         except Exception:
             return None
     return series.map(_to_ty).dropna()
 
 
+def _normalize_pct_series(s):
+    """
+    Chuẩn hoá series ROE/ROA/ROS về đơn vị % hợp lý (0–200%).
+    """
+    if s is None or s.empty:
+        return s
+    valid = s.dropna()
+    if valid.empty:
+        return s
+    max_abs = valid.abs().max()
+    if max_abs > 500:
+        s_fixed = s / 1000
+        if s_fixed.dropna().abs().max() <= 200:
+            return s_fixed
+        return pd.Series([None] * len(s), index=s.index, dtype=float)
+    if max_abs < 1:
+        return s * 100
+    return s
+
+
 def normalize_net_profit_with_anchor(net_profit_raw, equity_series, roe_series):
+    """
+    Normalize LNST về tỷ VNĐ, dùng equity + roe làm anchor cross-check.
+    """
     base = normalize_to_billion_vnd(net_profit_raw)
     if base is None or base.empty:
         return base
+    roe_norm = _normalize_pct_series(roe_series)
+    if roe_norm is None or roe_norm.dropna().empty:
+        return base
     fixed = {}
     for year, raw_val in base.items():
-        if (year not in equity_series.index or year not in roe_series.index
-                or pd.isna(equity_series.get(year)) or pd.isna(roe_series.get(year))):
+        if (year not in equity_series.index or year not in roe_norm.index
+                or pd.isna(equity_series.get(year)) or pd.isna(roe_norm.get(year))):
             fixed[year] = raw_val
             continue
-        expected = equity_series[year] * roe_series[year] / 100
+        expected = equity_series[year] * roe_norm[year] / 100
         if expected == 0 or raw_val == 0:
             fixed[year] = raw_val
             continue
@@ -62,8 +119,11 @@ def normalize_net_profit_with_anchor(net_profit_raw, equity_series, roe_series):
             fixed[year] = raw_val
             continue
         power = round(np.log10(ratio))
-        divisor = 10 ** power
-        fixed[year] = round(raw_val / divisor, 2)
+        if power == 0:
+            fixed[year] = raw_val
+        else:
+            divisor = 10 ** power
+            fixed[year] = round(raw_val / divisor, 2)
     return pd.Series(fixed)
 
 
@@ -97,45 +157,43 @@ def _safe_fetch(fn, default=None):
         return default if default is not None else pd.DataFrame()
 
 
-def _merge_finance_dfs(dfs):
-    """
-    Gom DataFrame BCTC từ nhiều nguồn (KBS/VCI/DNSE).
-    Nguồn đầu làm base; các nguồn sau chỉ bổ sung cột NĂM còn thiếu,
-    không ghi đè dữ liệu đã có. Join theo item_id (ưu tiên) hoặc item.
-    """
-    valid = [df for df in dfs if df is not None and not df.empty]
-    if not valid:
+def _merge_financial_dataframes(dfs: list):
+    dfs = [d for d in dfs if d is not None and not d.empty]
+    if not dfs:
         return pd.DataFrame()
-    base = valid[0].copy()
+    if len(dfs) == 1:
+        return dfs[0]
+
+    def re_fullmatch_year(c):
+        c_str = str(c).strip()
+        return c_str.replace('-', '').replace('Q', '').isdigit() and len(c_str) >= 4
 
     def _year_cols(df):
-        return [c for c in df.columns
-                if re.match(r'^20\d{2}(\.0+)?$', str(c).strip())]
+        return [c for c in df.columns if re_fullmatch_year(c)]
 
-    base_year_strs = {str(c).strip()[:4] for c in _year_cols(base)}
+    dfs_sorted = sorted(dfs, key=lambda d: len(_year_cols(d)), reverse=True)
+    merged = dfs_sorted[0].copy()
+    key_col = 'item' if 'item' in merged.columns else merged.columns[0]
+    merged['_key_norm'] = merged[key_col].astype(str).str.lower().str.strip()
 
-    for extra in valid[1:]:
-        join_key = next(
-            (k for k in ['item_id', 'item'] if k in base.columns and k in extra.columns),
-            None,
-        )
-        if join_key is None:
+    for other in dfs_sorted[1:]:
+        other_key_col = 'item' if 'item' in other.columns else other.columns[0]
+        other_year_cols = [c for c in _year_cols(other) if c not in merged.columns]
+        if not other_year_cols:
             continue
-        for yc in _year_cols(extra):
-            yr_str = str(yc).strip()[:4]
-            if yr_str in base_year_strs:
-                continue  # năm đã có trong base, giữ nguyên
-            extra_col = extra[[join_key, yc]].rename(columns={yc: yr_str})
-            base = base.merge(extra_col, on=join_key, how='left')
-            base_year_strs.add(yr_str)
+        other = other.copy()
+        other['_key_norm'] = other[other_key_col].astype(str).str.lower().str.strip()
+        sub = other[['_key_norm'] + other_year_cols]
+        merged = merged.merge(sub, on='_key_norm', how='left')
 
-    return base
+    merged = merged.drop(columns=['_key_norm'])
+    return merged
 
 
-def _fetch_income_statement(ticker, source, period='year', limit=DEFAULT_YEAR_LIMIT):
-    all_sources = [source] + [s for s in SOURCE_FALLBACK_ORDER if s != source]
+def _fetch_income_statement(ticker, source, period='year', limit=FETCH_LIMIT_YEAR):
+    sources_to_try = [source] + [s for s in SOURCE_FALLBACK_ORDER if s != source]
     dfs = []
-    for src in all_sources:
+    for src in sources_to_try:
         try:
             f = Finance(symbol=ticker, source=src, period=period)
             try:
@@ -146,13 +204,13 @@ def _fetch_income_statement(ticker, source, period='year', limit=DEFAULT_YEAR_LI
                 dfs.append(df)
         except Exception:
             continue
-    return _merge_finance_dfs(dfs)
+    return _merge_financial_dataframes(dfs)
 
 
-def _fetch_ratio(ticker, source, period='year', limit=DEFAULT_YEAR_LIMIT):
-    all_sources = [source] + [s for s in SOURCE_FALLBACK_ORDER if s != source]
+def _fetch_ratio(ticker, source, period='year', limit=FETCH_LIMIT_YEAR):
+    sources_to_try = [source] + [s for s in SOURCE_FALLBACK_ORDER if s != source]
     dfs = []
-    for src in all_sources:
+    for src in sources_to_try:
         try:
             f = Finance(symbol=ticker, source=src, period=period)
             try:
@@ -163,13 +221,13 @@ def _fetch_ratio(ticker, source, period='year', limit=DEFAULT_YEAR_LIMIT):
                 dfs.append(df)
         except Exception:
             continue
-    return _merge_finance_dfs(dfs)
+    return _merge_financial_dataframes(dfs)
 
 
-def _fetch_cashflow(ticker, source, period='year', limit=DEFAULT_YEAR_LIMIT):
-    all_sources = [source] + [s for s in SOURCE_FALLBACK_ORDER if s != source]
+def _fetch_cashflow(ticker, source, period='year', limit=FETCH_LIMIT_YEAR):
+    sources_to_try = [source] + [s for s in SOURCE_FALLBACK_ORDER if s != source]
     dfs = []
-    for src in all_sources:
+    for src in sources_to_try:
         try:
             f = Finance(symbol=ticker, source=src, period=period)
             try:
@@ -180,13 +238,13 @@ def _fetch_cashflow(ticker, source, period='year', limit=DEFAULT_YEAR_LIMIT):
                 dfs.append(df)
         except Exception:
             continue
-    return _merge_finance_dfs(dfs)
+    return _merge_financial_dataframes(dfs)
 
 
-def _fetch_balance_sheet(ticker, source, period='year', limit=DEFAULT_YEAR_LIMIT):
-    all_sources = [source] + [s for s in SOURCE_FALLBACK_ORDER if s != source]
+def _fetch_balance_sheet(ticker, source, period='year', limit=FETCH_LIMIT_YEAR):
+    sources_to_try = [source] + [s for s in SOURCE_FALLBACK_ORDER if s != source]
     dfs = []
-    for src in all_sources:
+    for src in sources_to_try:
         try:
             f = Finance(symbol=ticker, source=src, period=period)
             try:
@@ -197,7 +255,270 @@ def _fetch_balance_sheet(ticker, source, period='year', limit=DEFAULT_YEAR_LIMIT
                 dfs.append(df)
         except Exception:
             continue
-    return _merge_finance_dfs(dfs)
+    return _merge_financial_dataframes(dfs)
+
+
+def _build_shares_series(outstanding_shares_series, net_profit_series, eps_series):
+    """
+    Trả về Series số CP lưu hành (đơn vị: cổ phiếu lẻ) theo từng năm.
+    Tầng 1: từ ratio API (outstanding_shares_series).
+    Tầng 2: back-calc LNST(tỷ)*1e9 / EPS(đ) cho từng năm còn thiếu.
+    """
+    result = {}
+    if outstanding_shares_series is not None and not outstanding_shares_series.empty:
+        for yr, val in outstanding_shares_series.items():
+            if pd.notna(val) and val > 0:
+                result[yr] = float(val)
+    if net_profit_series is not None and not net_profit_series.empty \
+            and eps_series is not None and not eps_series.empty:
+        for yr in net_profit_series.index:
+            if yr in result:
+                continue
+            np_ty = net_profit_series.get(yr)
+            eps_d = eps_series.get(yr)
+            if (np_ty is not None and eps_d is not None
+                    and pd.notna(np_ty) and pd.notna(eps_d)
+                    and eps_d > 0 and np_ty > 0):
+                backcalc = (np_ty * 1e9) / eps_d
+                if 1e8 < backcalc < 1e11:
+                    result[yr] = backcalc
+    if not result:
+        return pd.Series(dtype=float)
+    return pd.Series(result, dtype=float).sort_index()
+
+
+def _parse_year_from_col(col_str: str):
+    """
+    Trích xuất năm (int) từ tên cột — xử lý đủ mọi định dạng:
+      "2021", "2021/12", "12/2021", "31/12/2021", "Q1/2021", "2021-Q1"
+    Trả về int năm nếu tìm được, None nếu không.
+    """
+    import re as _re
+    matches = _re.findall(r'\b((?:19|20)\d{2})\b', str(col_str).strip())
+    if matches:
+        return int(matches[0])
+    return None
+
+
+# ════════════════════════════════════════════════════════════════════════
+# DNSE FALLBACK — public JSON API, không cần auth
+# Endpoint: https://api.dnse.com.vn/analysis-api/v1/analysis/financial-report
+# ════════════════════════════════════════════════════════════════════════
+def _fetch_dnse_financials(ticker: str, allowed_years: set) -> dict:
+    """
+    Fetch dữ liệu tài chính từ DNSE public API.
+    Trả về dict {revenue, net_profit, equity, total_assets} — mỗi key là
+    pd.Series (index = int năm, values = tỷ VNĐ).
+    """
+    import requests, re as _re
+
+    base_url = "https://api.dnse.com.vn/analysis-api/v1/analysis/financial-report"
+    headers  = {"Accept": "application/json", "User-Agent": "Mozilla/5.0"}
+    result   = {k: {} for k in ["revenue", "net_profit", "equity", "total_assets"]}
+
+    for rpt_type in ["IS", "BS"]:
+        try:
+            resp = requests.get(
+                base_url,
+                params={"symbol": ticker, "type": rpt_type, "period": "YEARLY"},
+                headers=headers,
+                timeout=10,
+            )
+            if resp.status_code != 200:
+                continue
+            data = resp.json()
+            periods = data.get("data") or data.get("periods") or []
+            for period in periods:
+                yr = period.get("year") or period.get("period")
+                if yr is None:
+                    yr_raw = str(period.get("periodName", ""))
+                    m = _re.search(r'\b(20\d{2})\b', yr_raw)
+                    yr = int(m.group(1)) if m else None
+                if yr is None or int(yr) not in allowed_years:
+                    continue
+                yr = int(yr)
+                items = period.get("items") or period.get("financialItems") or []
+                for item in items:
+                    name = str(item.get("name", "") or item.get("itemName", "")).lower().strip()
+                    val  = item.get("value") or item.get("amount")
+                    if val is None:
+                        continue
+                    try:
+                        val = float(val)
+                    except Exception:
+                        continue
+                    if any(k in name for k in ["doanh thu thuần", "net revenue", "revenue"]):
+                        if "giá vốn" not in name and "chi phí" not in name:
+                            result["revenue"][yr] = val
+                    elif any(k in name for k in ["lợi nhuận sau thuế", "lnst", "net profit", "net income"]):
+                        if "trước" not in name and "thiểu số" not in name:
+                            result["net_profit"][yr] = val
+                    elif any(k in name for k in ["vốn chủ sở hữu", "equity", "total equity"]):
+                        if "thiểu số" not in name:
+                            result["equity"][yr] = val
+                    elif any(k in name for k in ["tổng tài sản", "total assets"]):
+                        result["total_assets"][yr] = val
+        except Exception:
+            continue
+
+    return {k: pd.Series(v, dtype=float) for k, v in result.items()}
+
+
+# ════════════════════════════════════════════════════════════════════════
+# TẦNG 0b — Raw quarterly aggregation từ VCI/KBS/DNSE cho năm hiện tại (2025)
+#
+# Vấn đề: build_financial_table() convert index quarterly sang key kỳ trước
+# khi ta lọc → cần scan raw. Fix: fetch raw DataFrame quarterly, scan CỘT có
+# "2025" trong tên, tìm DÒNG revenue/net_profit/equity/total_assets, cộng.
+# ════════════════════════════════════════════════════════════════════════
+def _fetch_raw_quarterly_for_year(ticker: str, target_year: int) -> dict:
+    """
+    Fetch quarterly raw DataFrames từ VCI/KBS/DNSE, aggregate thành annual.
+
+    - Revenue & LNST: cộng các quý có dữ liệu (annualize *4/n nếu là năm hiện
+      tại và chưa đủ 4 quý).
+    - Equity & Total Assets: lấy quý gần nhất (stock variable).
+
+    Trả về dict {field: float_ty_vnd} hoặc {} nếu không lấy được.
+    """
+    import re as _re
+
+    current_year = datetime.today().year
+    result_by_source = {}
+
+    REV_KW    = ['doanh thu thuần', 'tổng doanh thu', 'net revenue', 'revenue',
+                 'thu nhập lãi thuần', 'tổng thu nhập hoạt động',
+                 'thu nhập lãi và các khoản thu nhập tương tự']
+    REV_EXCL  = ['giá vốn', 'chi phí', 'cost']
+    NP_KW     = ['lợi nhuận sau thuế', 'lnst', 'net profit', 'net income',
+                 'profit after tax', 'lãi sau thuế']
+    NP_EXCL   = ['trước thuế', 'thiểu số', 'minority', 'before tax']
+    EQ_KW     = ['vốn chủ sở hữu', 'equity', 'total equity', 'tổng vốn chủ sở hữu']
+    EQ_EXCL   = ['thiểu số', 'minority']
+    TA_KW     = ['tổng cộng tài sản', 'tổng tài sản', 'total assets']
+
+    def _find_row_raw(df, kw_list, excl=None):
+        if df is None or df.empty:
+            return None
+        label_col = 'item' if 'item' in df.columns else df.columns[0]
+        for kw in kw_list:
+            for idx, row in df.iterrows():
+                label = str(row.get(label_col, idx) if label_col in df.columns else idx).lower()
+                if kw.lower() in label:
+                    if excl and any(ex.lower() in label for ex in excl):
+                        continue
+                    return row
+        return None
+
+    def _extract_year_cols(df, target_year):
+        cols = {}
+        for col in df.columns:
+            col_str = str(col).strip()
+            yr = _parse_year_from_col(col_str)
+            if yr != target_year:
+                continue
+            q_match = _re.search(r'[Qq](\d)', col_str)
+            q_order = int(q_match.group(1)) if q_match else 99
+            cols[col] = q_order
+        return cols
+
+    def _safe_float(val):
+        try:
+            if val is None or (isinstance(val, float) and np.isnan(val)):
+                return None
+            return float(str(val).replace(',', '').strip())
+        except Exception:
+            return None
+
+    def _norm_unit(v):
+        if abs(v) > 5e11:
+            return v / 1e9
+        if abs(v) > 5e5:
+            return v / 1e3
+        return v
+
+    def _aggregate_from_raw(df_income, df_balance):
+        out = {}
+        year_cols_income  = _extract_year_cols(df_income,  target_year) if df_income  is not None and not df_income.empty  else {}
+        year_cols_balance = _extract_year_cols(df_balance, target_year) if df_balance is not None and not df_balance.empty else {}
+
+        # Revenue / Net Profit (flow: cộng quý)
+        for key, kw, excl, qkey in [
+            ('revenue',    REV_KW, REV_EXCL, '_rev_q_count'),
+            ('net_profit', NP_KW,  NP_EXCL,  '_np_q_count'),
+        ]:
+            if not year_cols_income:
+                continue
+            row = _find_row_raw(df_income, kw, excl)
+            if row is None:
+                continue
+            vals = []
+            for col in sorted(year_cols_income, key=lambda c: year_cols_income[c]):
+                v = _safe_float(row.get(col))
+                if v is not None:
+                    vals.append(v)
+            if not vals:
+                continue
+            n = len(vals)
+            if target_year == current_year or n == 4:
+                raw_sum = sum(vals)
+                med = pd.Series(vals).abs().median()
+                if med > 5e11:
+                    raw_sum /= 1e9
+                elif med > 5e5:
+                    raw_sum /= 1e3
+                out[key] = round(raw_sum * 4 / n, 2)
+                out[qkey] = n
+
+        # Equity / Total Assets (stock: quý mới nhất)
+        for key, kw, excl in [
+            ('equity',       EQ_KW, EQ_EXCL),
+            ('total_assets', TA_KW, None),
+        ]:
+            if not year_cols_balance:
+                continue
+            row = _find_row_raw(df_balance, kw, excl)
+            if row is None:
+                continue
+            for col in sorted(year_cols_balance, key=lambda c: year_cols_balance[c], reverse=True):
+                v = _safe_float(row.get(col))
+                if v is not None:
+                    out[key] = round(_norm_unit(v), 2)
+                    break
+
+        return out
+
+    for src in ['VCI', 'KBS', 'DNSE']:
+        try:
+            f = Finance(symbol=ticker, source=src, period='quarter')
+            try:
+                df_inc_raw = f.income_statement(period='quarter', limit=20)
+            except TypeError:
+                df_inc_raw = f.income_statement(period='quarter')
+            try:
+                df_bs_raw = f.balance_sheet(period='quarter', limit=20)
+            except TypeError:
+                df_bs_raw = f.balance_sheet(period='quarter')
+
+            if (df_inc_raw is None or df_inc_raw.empty) and (df_bs_raw is None or df_bs_raw.empty):
+                continue
+
+            agg = _aggregate_from_raw(df_inc_raw, df_bs_raw)
+            if agg:
+                result_by_source[src] = agg
+                if all(k in agg for k in ['revenue', 'net_profit', 'equity', 'total_assets']):
+                    break
+        except Exception:
+            continue
+
+    merged = {}
+    for src in ['VCI', 'KBS', 'DNSE']:
+        if src not in result_by_source:
+            continue
+        for k, v in result_by_source[src].items():
+            if k not in merged:
+                merged[k] = v
+    return merged
 
 
 @st.cache_data(ttl=1800)
@@ -205,16 +526,21 @@ def execute_equity_research_pipeline(ticker):
     try:
         q_engine, f_engine, c_engine, source_used = _build_engines_with_fallback(ticker)
 
+        allowed_years = ALLOWED_YEARS  # {2021, 2022, 2023, 2024, 2025}
+
         end_date   = datetime.today().strftime('%Y-%m-%d')
         start_date = (datetime.today() - timedelta(days=365 * 3)).strftime('%Y-%m-%d')
 
         tasks = {
             "price":      lambda: q_engine.history(start=start_date, end=end_date, interval='1D'),
             "overview":   lambda: c_engine.overview(),
-            "income_y":   lambda: _fetch_income_statement(ticker, source_used, period='year', limit=FETCH_YEAR_LIMIT),
-            "cashflow_y": lambda: _fetch_cashflow(ticker,          source_used, period='year', limit=FETCH_YEAR_LIMIT),
-            "ratio_y":    lambda: _fetch_ratio(ticker,             source_used, period='year', limit=FETCH_YEAR_LIMIT),
-            "balance_y":  lambda: _fetch_balance_sheet(ticker,     source_used, period='year', limit=FETCH_YEAR_LIMIT),
+            "income_y":   lambda: _fetch_income_statement(ticker, source_used, period='year',    limit=FETCH_LIMIT_YEAR),
+            "cashflow_y": lambda: _fetch_cashflow(ticker,          source_used, period='year',    limit=FETCH_LIMIT_YEAR),
+            "ratio_y":    lambda: _fetch_ratio(ticker,             source_used, period='year',    limit=FETCH_LIMIT_YEAR),
+            "income_q":   lambda: _fetch_income_statement(ticker,  source_used, period='quarter', limit=20),
+            "ratio_q":    lambda: _fetch_ratio(ticker,             source_used, period='quarter', limit=20),
+            "balance_y":  lambda: _fetch_balance_sheet(ticker,     source_used, period='year',    limit=FETCH_LIMIT_YEAR),
+            "balance_q":  lambda: _fetch_balance_sheet(ticker,     source_used, period='quarter', limit=20),
             "news":       lambda: c_engine.news(),
         }
 
@@ -233,7 +559,10 @@ def execute_equity_research_pipeline(ticker):
         df_income    = results.get("income_y",   pd.DataFrame())
         df_cashflow  = results.get("cashflow_y", pd.DataFrame())
         df_ratio     = results.get("ratio_y",    pd.DataFrame())
+        df_income_q  = results.get("income_q",   pd.DataFrame())
+        df_ratio_q   = results.get("ratio_q",    pd.DataFrame())
         df_balance   = results.get("balance_y",  pd.DataFrame())
+        df_balance_q = results.get("balance_q",  pd.DataFrame())
 
         if df_price is None or df_price.empty:
             st.error(f"Không có dữ liệu giá lịch sử cho mã {ticker}.")
@@ -250,85 +579,462 @@ def execute_equity_research_pipeline(ticker):
 
         fin5 = build_5y_financial_table(df_income, df_balance, df_ratio, ticker=ticker)
 
-        revenue_series          = normalize_to_billion_vnd(fin5['revenue'])
-        equity_series           = normalize_to_billion_vnd(fin5['equity'])
-        total_assets_series     = normalize_to_billion_vnd(fin5['total_assets'])
-        net_profit_series       = normalize_net_profit_with_anchor(
+        revenue_series            = normalize_to_billion_vnd(fin5['revenue'])
+        equity_series             = normalize_to_billion_vnd(fin5['equity'])
+        total_assets_series       = normalize_to_billion_vnd(fin5['total_assets'])
+        net_profit_series         = normalize_net_profit_with_anchor(
             fin5['net_profit'], equity_series, fin5['roe'])
-        eps_series              = fin5['eps']
-        bvps_series             = fin5['bvps']
-        roe_series               = fin5['roe']
-        roa_series               = fin5['roa']
-        pe_series                = fin5['pe']
-        pb_series                = fin5['pb']
+        eps_series                = fin5['eps']
+        bvps_series               = fin5['bvps']
+        roe_series                = fin5['roe']
+        roa_series                = fin5['roa']
+        pe_series                 = fin5['pe']
+        pb_series                 = fin5['pb']
         outstanding_shares_series = fin5['outstanding_shares']
+
+        def _filter_years(s):
+            """Giữ lại chỉ các năm trong ALLOWED_YEARS (2021–2025), chuẩn hoá index về int."""
+            if s is None or s.empty:
+                return s
+            try:
+                s = s.copy()
+                s.index = s.index.map(lambda x: int(str(x).strip().split('.')[0].split('-')[0]))
+            except Exception:
+                pass
+            return s[s.index.isin(allowed_years)]
+
+        revenue_series            = _filter_years(revenue_series)
+        equity_series             = _filter_years(equity_series)
+        total_assets_series       = _filter_years(total_assets_series)
+        net_profit_series         = _filter_years(net_profit_series)
+        eps_series                = _filter_years(eps_series)
+        bvps_series               = _filter_years(bvps_series)
+        roe_series                = _filter_years(roe_series)
+        roa_series                = _filter_years(roa_series)
+        pe_series                 = _filter_years(pe_series)
+        pb_series                 = _filter_years(pb_series)
+        outstanding_shares_series = _filter_years(outstanding_shares_series)
+
+        outstanding_shares_series = _build_shares_series(
+            outstanding_shares_series, net_profit_series, eps_series)
+        outstanding_shares_series = _filter_years(outstanding_shares_series)
 
         if equity_series.empty and not total_assets_series.empty:
             total_liab_series = normalize_to_billion_vnd(find_row_series(
                 df_balance,
                 ['tổng cộng nợ phải trả', 'tổng nợ phải trả', 'total liabilities'],
                 exclude_keywords=['vốn chủ sở hữu']))
+            total_liab_series = _filter_years(total_liab_series)
             if not total_liab_series.empty:
                 common_years = total_assets_series.index.intersection(total_liab_series.index)
                 if len(common_years) > 0:
                     equity_series = (total_assets_series.loc[common_years]
                                      - total_liab_series.loc[common_years])
 
-        if equity_series.empty or total_assets_series.empty:
-            cafef_data = fetch_cafef_balance_sheet_5y(ticker, end_year=datetime.today().year)
-            if equity_series.empty and not cafef_data['equity'].empty:
-                equity_series = cafef_data['equity']
-            if total_assets_series.empty and not cafef_data['total_assets'].empty:
-                total_assets_series = cafef_data['total_assets']
+        # ═════════════════════════════════════════════════════════════════
+        # TẦNG 0 — Aggregate năm thiếu từ quarterly data (vnstock đã fetch)
+        # ═════════════════════════════════════════════════════════════════
+        def _aggregate_year_from_quarters(target_year: int) -> dict:
+            if df_income_q is None or df_income_q.empty:
+                return {}
+            try:
+                _fq = build_financial_table(df_income_q, df_balance_q, df_ratio_q,
+                                            ticker=ticker, period='quarter')
+            except Exception:
+                return {}
 
-        # ── BÙ NĂM CÒN THIẾU (thường là năm xa nhất, VD 2021) ──────────────
-        # vnstock (VCI/KBS/DNSE) thường chỉ trả về 4 kỳ gần nhất cho
-        # income_statement/ratio (đôi khi cả balance_sheet), BẤT KỂ tham số
-        # limit truyền vào — không phải lỗi allowed_years hay
-        # DEFAULT_YEAR_LIMIT. 2 khối fallback CafeF phía trên chỉ kích hoạt
-        # khi series RỖNG HOÀN TOÀN, không xử lý trường hợp series có dữ
-        # liệu nhưng THIẾU đúng 1 năm cụ thể — đây là khối xử lý đúng
-        # trường hợp đó, dùng fetch_cafef_yearly_full() cào đủ cả 4 chỉ
-        # tiêu cho riêng (các) năm bị thiếu.
-        def _merge_missing_years(base_series, extra_series):
-            if extra_series is None or extra_series.empty:
-                return base_series
-            if base_series is None or base_series.empty:
-                return extra_series
-            merged = pd.concat([base_series, extra_series]).sort_index()
-            return merged[~merged.index.duplicated(keep='first')]  # ưu tiên số liệu gốc
+            def _filter_series_by_year(s):
+                if s is None or s.empty:
+                    return pd.Series(dtype=float)
+                mask = []
+                for idx in s.index:
+                    yr = None
+                    try:
+                        yr_int = int(str(idx).strip().split('.')[0].split('-')[0])
+                        if 2000 <= yr_int <= 2099:
+                            yr = yr_int
+                    except Exception:
+                        pass
+                    if yr is None:
+                        yr = _parse_year_from_col(str(idx))
+                    mask.append(yr == target_year)
+                try:
+                    return s[mask]
+                except Exception:
+                    return pd.Series(dtype=float)
 
-        # ⚠️ FIX: Trước đây `if not is_bank:` loại trừ NGÂN HÀNG khỏi TOÀN BỘ
-        # khối bù năm thiếu — nhưng lý do ban đầu (Doanh thu thuần không có
-        # ý nghĩa kinh tế với ngân hàng) chỉ áp dụng cho riêng field
-        # "revenue", KHÔNG áp dụng cho Vốn CSH/Tổng tài sản/LNST — những
-        # field này hoàn toàn hợp lệ và CẦN được bù cho ngân hàng. Việc
-        # loại trừ cả khối khiến ngân hàng KHÔNG BAO GIỜ được bù năm thiếu
-        # (VD 2021), dù equity/total_assets/net_profit hoàn toàn có thể
-        # cào được từ CafeF bình thường.
-        _expected_years = set(TABLE_YEARS)
+            _rev_q = normalize_to_billion_vnd(_filter_series_by_year(_fq.get('revenue',     pd.Series(dtype=float))))
+            _np_q  = normalize_to_billion_vnd(_filter_series_by_year(_fq.get('net_profit',  pd.Series(dtype=float))))
+            _eq_q  = normalize_to_billion_vnd(_filter_series_by_year(_fq.get('equity',      pd.Series(dtype=float))))
+            _ta_q  = normalize_to_billion_vnd(_filter_series_by_year(_fq.get('total_assets',pd.Series(dtype=float))))
+            _eps_q = _filter_series_by_year(_fq.get('eps', pd.Series(dtype=float)))
 
-        # Kiểm tra từng series riêng — KHÔNG dùng union vì nếu equity có 2021
-        # nhưng revenue/net_profit thiếu, union sẽ bỏ qua 2021 và không cào CafeF.
-        def _yr_missing(s):
-            if s is None or s.empty:
-                return _expected_years
-            return _expected_years - set(s.dropna().index)
+            out = {}
+            current_year = datetime.today().year
+            for key, s in [('revenue', _rev_q), ('net_profit', _np_q)]:
+                valid = s.dropna()
+                if valid.empty:
+                    continue
+                n = len(valid)
+                if target_year < current_year and n < 4:
+                    continue
+                out[key]         = round(float(valid.sum()) * 4 / n, 2)
+                out[f'_{key}_q'] = n
+            if not _eq_q.dropna().empty:
+                out['equity']       = round(float(_eq_q.dropna().iloc[-1]), 2)
+            if not _ta_q.dropna().empty:
+                out['total_assets'] = round(float(_ta_q.dropna().iloc[-1]), 2)
+            if not _eps_q.dropna().empty:
+                n_eps = len(_eps_q.dropna())
+                if not (target_year < current_year and n_eps < 4):
+                    out['eps'] = round(float(_eps_q.dropna().sum()) * 4 / n_eps, 2)
+            return out
 
-        _cafef_needed = sorted(
-            _yr_missing(net_profit_series)
-            | _yr_missing(equity_series)
-            | _yr_missing(total_assets_series)
-            | (_yr_missing(revenue_series) if not is_bank else set())
+        _years_q0_check = sorted(
+            allowed_years - (
+                set(revenue_series.index)
+                & set(net_profit_series.index)
+                & set(equity_series.index)
+                & set(total_assets_series.index)
+            )
+        )
+        for _yr0 in _years_q0_check:
+            _agg = _aggregate_year_from_quarters(_yr0)
+            if not _agg:
+                continue
+            for _field, _series in [
+                ('revenue',      revenue_series),
+                ('net_profit',   net_profit_series),
+                ('equity',       equity_series),
+                ('total_assets', total_assets_series),
+                ('eps',          eps_series),
+            ]:
+                if _field in _agg and _agg[_field] is not None:
+                    if _yr0 not in _series.index or pd.isna(_series.get(_yr0)):
+                        _series[_yr0] = _agg[_field]
+        revenue_series      = revenue_series.sort_index()
+        net_profit_series   = net_profit_series.sort_index()
+        equity_series       = equity_series.sort_index()
+        total_assets_series = total_assets_series.sort_index()
+        eps_series          = eps_series.sort_index()
+
+        # ═════════════════════════════════════════════════════════════════
+        # TẦNG 0b — Raw quarterly aggregation từ VCI/KBS cho năm còn thiếu
+        # ═════════════════════════════════════════════════════════════════
+        _years_need_0b = sorted(
+            allowed_years - (
+                set(revenue_series.index)
+                & set(net_profit_series.index)
+                & set(equity_series.index)
+                & set(total_assets_series.index)
+            )
         )
 
-        if _cafef_needed:
-            _cafef_full = fetch_cafef_yearly_full(ticker, _cafef_needed)
-            if not is_bank:
-                revenue_series = _merge_missing_years(revenue_series, _cafef_full.get('revenue'))
-            net_profit_series   = _merge_missing_years(net_profit_series,   _cafef_full.get('net_profit'))
-            equity_series       = _merge_missing_years(equity_series,       _cafef_full.get('equity'))
-            total_assets_series = _merge_missing_years(total_assets_series, _cafef_full.get('total_assets'))
+        _raw_q_debug = {}
+        for _yr_0b in _years_need_0b:
+            try:
+                _raw_agg = _fetch_raw_quarterly_for_year(ticker, _yr_0b)
+                _raw_q_debug[_yr_0b] = _raw_agg
+                for _field, _series in [
+                    ('revenue',      revenue_series),
+                    ('net_profit',   net_profit_series),
+                    ('equity',       equity_series),
+                    ('total_assets', total_assets_series),
+                ]:
+                    if _field in _raw_agg and _raw_agg[_field] is not None:
+                        if _yr_0b not in _series.index or pd.isna(_series.get(_yr_0b)):
+                            _series[_yr_0b] = _raw_agg[_field]
+            except Exception as _e0b:
+                _raw_q_debug[_yr_0b] = {"error": str(_e0b)}
+
+        revenue_series      = revenue_series.sort_index()
+        net_profit_series   = net_profit_series.sort_index()
+        equity_series       = equity_series.sort_index()
+        total_assets_series = total_assets_series.sort_index()
+
+        # ─────────────────────────────────────────────────────────────────
+        # _missing_any: năm chưa đủ cả 4 field → gọi CafeF
+        # ─────────────────────────────────────────────────────────────────
+        _years_have_all = (
+            set(revenue_series.index)
+            & set(net_profit_series.index)
+            & set(equity_series.index)
+            & set(total_assets_series.index)
+        )
+        _missing_any = sorted(allowed_years - _years_have_all)
+
+        _cf_cf = pd.DataFrame()
+
+        def _merge_series(base: pd.Series, patch: pd.Series) -> pd.Series:
+            for yr, val in patch.items():
+                if pd.isna(val):
+                    continue
+                if yr not in base.index or pd.isna(base.get(yr)):
+                    base[yr] = val
+            return base.sort_index()
+
+        def _cafef_extract_series(df, keywords, exclude=None):
+            if df is None or df.empty:
+                return pd.Series(dtype=float)
+            for kw in keywords:
+                matches = [i for i in df.index if kw.lower() in str(i).lower()]
+                if exclude:
+                    matches = [i for i in matches
+                               if not any(ex.lower() in str(i).lower() for ex in exclude)]
+                if not matches:
+                    continue
+                row = df.loc[matches[0]]
+                s = {}
+                for col in row.index:
+                    yr = _parse_year_from_col(str(col))
+                    if yr is None:
+                        continue
+                    try:
+                        val = row[col]
+                        if val is not None and str(val).strip() not in ('', 'None', 'nan'):
+                            s[yr] = float(str(val).replace(',', ''))
+                    except Exception:
+                        pass
+                if s:
+                    return pd.Series(s, dtype=float)
+            return pd.Series(dtype=float)
+
+        # ─────────────────────────────────────────────────────────────────
+        # TẦNG 1 — CafeF fallback
+        # ─────────────────────────────────────────────────────────────────
+        _cafef_debug = {}
+        if _missing_any:
+            try:
+                _cafef_full = fetch_cafef_yearly_full(ticker, years=list(allowed_years))
+
+                _rev_cf = _filter_years(_cafef_full.get("revenue",      pd.Series(dtype=float)))
+                _np_cf  = _filter_years(_cafef_full.get("net_profit",   pd.Series(dtype=float)))
+                _eq_cf  = _filter_years(_cafef_full.get("equity",       pd.Series(dtype=float)))
+                _ta_cf  = _filter_years(_cafef_full.get("total_assets", pd.Series(dtype=float)))
+
+                _cafef_debug = {
+                    "revenue":      dict(_rev_cf),
+                    "net_profit":   dict(_np_cf),
+                    "equity":       dict(_eq_cf),
+                    "total_assets": dict(_ta_cf),
+                }
+
+                revenue_series      = _merge_series(revenue_series,      _rev_cf)
+                net_profit_series   = _merge_series(net_profit_series,   _np_cf)
+                equity_series       = _merge_series(equity_series,       _eq_cf)
+                total_assets_series = _merge_series(total_assets_series, _ta_cf)
+
+                _eps_cf_raw = _cafef_full.get("eps", pd.Series(dtype=float))
+                if _eps_cf_raw is not None and not _eps_cf_raw.empty:
+                    _eps_cf = _filter_years(_eps_cf_raw)
+                    eps_series = _merge_series(eps_series, _eps_cf)
+
+            except Exception as _cafef_exc:
+                _cafef_debug["error"] = str(_cafef_exc)
+
+        # ─────────────────────────────────────────────────────────────────
+        # TẦNG 2 — DNSE fallback (public API, không cần auth)
+        # ─────────────────────────────────────────────────────────────────
+        _missing_after_cafef = sorted(allowed_years - (
+            set(revenue_series.index)
+            & set(net_profit_series.index)
+            & set(equity_series.index)
+            & set(total_assets_series.index)
+        ))
+
+        _dnse_debug = {}
+        if _missing_after_cafef:
+            try:
+                _dnse_data = _fetch_dnse_financials(ticker, allowed_years)
+                _rev_dn  = _filter_years(normalize_to_billion_vnd(_dnse_data.get("revenue",      pd.Series(dtype=float))))
+                _np_dn   = _filter_years(normalize_to_billion_vnd(_dnse_data.get("net_profit",   pd.Series(dtype=float))))
+                _eq_dn   = _filter_years(normalize_to_billion_vnd(_dnse_data.get("equity",       pd.Series(dtype=float))))
+                _ta_dn   = _filter_years(normalize_to_billion_vnd(_dnse_data.get("total_assets", pd.Series(dtype=float))))
+
+                _dnse_debug = {
+                    "revenue":      dict(_rev_dn),
+                    "net_profit":   dict(_np_dn),
+                    "equity":       dict(_eq_dn),
+                    "total_assets": dict(_ta_dn),
+                }
+
+                revenue_series      = _merge_series(revenue_series,      _rev_dn)
+                net_profit_series   = _merge_series(net_profit_series,   _np_dn)
+                equity_series       = _merge_series(equity_series,       _eq_dn)
+                total_assets_series = _merge_series(total_assets_series, _ta_dn)
+            except Exception as _dnse_exc:
+                _dnse_debug["error"] = str(_dnse_exc)
+
+        # ─────────────────────────────────────────────────────────────────
+        # TẦNG 3 — Website scraping (TCBS API + Vietstock backup)
+        # ─────────────────────────────────────────────────────────────────
+        _missing_after_dnse = sorted(allowed_years - (
+            set(revenue_series.index)
+            & set(net_profit_series.index)
+            & set(equity_series.index)
+            & set(total_assets_series.index)
+        ))
+
+        if _missing_after_dnse:
+            try:
+                _ws_full = fetch_website_financial_data(
+                    ticker,
+                    n_years=FETCH_LIMIT_YEAR,
+                    required_years=allowed_years,
+                )
+                _ws_income = _ws_full.get("income_statement", pd.DataFrame())
+                _ws_bs     = _ws_full.get("balance_sheet",    pd.DataFrame())
+                _ws_cf_    = _ws_full.get("cash_flow",        pd.DataFrame())
+
+                def _ws_extract(df, keywords, exclude=None):
+                    if df is None or df.empty:
+                        return pd.Series(dtype=float)
+                    for kw in keywords:
+                        matches = [i for i in df.index if kw.lower() in str(i).lower()]
+                        if exclude:
+                            matches = [i for i in matches
+                                       if not any(ex.lower() in str(i).lower()
+                                                  for ex in exclude)]
+                        if not matches:
+                            continue
+                        row = df.loc[matches[0]]
+                        s = {}
+                        for col in row.index:
+                            yr = _parse_year_from_col(str(col))
+                            if yr is None:
+                                continue
+                            try:
+                                val = row[col]
+                                if val is not None and str(val).strip() not in ('', 'None', 'nan'):
+                                    s[yr] = float(str(val).replace(',', ''))
+                            except Exception:
+                                pass
+                        if s:
+                            return pd.Series(s, dtype=float)
+                    return pd.Series(dtype=float)
+
+                if not _ws_income.empty:
+                    if is_bank:
+                        _ws_rev_kw = ['thu nhập lãi và các khoản thu nhập tương tự',
+                                      'tổng thu nhập hoạt động', 'thu nhập lãi thuần']
+                    else:
+                        _ws_rev_kw = ['doanh thu thuần', 'tổng doanh thu', 'net revenue',
+                                      'doanh thu bán hàng', 'revenue']
+                    _ws_rev = _filter_years(normalize_to_billion_vnd(
+                        _ws_extract(_ws_income, _ws_rev_kw, exclude=['giá vốn', 'chi phí'])))
+                    revenue_series = _merge_series(revenue_series, _ws_rev)
+
+                    _ws_np_kw = ['lợi nhuận sau thuế của cổ đông của công ty mẹ',
+                                 'lợi nhuận sau thuế', 'lãi sau thuế',
+                                 'profit after tax', 'net profit', 'net income']
+                    _ws_np = _filter_years(normalize_to_billion_vnd(
+                        _ws_extract(_ws_income, _ws_np_kw,
+                                    exclude=['trước thuế', 'thiểu số', 'minority'])))
+                    net_profit_series = _merge_series(net_profit_series, _ws_np)
+
+                    _ws_eps_kw = ['lãi cơ bản trên cổ phiếu', 'eps', 'earnings per share']
+                    _ws_eps = _filter_years(_ws_extract(_ws_income, _ws_eps_kw))
+                    eps_series = _merge_series(eps_series, _ws_eps)
+
+                if not _ws_bs.empty:
+                    _ws_eq_kw = ['vốn chủ sở hữu', 'equity', 'total equity',
+                                 'tổng vốn chủ sở hữu', 'vốn của cổ đông']
+                    _ws_eq = _filter_years(normalize_to_billion_vnd(
+                        _ws_extract(_ws_bs, _ws_eq_kw, exclude=['thiểu số', 'minority'])))
+                    equity_series = _merge_series(equity_series, _ws_eq)
+
+                    _ws_ta_kw = ['tổng cộng tài sản', 'tổng tài sản', 'total assets']
+                    _ws_ta = _filter_years(normalize_to_billion_vnd(
+                        _ws_extract(_ws_bs, _ws_ta_kw)))
+                    total_assets_series = _merge_series(total_assets_series, _ws_ta)
+
+                if not _ws_cf_.empty and _cf_cf.empty:
+                    _cf_cf = _ws_cf_
+
+            except Exception:
+                pass
+
+        # DEBUG EXPANDER — bật khi cần điều tra, tắt khi production OK
+        if _missing_any or _raw_q_debug:
+            with st.expander(f"🔍 DEBUG fallback — {ticker} (năm thiếu: {_missing_any})", expanded=False):
+                st.write("**Tầng 0 (quarterly agg) — revenue:**", dict(revenue_series))
+                st.write("**Tầng 0 (quarterly agg) — net_profit:**", dict(net_profit_series))
+                if _raw_q_debug:
+                    st.write("**Tầng 0b (raw quarterly VCI/KBS):**")
+                    for _yr_dbg, _agg_dbg in _raw_q_debug.items():
+                        if "error" in _agg_dbg:
+                            st.error(f"  Năm {_yr_dbg}: {_agg_dbg['error']}")
+                        else:
+                            st.write(f"  Năm {_yr_dbg}: rev={_agg_dbg.get('revenue')} | "
+                                     f"np={_agg_dbg.get('net_profit')} | "
+                                     f"eq={_agg_dbg.get('equity')} | "
+                                     f"ta={_agg_dbg.get('total_assets')} "
+                                     f"({_agg_dbg.get('_rev_q_count', '?')} quý)")
+                st.write("**Năm còn thiếu trước CafeF:**", _missing_any)
+                if "error" in _cafef_debug:
+                    st.error(f"CafeF exception: {_cafef_debug.get('error')}")
+                else:
+                    st.write("**CafeF trả về:**")
+                    for k, v in _cafef_debug.items():
+                        st.write(f"- `{k}`: {v if v else '⚠️ RỖNG — CafeF chưa cập nhật hoặc bị block'}")
+                if _missing_after_cafef:
+                    st.write("**Năm còn thiếu sau CafeF (→ thử DNSE):**", _missing_after_cafef)
+                    if "error" in _dnse_debug:
+                        st.error(f"DNSE exception: {_dnse_debug.get('error')}")
+                    else:
+                        st.write("**DNSE trả về:**")
+                        for k, v in _dnse_debug.items():
+                            st.write(f"- `{k}`: {v if v else '⚠️ DNSE không có dữ liệu'}")
+                st.write("**Sau tất cả tầng — revenue:**",      dict(revenue_series))
+                st.write("**Sau tất cả tầng — net_profit:**",   dict(net_profit_series))
+                st.write("**Sau tất cả tầng — equity:**",       dict(equity_series))
+                st.write("**Sau tất cả tầng — total_assets:**", dict(total_assets_series))
+
+        _expected_years = allowed_years
+        _years_have = (set(revenue_series.index) | set(net_profit_series.index)
+                       | set(equity_series.index) | set(total_assets_series.index))
+        _missing_years = sorted(_expected_years - _years_have)
+        if _missing_years:
+            st.warning(f"⚠️ {ticker}: không lấy được dữ liệu năm {_missing_years} từ tất cả nguồn (vnstock / CafeF / DNSE / website).")
+
+        def _cross_unit_recheck(np_s, rev_s, eq_s):
+            if np_s.empty or (rev_s.empty and eq_s.empty):
+                return False
+            common = np_s.index
+            if not rev_s.empty:
+                common = common.intersection(rev_s.index)
+                if len(common) > 0:
+                    np_med = np_s.loc[common].abs().median()
+                    rev_med = rev_s.loc[common].abs().median()
+                    if rev_med > 0 and np_med / rev_med > 500:
+                        return True
+            if not eq_s.empty:
+                common2 = np_s.index.intersection(eq_s.index)
+                if len(common2) > 0:
+                    np_med2 = np_s.loc[common2].abs().median()
+                    eq_med2 = eq_s.loc[common2].abs().median()
+                    if eq_med2 > 0 and np_med2 / eq_med2 > 5:
+                        return True
+            return False
+
+        if _cross_unit_recheck(net_profit_series, revenue_series, equity_series):
+            net_profit_series = net_profit_series / 1000
+
+        if not revenue_series.empty and not net_profit_series.empty:
+            common_ry = revenue_series.index.intersection(net_profit_series.index)
+            if len(common_ry) >= 2:
+                rev_med = revenue_series.loc[common_ry].abs().median()
+                np_med  = net_profit_series.loc[common_ry].abs().median()
+                if rev_med > 0 and np_med / rev_med > 2:
+                    revenue_series = revenue_series * 1000
+
+        if not revenue_series.empty and not equity_series.empty:
+            common_re = revenue_series.index.intersection(equity_series.index)
+            if len(common_re) >= 1:
+                rev_med_re = revenue_series.loc[common_re].abs().median()
+                eq_med_re  = equity_series.loc[common_re].abs().median()
+                if eq_med_re > 0 and rev_med_re / eq_med_re > 100:
+                    revenue_series = revenue_series / 1000
 
         market_cap_series_raw = fin5.get('market_cap', pd.Series(dtype=float))
         market_cap_direct = get_latest(market_cap_series_raw, default=0.0)
@@ -338,16 +1044,34 @@ def execute_equity_research_pipeline(ticker):
                 market_cap_direct = 0.0
 
         issue_share = get_latest(outstanding_shares_series, default=0.0)
+
         if issue_share == 0.0 and not df_overview.empty:
             for col in ['issue_share', 'outstanding_shares', 'listed_volume']:
                 if col in df_overview.columns and pd.notna(df_overview[col].iloc[0]):
                     issue_share = float(df_overview[col].iloc[0])
                     break
+
         if issue_share == 0.0 and not df_overview.empty and 'charter_capital' in df_overview.columns:
             try:
                 issue_share = float(df_overview['charter_capital'].iloc[0]) / 10000
             except Exception:
                 pass
+
+        if issue_share == 0.0 and not net_profit_series.empty and not eps_series.empty:
+            for yr in sorted(net_profit_series.index, reverse=True):
+                np_ty = net_profit_series.get(yr)
+                eps_d = eps_series.get(yr)
+                if (np_ty is not None and eps_d is not None
+                        and pd.notna(np_ty) and pd.notna(eps_d)
+                        and eps_d > 0 and np_ty > 0):
+                    backcalc = (np_ty * 1e9) / eps_d
+                    if 1e8 < backcalc < 1e11:
+                        issue_share = backcalc
+                        break
+
+        if issue_share == 0.0:
+            st.warning(f"⚠️ Không xác định được số CP lưu hành cho {ticker}.")
+
         if market_cap_direct > 0 and current_price > 0:
             implied_from_cap = market_cap_direct / current_price
             if issue_share > 0:
@@ -361,13 +1085,8 @@ def execute_equity_research_pipeline(ticker):
         if bvps_latest == 0.0 and issue_share > 0 and not equity_series.empty:
             bvps_latest = get_latest(equity_series, default=0.0) * 1e9 / issue_share
 
-        def _normalize_pct(s):
-            if s is None or s.empty:
-                return s
-            return s * 100 if abs(s.iloc[-1]) < 1 else s
-
-        roe_series = _normalize_pct(roe_series)
-        roa_series = _normalize_pct(roa_series)
+        roe_series = _normalize_pct_series(roe_series)
+        roa_series = _normalize_pct_series(roa_series)
 
         market_cap = market_cap_direct if market_cap_direct > 0 else (
             current_price * issue_share if issue_share > 0 else 0.0)
@@ -382,7 +1101,6 @@ def execute_equity_research_pipeline(ticker):
             "source_used":         source_used,
         }
 
-        # ── Multiples mở rộng ─────────────────────────────────────────────
         revenue_latest = get_latest(revenue_series, default=0.0) if not revenue_series.empty else 0.0
 
         cfo_series_for_multiples = normalize_to_billion_vnd(find_row_series(
@@ -390,15 +1108,57 @@ def execute_equity_research_pipeline(ticker):
             ['lưu chuyển tiền thuần từ hoạt động kinh doanh',
              'lưu chuyển tiền thuần từ hđkd',
              'i. lưu chuyển tiền từ hoạt động kinh doanh',
+             'lưu chuyển tiền tệ ròng từ các hoạt động sản xuất kinh doanh',
+             'lưu chuyển tiền thuần từ hoạt động sản xuất kinh doanh',
+             'tiền thuần từ hoạt động kinh doanh',
              'net cash flow from operating', 'net cash provided by operating',
              'net cash from operating activities',
              'cash flow from operating activities', 'cash flows from operating activities',
-             'net cash generated from operating activities']))
-        cfo_latest = get_latest(cfo_series_for_multiples, default=0.0) if not cfo_series_for_multiples.empty else 0.0
+             'net cash generated from operating activities',
+             'cash flow from operations', 'operating cash flow']))
+        cfo_series_for_multiples = _filter_years(cfo_series_for_multiples)
+
+        if not _cf_cf.empty:
+            try:
+                _cfo_kw = ['lưu chuyển tiền thuần từ hoạt động kinh doanh',
+                           'lưu chuyển tiền thuần từ hđkd',
+                           'lưu chuyển tiền tệ ròng từ các hoạt động',
+                           'net cash from operating', 'operating cash flow']
+                _cfo_cf_fb = _filter_years(normalize_to_billion_vnd(
+                    _cafef_extract_series(_cf_cf, _cfo_kw)))
+                for yr in _cfo_cf_fb.index:
+                    if yr not in cfo_series_for_multiples.index:
+                        cfo_series_for_multiples[yr] = _cfo_cf_fb[yr]
+                cfo_series_for_multiples = cfo_series_for_multiples.sort_index()
+            except Exception:
+                pass
+
+        if not cfo_series_for_multiples.empty and not equity_series.empty:
+            common_ce = cfo_series_for_multiples.index.intersection(equity_series.index)
+            if len(common_ce) >= 1:
+                cfo_med_ce = cfo_series_for_multiples.loc[common_ce].abs().median()
+                eq_med_ce  = equity_series.loc[common_ce].abs().median()
+                if eq_med_ce > 0 and cfo_med_ce / eq_med_ce > 50:
+                    cfo_series_for_multiples = cfo_series_for_multiples / 1000
+
+        # CFO OUTLIER GUARD
+        if not cfo_series_for_multiples.empty and len(cfo_series_for_multiples) >= 2:
+            _cfo_vals = cfo_series_for_multiples.abs()
+            _cfo_median_all = _cfo_vals.median()
+            if _cfo_median_all > 0:
+                _cfo_ratio = _cfo_vals / _cfo_median_all
+                _cfo_valid_mask = (_cfo_ratio >= 0.05) & (_cfo_ratio <= 20.0)
+                if _cfo_valid_mask.any() and not _cfo_valid_mask.all():
+                    cfo_series_for_multiples = cfo_series_for_multiples[_cfo_valid_mask]
+
+        cfo_latest = get_latest(cfo_series_for_multiples, default=None) \
+            if not cfo_series_for_multiples.empty else None
+        cfo_is_estimated = False
 
         pretax_series = normalize_to_billion_vnd(find_row_series(
             df_income,
             ['lợi nhuận trước thuế', 'tổng lợi nhuận kế toán trước thuế',
+             'lợi nhuận kế toán trước thuế',
              'profit before tax', 'income before tax', 'earnings before tax']))
         interest_series = normalize_to_billion_vnd(find_row_series(
             df_income,
@@ -409,7 +1169,10 @@ def execute_equity_research_pipeline(ticker):
         da_series = normalize_to_billion_vnd(find_row_series(
             df_cashflow,
             ['khấu hao tài sản cố định', 'khấu hao và phân bổ',
-             'depreciation and amortization', 'depreciation & amortisation', 'depreciation']))
+             'khấu hao tscđ và bđsđt', 'khấu hao bất động sản đầu tư',
+             'hao mòn tài sản cố định', 'chi phí khấu hao',
+             'depreciation and amortization', 'depreciation & amortisation',
+             'depreciation of fixed assets', 'amortisation of intangible', 'depreciation']))
         if da_series.empty:
             da_series = normalize_to_billion_vnd(find_row_series(
                 df_income,
@@ -420,15 +1183,38 @@ def execute_equity_research_pipeline(ticker):
         interest_latest = get_latest(interest_series, default=0.0) if not interest_series.empty else 0.0
         da_latest       = get_latest(da_series,       default=0.0) if not da_series.empty       else 0.0
 
+        try:
+            from financial_normalizer import SECURITIES_TICKERS as _SEC_TICKERS
+            is_securities = ticker in _SEC_TICKERS
+        except ImportError:
+            is_securities = False
+
         if is_bank:
-            ebitda_latest  = 0.0
+            ebitda_latest  = None
             revenue_latest = 0.0
-        elif pretax_latest:
+        elif not pretax_series.empty:
             ebitda_latest = abs(pretax_latest) + abs(interest_latest) + abs(da_latest)
-        elif da_latest and not net_profit_series.empty:
-            ebitda_latest = abs(get_latest(net_profit_series, default=0.0)) + abs(da_latest)
+            ebitda_latest = ebitda_latest if ebitda_latest > 0 else None
+        elif not net_profit_series.empty:
+            _np_proxy = get_latest(net_profit_series, default=None)
+            ebitda_latest = (abs(_np_proxy) + abs(da_latest)) if _np_proxy is not None else None
         else:
-            ebitda_latest = 0.0
+            ebitda_latest = None
+
+        ebitda_is_estimated = (
+            not is_bank
+            and not is_securities
+            and pretax_series.empty
+            and (not net_profit_series.empty)
+        )
+
+        if cfo_latest is None and not net_profit_series.empty:
+            _np_proxy = get_latest(net_profit_series, default=None)
+            if _np_proxy is not None:
+                cfo_latest = abs(_np_proxy) + abs(da_latest)
+                cfo_is_estimated = True
+        if cfo_latest is not None and cfo_latest <= 0:
+            cfo_latest = None
 
         short_debt_series = normalize_to_billion_vnd(find_row_series(
             df_balance, ['vay và nợ thuê tài chính ngắn hạn', 'vay ngắn hạn', 'short-term borrowings']))
@@ -446,15 +1232,15 @@ def execute_equity_research_pipeline(ticker):
         clean_metrics.update({
             "revenue_latest_billion":  revenue_latest,
             "cfo_latest_billion":      cfo_latest,
+            "cfo_is_estimated":        cfo_is_estimated,
             "ebitda_latest_billion":   ebitda_latest,
+            "ebitda_is_estimated":     ebitda_is_estimated,
             "net_debt_billion":        net_debt_latest,
             "excl_extended_multiples": is_bank,
         })
 
-        # ── Bảng 5 năm ───────────────────────────────────────────────────
-        # Khung CỐ ĐỊNH đúng 5 năm 2021–2025 (TABLE_YEARS), bất kể nguồn trả
-        # về nhiều/ít kỳ hơn. Năm nào không có dữ liệu sẽ để trống ("—").
-        years_available = list(TABLE_YEARS)
+        years_available = sorted(allowed_years)
+
         eps_series_filled  = eps_series.copy()  if eps_series  is not None else pd.Series(dtype=float)
         bvps_series_filled = bvps_series.copy() if bvps_series is not None else pd.Series(dtype=float)
         roe_series_filled  = roe_series.copy()  if roe_series  is not None else pd.Series(dtype=float)
@@ -473,10 +1259,26 @@ def execute_equity_research_pipeline(ticker):
                 bvps_series_filled[y] = equity_series[y] * 1e9 / issue_share
             if (y not in roe_series_filled.index or pd.isna(roe_series_filled.get(y))) \
                     and has_np and has_eq and equity_series[y] != 0:
-                roe_series_filled[y] = net_profit_series[y] / equity_series[y] * 100
+                _np_val = float(net_profit_series[y])
+                _eq_val = float(equity_series[y])
+                if abs(_np_val) > 0 and abs(_eq_val) > 0:
+                    _raw_roe = _np_val / _eq_val * 100
+                    if abs(_raw_roe) > 500:
+                        _np_val = _np_val / 1000
+                        _raw_roe = _np_val / _eq_val * 100
+                    if abs(_raw_roe) <= 200:
+                        roe_series_filled[y] = round(_raw_roe, 2)
             if (y not in roa_series_filled.index or pd.isna(roa_series_filled.get(y))) \
                     and has_np and has_ta and total_assets_series[y] != 0:
-                roa_series_filled[y] = net_profit_series[y] / total_assets_series[y] * 100
+                _np_val2 = float(net_profit_series[y])
+                _ta_val  = float(total_assets_series[y])
+                if abs(_np_val2) > 0 and abs(_ta_val) > 0:
+                    _raw_roa = _np_val2 / _ta_val * 100
+                    if abs(_raw_roa) > 500:
+                        _np_val2 = _np_val2 / 1000
+                        _raw_roa = _np_val2 / _ta_val * 100
+                    if abs(_raw_roa) <= 200:
+                        roa_series_filled[y] = round(_raw_roa, 2)
 
         df_5y_table = pd.DataFrame({'Năm': years_available})
         df_5y_table['Doanh thu thuần (tỷ)'] = df_5y_table['Năm'].map(revenue_series)
@@ -487,6 +1289,10 @@ def execute_equity_research_pipeline(ticker):
         df_5y_table['BVPS (đ)']             = df_5y_table['Năm'].map(bvps_series_filled)
         df_5y_table['ROE (%)'] = df_5y_table['Năm'].map(lambda y: roe_series_filled.get(y, None))
         df_5y_table['ROA (%)'] = df_5y_table['Năm'].map(lambda y: roa_series_filled.get(y, None))
+        df_5y_table['LCFD HĐKD (tỷ)']      = None
+        df_5y_table['Số CP lưu hành (tỷ)'] = None
+        df_5y_table['ROS (%)']              = None
+        df_5y_table['Giá cuối năm (đ)']     = None
 
         revenue_cagr    = cagr(get_latest_n_years(revenue_series,    DEFAULT_YEAR_LIMIT))
         net_profit_cagr = cagr(get_latest_n_years(net_profit_series, DEFAULT_YEAR_LIMIT))
@@ -500,11 +1306,47 @@ def execute_equity_research_pipeline(ticker):
             "roa_latest":          get_latest(roa_series, default=None),
         }
 
-        # ── DuPont ────────────────────────────────────────────────────────
+        df_quarter_table = pd.DataFrame()
+        try:
+            fin_q  = build_financial_table(df_income_q, df_balance_q, df_ratio_q,
+                                           ticker=ticker, period='quarter')
+            rev_q  = normalize_to_billion_vnd(fin_q['revenue'])
+            eq_q   = normalize_to_billion_vnd(fin_q['equity'])
+            ta_q   = normalize_to_billion_vnd(fin_q['total_assets'])
+            np_q   = normalize_net_profit_with_anchor(fin_q['net_profit'], eq_q, fin_q['roe'])
+            eps_q  = fin_q['eps']
+            bvps_q = fin_q['bvps']
+            roe_q  = _normalize_pct_series(fin_q['roe'])
+            roa_q  = _normalize_pct_series(fin_q['roa'])
+            quarters = sorted(
+                set(rev_q.index) | set(np_q.index) | set(eq_q.index) | set(ta_q.index),
+                key=lambda c: (int(str(c).split('-Q')[0]), int(str(c).split('-Q')[1])))
+            df_quarter_table = pd.DataFrame({'_p': quarters})
+            df_quarter_table['Quý'] = df_quarter_table['_p'].apply(
+                lambda c: f"Q{str(c).split('-Q')[1]}/{str(c).split('-Q')[0]}")
+            df_quarter_table['Doanh thu thuần (tỷ)'] = df_quarter_table['_p'].map(rev_q)
+            df_quarter_table['LNST (tỷ)']            = df_quarter_table['_p'].map(np_q)
+            df_quarter_table['Vốn CSH (tỷ)']         = df_quarter_table['_p'].map(eq_q)
+            df_quarter_table['Tổng tài sản (tỷ)']    = df_quarter_table['_p'].map(ta_q)
+            df_quarter_table['EPS (đ)']              = df_quarter_table['_p'].map(eps_q)
+            df_quarter_table['BVPS (đ)']             = df_quarter_table['_p'].map(bvps_q)
+            df_quarter_table['ROE (%)'] = df_quarter_table['_p'].map(lambda y: roe_q.get(y, None))
+            df_quarter_table['ROA (%)'] = df_quarter_table['_p'].map(lambda y: roa_q.get(y, None))
+            def _ros_q(p):
+                r = rev_q.get(p) if p in rev_q.index else None
+                n = np_q.get(p)  if p in np_q.index  else None
+                if (r is not None and n is not None
+                        and pd.notna(r) and pd.notna(n) and r != 0):
+                    return n / r * 100
+                return None
+            df_quarter_table['ROS (%)'] = df_quarter_table['_p'].map(_ros_q)
+            df_quarter_table = df_quarter_table.drop(columns=['_p'])
+        except Exception:
+            df_quarter_table = pd.DataFrame()
+
         df_dupont = dupont_decomposition(
             revenue_series, net_profit_series, total_assets_series, equity_series)
 
-        # ── DCF ───────────────────────────────────────────────────────────
         cfo_series = cfo_series_for_multiples
         capex_series = normalize_to_billion_vnd(find_row_series(
             df_cashflow,
@@ -522,8 +1364,6 @@ def execute_equity_research_pipeline(ticker):
             if cfo_l is not None:
                 latest_fcff = (cfo_l - abs(capex_l)) * 1e9
 
-        # net_debt_latest (tính ở khối Multiples phía trên) dùng lại cho DCF
-        # để EV chính xác hơn thay vì giả định net_debt = 0.
         dcf_results = reverse_g = None
         if latest_fcff and latest_fcff > 0 and issue_share > 0:
             dcf_results = dcf_fcff_scenarios(
@@ -537,17 +1377,69 @@ def execute_equity_research_pipeline(ticker):
         graham_value = graham_number(eps_latest, bvps_latest) \
             if eps_latest > 0 and bvps_latest > 0 else None
 
-        # ── Phát hiện pha loãng (cổ tức CP) + điều chỉnh EPS/BVPS lịch sử ──
         dilution_years = detect_stock_dividend_years(outstanding_shares_series)
         eps_adj, bvps_adj = normalize_eps_bvps_series(
             eps_series_filled, bvps_series_filled, outstanding_shares_series)
 
-        # ── DDM (Gordon Growth) — chữ ký ĐÚNG theo valuation.py hiện tại:
-        # nhận cả series, tự kiểm tra payout ratio, trả về tuple (giá, lý_do).
-        # ⚠️ Đây là fix quan trọng nhất — bản cũ gọi ddm_gordon(dps_latest,
-        # required_return=..., g=...) SAI chữ ký, gây crash TOÀN BỘ pipeline
-        # (not just DDM) cho mọi mã chưa có cache.
+        if dilution_years:
+            df_5y_table['EPS (đ)']  = df_5y_table['Năm'].map(
+                lambda y: eps_adj.get(y, None)  if y in eps_adj.index  else None)
+            df_5y_table['BVPS (đ)'] = df_5y_table['Năm'].map(
+                lambda y: bvps_adj.get(y, None) if y in bvps_adj.index else None)
+
+        _cfo_s = cfo_series_for_multiples if (
+            cfo_series_for_multiples is not None and not cfo_series_for_multiples.empty
+        ) else pd.Series(dtype=float)
+        if not _cfo_s.empty and not revenue_series.empty:
+            _common_cr = _cfo_s.index.intersection(revenue_series.index)
+            if len(_common_cr) >= 2:
+                _cfo_med = _cfo_s.loc[_common_cr].abs().median()
+                _rev_med = revenue_series.loc[_common_cr].abs().median()
+                if _rev_med > 0 and _cfo_med / _rev_med > 10:
+                    _cfo_s = _cfo_s / 1000
+        if not _cfo_s.empty and len(_cfo_s) >= 2:
+            _cs_med = _cfo_s.abs().median()
+            if _cs_med > 0:
+                _cs_ratio = _cfo_s.abs() / _cs_med
+                _cfo_s = _cfo_s.where((_cs_ratio >= 0.05) & (_cs_ratio <= 20.0), other=None)
+        df_5y_table['LCFD HĐKD (tỷ)'] = df_5y_table['Năm'].map(
+            lambda y: _cfo_s.get(y, None) if not _cfo_s.empty else None)
+
+        _shares_map = {}
+        if outstanding_shares_series is not None and not outstanding_shares_series.empty:
+            for _y, _v in (outstanding_shares_series / 1e9).items():
+                if pd.notna(_v) and _v > 0:
+                    _shares_map[_y] = round(float(_v), 2)
+        if issue_share > 0:
+            for _y in years_available:
+                if _y not in _shares_map:
+                    _shares_map[_y] = round(issue_share / 1e9, 2)
+        df_5y_table['Số CP lưu hành (tỷ)'] = df_5y_table['Năm'].map(
+            lambda y: _shares_map.get(y, None))
+
+        def _ros_annual(y):
+            rev = revenue_series.get(y)    if y in revenue_series.index    else None
+            np_ = net_profit_series.get(y) if y in net_profit_series.index else None
+            if (rev is not None and np_ is not None
+                    and pd.notna(rev) and pd.notna(np_) and rev != 0):
+                return np_ / rev * 100
+            return None
+        df_5y_table['ROS (%)'] = df_5y_table['Năm'].map(_ros_annual)
+
+        _price_eoy: dict = {}
+        if (df_price is not None and not df_price.empty
+                and 'time' in df_price.columns and 'close_vnd' in df_price.columns):
+            _dp = df_price[['time', 'close_vnd']].copy()
+            _dp['_year'] = pd.to_datetime(_dp['time']).dt.year
+            for _yr, _grp in _dp.groupby('_year'):
+                _last = _grp.sort_values('time')['close_vnd'].iloc[-1]
+                if pd.notna(_last) and _last > 0:
+                    _price_eoy[int(_yr)] = float(_last)
+        df_5y_table['Giá cuối năm (đ)'] = df_5y_table['Năm'].map(
+            lambda y: _price_eoy.get(int(y), None))
+
         dps_series = fin5.get('dps', pd.Series(dtype=float))
+        dps_series = _filter_years(dps_series)
         dps_latest = get_latest(dps_series, default=0.0) if not dps_series.empty else 0.0
         ddm_value, ddm_note = ddm_gordon(dps_series, net_profit_series, ticker=ticker)
 
@@ -581,6 +1473,8 @@ def execute_equity_research_pipeline(ticker):
             "pe_series":         pe_series,
             "pb_series":         pb_series,
             "bvps_series":       bvps_series_filled,
+            "eps_series_adj":    eps_adj,
+            "bvps_series_adj":   bvps_adj,
             "price_series": (
                 df_price.set_index('time')['close_vnd']
                 .resample('YE').last()
@@ -591,7 +1485,6 @@ def execute_equity_research_pipeline(ticker):
             ),
         }
 
-        # ── Technical ─────────────────────────────────────────────────────
         if 'volume' not in df_price.columns:
             df_price['volume'] = 0
         df_price['volume_ma20'] = df_price['volume'].rolling(window=20).mean()
@@ -611,7 +1504,6 @@ def execute_equity_research_pipeline(ticker):
                                  else "RỦI RO (Downtrend)",
         }
 
-        # ── Tin tức ──────────────────────────────────────────────────────
         vnstock_news = []
         news_raw = _safe_fetch(lambda: c_engine.news(), default=pd.DataFrame())
         if news_raw is not None and not news_raw.empty:
@@ -631,7 +1523,7 @@ def execute_equity_research_pipeline(ticker):
         reports_pkg = None
 
         return (
-            df_price, df_5y_table, df_balance,
+            df_price, df_5y_table, df_quarter_table, df_balance,
             clean_metrics, technical_summary,
             news_list, fundamentals_summary, df_dupont, valuation_package,
             reports_pkg,
