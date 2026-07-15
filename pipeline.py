@@ -428,6 +428,15 @@ def execute_equity_research_pipeline(ticker):
         # Khởi tạo _cf_cf ở ngoài if để CFO fallback block luôn có thể dùng
         _cf_cf = pd.DataFrame()
 
+        def _merge_series(base: pd.Series, patch: pd.Series) -> pd.Series:
+            """Ghi đè giá trị NaN / missing trong base bằng patch (dùng cho mọi tầng fallback)."""
+            for yr, val in patch.items():
+                if pd.isna(val):
+                    continue
+                if yr not in base.index or pd.isna(base.get(yr)):
+                    base[yr] = val
+            return base.sort_index()
+
         def _cafef_extract_series(df, keywords, exclude=None):
             """Tìm dòng theo keyword trong CafeF DataFrame."""
             if df is None or df.empty:
@@ -457,48 +466,29 @@ def execute_equity_research_pipeline(ticker):
 
         if _missing_any:
             try:
-                # FIX: fetch_cafef_yearly_full nhận `years: list`, không có `n_years`.
-                # Code cũ truyền n_years=5 → TypeError → except nuốt lỗi → không fetch được.
                 _cafef_full = fetch_cafef_yearly_full(ticker, years=list(allowed_years))
 
-                _cf_income = _cafef_full.get("income_statement", pd.DataFrame())
-                _cf_bs     = _cafef_full.get("balance_sheet",    pd.DataFrame())
-                _cf_cf     = _cafef_full.get("cash_flow",        pd.DataFrame())
+                # ── BUG FIX (2025): fetch_cafef_yearly_full trả về các key:
+                #   'revenue', 'net_profit', 'equity', 'total_assets'  (pd.Series)
+                # KHÔNG có 'income_statement' / 'balance_sheet' / 'cash_flow' (DataFrame).
+                # Code cũ lấy key sai → luôn nhận DataFrame() rỗng → không merge được.
+                # _cf_cf giữ DataFrame() — được dùng ở block CFO fallback bên dưới.
+                _rev_cf = _filter_years(_cafef_full.get("revenue",      pd.Series(dtype=float)))
+                _np_cf  = _filter_years(_cafef_full.get("net_profit",   pd.Series(dtype=float)))
+                _eq_cf  = _filter_years(_cafef_full.get("equity",       pd.Series(dtype=float)))
+                _ta_cf  = _filter_years(_cafef_full.get("total_assets", pd.Series(dtype=float)))
 
-                # FIX syntax: bỏ dấu ngoặc đóng thừa ở cuối mỗi dòng (File 2 có bug này)
-                _rev_cf = _filter_years(_cafef_full.get("revenue",       pd.Series(dtype=float)))
-                _np_cf  = _filter_years(_cafef_full.get("net_profit",    pd.Series(dtype=float)))
-                _eq_cf  = _filter_years(_cafef_full.get("equity",        pd.Series(dtype=float)))
-                _ta_cf  = _filter_years(_cafef_full.get("total_assets",  pd.Series(dtype=float)))
+                revenue_series      = _merge_series(revenue_series,      _rev_cf)
+                net_profit_series   = _merge_series(net_profit_series,   _np_cf)
+                equity_series       = _merge_series(equity_series,       _eq_cf)
+                total_assets_series = _merge_series(total_assets_series, _ta_cf)
 
-                for yr in _rev_cf.index:
-                    if yr not in revenue_series.index:
-                        revenue_series[yr] = _rev_cf[yr]
-                revenue_series = revenue_series.sort_index()
-
-                for yr in _np_cf.index:
-                    if yr not in net_profit_series.index:
-                        net_profit_series[yr] = _np_cf[yr]
-                net_profit_series = net_profit_series.sort_index()
-
-                for yr in _eq_cf.index:
-                    if yr not in equity_series.index:
-                        equity_series[yr] = _eq_cf[yr]
-                equity_series = equity_series.sort_index()
-
-                for yr in _ta_cf.index:
-                    if yr not in total_assets_series.index:
-                        total_assets_series[yr] = _ta_cf[yr]
-                total_assets_series = total_assets_series.sort_index()
-
-                # EPS từ CafeF nếu có (qua _cf_income DataFrame nếu hàm trả về)
-                if not _cf_income.empty:
-                    _eps_kw = ['lãi cơ bản trên cổ phiếu', 'eps', 'earnings per share']
-                    _eps_cf = _filter_years(_cafef_extract_series(_cf_income, _eps_kw))
-                    for yr in _eps_cf.index:
-                        if yr not in eps_series.index:
-                            eps_series[yr] = _eps_cf[yr]
-                    eps_series = eps_series.sort_index()
+                # EPS từ CafeF (fetch_cafef_yearly_full không trả EPS trực tiếp,
+                # nên block này chỉ chạy nếu hàm được mở rộng sau này — giữ để dự phòng)
+                _eps_cf_raw = _cafef_full.get("eps", pd.Series(dtype=float))
+                if not _eps_cf_raw.empty:
+                    _eps_cf = _filter_years(_eps_cf_raw)
+                    eps_series = _merge_series(eps_series, _eps_cf)
 
             except Exception:
                 pass
@@ -563,10 +553,7 @@ def execute_equity_research_pipeline(ticker):
                                       'doanh thu bán hàng', 'revenue']
                     _ws_rev = _filter_years(normalize_to_billion_vnd(
                         _ws_extract(_ws_income, _ws_rev_kw, exclude=['giá vốn', 'chi phí'])))
-                    for yr in _ws_rev.index:
-                        if yr not in revenue_series.index:
-                            revenue_series[yr] = _ws_rev[yr]
-                    revenue_series = revenue_series.sort_index()
+                    revenue_series = _merge_series(revenue_series, _ws_rev)
 
                     _ws_np_kw = ['lợi nhuận sau thuế của cổ đông của công ty mẹ',
                                  'lợi nhuận sau thuế', 'lãi sau thuế',
@@ -574,35 +561,23 @@ def execute_equity_research_pipeline(ticker):
                     _ws_np = _filter_years(normalize_to_billion_vnd(
                         _ws_extract(_ws_income, _ws_np_kw,
                                     exclude=['trước thuế', 'thiểu số', 'minority'])))
-                    for yr in _ws_np.index:
-                        if yr not in net_profit_series.index:
-                            net_profit_series[yr] = _ws_np[yr]
-                    net_profit_series = net_profit_series.sort_index()
+                    net_profit_series = _merge_series(net_profit_series, _ws_np)
 
                     _ws_eps_kw = ['lãi cơ bản trên cổ phiếu', 'eps', 'earnings per share']
                     _ws_eps = _filter_years(_ws_extract(_ws_income, _ws_eps_kw))
-                    for yr in _ws_eps.index:
-                        if yr not in eps_series.index:
-                            eps_series[yr] = _ws_eps[yr]
-                    eps_series = eps_series.sort_index()
+                    eps_series = _merge_series(eps_series, _ws_eps)
 
                 if not _ws_bs.empty:
                     _ws_eq_kw = ['vốn chủ sở hữu', 'equity', 'total equity',
                                  'tổng vốn chủ sở hữu', 'vốn của cổ đông']
                     _ws_eq = _filter_years(normalize_to_billion_vnd(
                         _ws_extract(_ws_bs, _ws_eq_kw, exclude=['thiểu số', 'minority'])))
-                    for yr in _ws_eq.index:
-                        if yr not in equity_series.index:
-                            equity_series[yr] = _ws_eq[yr]
-                    equity_series = equity_series.sort_index()
+                    equity_series = _merge_series(equity_series, _ws_eq)
 
                     _ws_ta_kw = ['tổng cộng tài sản', 'tổng tài sản', 'total assets']
                     _ws_ta = _filter_years(normalize_to_billion_vnd(
                         _ws_extract(_ws_bs, _ws_ta_kw)))
-                    for yr in _ws_ta.index:
-                        if yr not in total_assets_series.index:
-                            total_assets_series[yr] = _ws_ta[yr]
-                    total_assets_series = total_assets_series.sort_index()
+                    total_assets_series = _merge_series(total_assets_series, _ws_ta)
 
                 if not _ws_cf_.empty and _cf_cf.empty:
                     _cf_cf = _ws_cf_
