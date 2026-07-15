@@ -465,6 +465,7 @@ def execute_equity_research_pipeline(ticker):
             return pd.Series(dtype=float)
 
         if _missing_any:
+            _cafef_debug = {}
             try:
                 _cafef_full = fetch_cafef_yearly_full(ticker, years=list(allowed_years))
 
@@ -478,6 +479,13 @@ def execute_equity_research_pipeline(ticker):
                 _eq_cf  = _filter_years(_cafef_full.get("equity",       pd.Series(dtype=float)))
                 _ta_cf  = _filter_years(_cafef_full.get("total_assets", pd.Series(dtype=float)))
 
+                _cafef_debug = {
+                    "revenue":      dict(_rev_cf),
+                    "net_profit":   dict(_np_cf),
+                    "equity":       dict(_eq_cf),
+                    "total_assets": dict(_ta_cf),
+                }
+
                 revenue_series      = _merge_series(revenue_series,      _rev_cf)
                 net_profit_series   = _merge_series(net_profit_series,   _np_cf)
                 equity_series       = _merge_series(equity_series,       _eq_cf)
@@ -490,8 +498,20 @@ def execute_equity_research_pipeline(ticker):
                     _eps_cf = _filter_years(_eps_cf_raw)
                     eps_series = _merge_series(eps_series, _eps_cf)
 
-            except Exception:
-                pass
+            except Exception as _cafef_exc:
+                _cafef_debug["error"] = str(_cafef_exc)
+
+            # DEBUG EXPANDER — bật khi cần điều tra, tắt khi production OK
+            with st.expander(f"🔍 DEBUG CafeF fallback — {ticker} (năm thiếu: {_missing_any})", expanded=False):
+                st.write("**Năm thiếu trước CafeF:**", _missing_any)
+                if "error" in _cafef_debug:
+                    st.error(f"CafeF exception: {_cafef_debug['error']}")
+                else:
+                    st.write("**CafeF trả về:**")
+                    for k, v in _cafef_debug.items():
+                        st.write(f"- `{k}`: {v if v else '⚠️ RỖNG'}")
+                st.write("**Sau merge — revenue:**", dict(revenue_series))
+                st.write("**Sau merge — net_profit:**", dict(net_profit_series))
 
         # ─────────────────────────────────────────────────────────────────
         # Tầng 3 — Website scraping
