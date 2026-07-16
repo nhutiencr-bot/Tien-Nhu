@@ -11,6 +11,7 @@ Các sửa đổi chính so với bản trước:
      Doanh thu — khắc phục lỗi ngân hàng bị khớp nhầm dòng "Doanh thu thuần"
      tổng quát ra số vô lý (thay vì "Tổng thu nhập hoạt động"/"Thu nhập lãi
      thuần" đúng bản chất kinh doanh ngân hàng).
+  7. FIX: int(float(str(yc))) thay vì int(str(yc)) để xử lý cột float "2021.0"
 """
 
 import pandas as pd
@@ -28,7 +29,7 @@ FINANCIAL_TICKERS = {
 
 SECURITIES_TICKERS = {
     'SSI', 'VND', 'HCM', 'MBS', 'VCI', 'FTS', 'AGR', 'SBS', 'BSI',
-    'CTS', 'SHS', 'TVS', 'TCX', 'VPX', 'BVS', 'VCK', 'SHS', 'VDS',
+    'CTS', 'SHS', 'TVS', 'TCX', 'VPX', 'BVS', 'VCK', 'VDS',
 }
 
 RETAIL_TICKERS = {
@@ -53,7 +54,7 @@ def _get_year_columns(df: pd.DataFrame):
             c_str = c_str[:-2]
         if re.fullmatch(r'\d{4}', c_str):
             year_cols.append(c)
-    return sorted(year_cols, key=lambda x: int(str(x).strip().rstrip('.0') or '0'))
+    return sorted(year_cols, key=lambda x: int(float(str(x).strip())))
 
 
 def _quarter_sort_key(c):
@@ -80,6 +81,7 @@ def find_row_series(df: pd.DataFrame, keywords, exclude_keywords=None,
 
     FIX: Khi có nhiều dòng khớp, chọn dòng có nhiều năm data nhất
          (ưu tiên dòng phủ đủ 2021-2025).
+    FIX: int(float(str(yc))) để xử lý cột tên dạng float "2021.0".
     """
     if df is None or df.empty:
         return pd.Series(dtype=float)
@@ -129,7 +131,8 @@ def find_row_series(df: pd.DataFrame, keywords, exclude_keywords=None,
             if period == 'quarter':
                 result[str(yc).strip()] = float(val)
             else:
-                yr = int(str(yc).strip())
+                # FIX: dùng int(float(...)) để xử lý tên cột dạng "2021.0"
+                yr = int(float(str(yc).strip()))
                 result[yr] = float(val)
 
     if period == 'quarter':
@@ -142,10 +145,6 @@ def _find_revenue_for_bank(df_income, period='year'):
     """
     Ngân hàng/bảo hiểm — dùng 'Thu nhập lãi và các khoản thu nhập tương tự'
     (gross interest income), KHÔNG dùng 'Thu nhập lãi thuần' (đã trừ chi phí lãi).
-    Thứ tự ưu tiên theo chuẩn BCTC ngân hàng VN (TT 49/2014):
-      1. Thu nhập lãi và các khoản thu nhập tương tự  ← gross, đúng nhất
-      2. Tổng thu nhập hoạt động                      ← nếu nguồn gộp sẵn
-      3. Thu nhập lãi thuần                           ← fallback (thấp hơn thực)
     """
     bank_revenue_keywords = [
         (['thu nhập lãi và các khoản thu nhập tương tự',
@@ -167,11 +166,7 @@ def _find_revenue_for_bank(df_income, period='year'):
 
 
 def _find_revenue_for_securities(df_income, period='year'):
-    """
-    Công ty chứng khoán — dùng 'Doanh thu hoạt động' theo TT 334/2016.
-    Không dùng 'Thu nhập lãi thuần' vì CTCK hạch toán lãi margin vào
-    doanh thu môi giới, không tách riêng như ngân hàng.
-    """
+    """Công ty chứng khoán — dùng 'Doanh thu hoạt động' theo TT 334/2016."""
     securities_revenue_keywords = [
         (['doanh thu hoạt động', 'operating revenue',
           'tổng doanh thu hoạt động', 'total operating revenue'], ['chi phí', 'giá vốn']),
@@ -231,10 +226,10 @@ def build_financial_table(df_income, df_balance, df_ratio=None,
     """
     data = {}
 
-    is_bank = ticker in BANK_TICKERS if ticker else False
-    is_financial = ticker in FINANCIAL_TICKERS if ticker else False
-    is_securities = ticker in SECURITIES_TICKERS if ticker else False
-    is_retail = ticker in RETAIL_TICKERS if ticker else False
+    is_bank       = ticker in BANK_TICKERS        if ticker else False
+    is_financial  = ticker in FINANCIAL_TICKERS   if ticker else False
+    is_securities = ticker in SECURITIES_TICKERS  if ticker else False
+    is_retail     = ticker in RETAIL_TICKERS      if ticker else False
     is_realestate = ticker in REAL_ESTATE_TICKERS if ticker else False
 
     if is_securities:
@@ -287,20 +282,20 @@ def build_financial_table(df_income, df_balance, df_ratio=None,
     )
 
     ratio_fields = [
-        ('eps', ['eps', 'earning per share', 'earnings per share']),
-        ('bvps', ['book value per share', 'bvps']),
-        ('roe', ['roe']),
-        ('roa', ['roa']),
-        ('pe', ['p/e', 'pe ratio', ' pe ']),
-        ('pb', ['p/b', 'pb ratio', ' pb ']),
-        ('market_cap', ['market cap', 'vốn hóa']),
-        ('outstanding_shares', ['outstanding shares', 'số cổ phiếu lưu hành']),
-        ('ev_ebitda', ['ev/ebitda', 'ev to ebitda']),
-        ('p_cf', ['price to cash flow', 'p/cf']),
-        ('ps', ['p/s', 'price to sales', 'ps ratio']),
-        ('net_margin', ['net margin', 'after tax profit margin', 'biên lợi nhuận sau thuế']),
-        ('asset_turnover', ['asset turnover', 'vòng quay tài sản']),
-        ('dps', ['dividend per share', 'cổ tức', 'dps']),
+        ('eps',               ['eps', 'earning per share', 'earnings per share']),
+        ('bvps',              ['book value per share', 'bvps']),
+        ('roe',               ['roe']),
+        ('roa',               ['roa']),
+        ('pe',                ['p/e', 'pe ratio', ' pe ']),
+        ('pb',                ['p/b', 'pb ratio', ' pb ']),
+        ('market_cap',        ['market cap', 'vốn hóa']),
+        ('outstanding_shares',['outstanding shares', 'số cổ phiếu lưu hành']),
+        ('ev_ebitda',         ['ev/ebitda', 'ev to ebitda']),
+        ('p_cf',              ['price to cash flow', 'p/cf']),
+        ('ps',                ['p/s', 'price to sales', 'ps ratio']),
+        ('net_margin',        ['net margin', 'after tax profit margin', 'biên lợi nhuận sau thuế']),
+        ('asset_turnover',    ['asset turnover', 'vòng quay tài sản']),
+        ('dps',               ['dividend per share', 'cổ tức', 'dps']),
     ]
 
     if df_ratio is not None and not df_ratio.empty:
@@ -344,23 +339,20 @@ def normalize_to_billion_vnd(series: pd.Series, label=""):
     Chuẩn hóa series về đơn vị tỷ VNĐ.
 
     Logic 3 nhánh theo median tuyệt đối:
-      - median > 1e12  → đơn vị đồng  (ví dụ 40,698 tỷ đồng ≈ 4.07e13) → chia 1e9
-      - median > 1e6   → đơn vị triệu (ví dụ 40,698 tỷ = 40,698,000 triệu) → chia 1e3
+      - median > 1e12  → đơn vị đồng  → chia 1e9
+      - median > 1e6   → đơn vị triệu → chia 1e3
       - còn lại        → đã là tỷ, giữ nguyên
-
-    Ngưỡng 1e12 bắt đúng cả revenue ngân hàng lớn (VCB ~170,000 tỷ/năm = 1.7e14 đồng)
-    và tránh nhầm với revenue công ty nhỏ đã là tỷ (~ vài trăm tỷ = 2..3e2).
     """
     if series is None or series.empty:
         return series
     median_abs = series.abs().median()
     if median_abs == 0:
         return series
-    if median_abs > 1_000_000_000_000:   # > 1 nghìn tỷ → đơn vị đồng
-        return series / 1_000_000_000    # ÷ 1e9
-    if median_abs > 1_000_000:           # > 1 triệu → đơn vị triệu VNĐ
-        return series / 1_000            # ÷ 1e3
-    return series                        # đã là tỷ, giữ nguyên
+    if median_abs > 1_000_000_000_000:
+        return series / 1_000_000_000
+    if median_abs > 1_000_000:
+        return series / 1_000
+    return series
 
 
 def get_latest(series: pd.Series, default=0.0):
@@ -391,11 +383,8 @@ def cagr(series: pd.Series, n_years=None):
         return None
 
 
-# NOTE: các hàm dưới đây (ddm_gordon/graham_number/nine_methods_valuation)
-# CHỈ giữ lại để tương thích ngược nếu có nơi nào khác lỡ import từ
-# financial_normalizer. pipeline.py hiện tại import các hàm cùng tên này
-# từ valuation.py (bản đầy đủ hơn) — KHÔNG phải từ đây. Hai module định
-# nghĩa trùng tên không xung đột (namespace tách biệt theo module import).
+# NOTE: các hàm dưới đây CHỈ giữ lại để tương thích ngược.
+# pipeline.py import các hàm cùng tên từ valuation.py (bản đầy đủ hơn).
 
 def ddm_gordon(dps, required_return=0.11, g=0.04):
     if dps is None or dps <= 0 or required_return <= g:
@@ -410,33 +399,28 @@ def graham_number(eps, bvps):
 
 
 def advanced_multiples_valuation(eps_latest, eps_5y_ago, pe_current,
-                                  ebitda_latest, cfo_latest, revenue_latest, net_debt_latest,
-                                  shares_outstanding,
+                                  ebitda_latest, cfo_latest, revenue_latest,
+                                  net_debt_latest, shares_outstanding,
                                   ev_ebitda_median_5y, pcf_median_5y, ps_median_5y):
     methods = {}
     shares_billion = shares_outstanding / 1e9 if shares_outstanding else 0
     if shares_billion <= 0:
         return methods
-
     if ebitda_latest and ebitda_latest > 0 and ev_ebitda_median_5y:
         fair_ev = ebitda_latest * ev_ebitda_median_5y
         fair_market_cap = fair_ev - net_debt_latest
         if fair_market_cap > 0:
             methods['EV/EBITDA Median 5N'] = fair_market_cap / shares_billion
-
     if cfo_latest and cfo_latest > 0 and pcf_median_5y:
         methods['P/CF Median 5N'] = (cfo_latest * pcf_median_5y) / shares_billion
-
     if revenue_latest and revenue_latest > 0 and ps_median_5y:
         methods['P/S Median 5N'] = (revenue_latest * ps_median_5y) / shares_billion
-
     if (eps_latest and eps_5y_ago and eps_5y_ago > 0
             and eps_latest > eps_5y_ago and pe_current):
         eps_growth = ((eps_latest / eps_5y_ago) ** 0.25 - 1) * 100
         if eps_growth > 0:
             methods['PEG Fair Value'] = eps_latest * max(eps_growth, 1)
             methods['_PEG_Ratio'] = pe_current / max(eps_growth, 1)
-
     return methods
 
 
