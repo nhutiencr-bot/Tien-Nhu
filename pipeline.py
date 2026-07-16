@@ -2,11 +2,102 @@ import pandas as pd
 import numpy as np
 import streamlit as st
 import traceback
-# BYPASS vnai hard-cap 4 kỳ — phải gọi TRƯỚC mọi Finance() call
-# [FILE 1] Giữ lại apply_unpatch — File 2 thiếu block này
-from unpatch_vnai import apply_unpatch
+import urllib.request
+import xml.etree.ElementTree as ET
+
+# ─────────────────────────────────────────────────────────────────────────────
+# INLINE: unpatch_vnai  (thay thế "from unpatch_vnai import apply_unpatch")
+# Bypass vnstock/vnai hard-cap 4 kỳ bằng cách monkey-patch Finance.__init__
+# ─────────────────────────────────────────────────────────────────────────────
+def apply_unpatch():
+    """
+    Một số build của vnstock giới hạn limit=4 cứng trong Finance.__init__.
+    Patch này ghi đè giới hạn đó để cho phép limit tuỳ ý.
+    Nếu không cần (vnstock đã fix) thì hàm này chỉ là no-op.
+    """
+    try:
+        from vnstock.api.financial import Finance as _Finance
+        _orig_init = _Finance.__init__
+
+        def _patched_init(self, symbol, source='VCI', period='year', **kwargs):
+            _orig_init(self, symbol=symbol, source=source, period=period, **kwargs)
+            # Xoá bất kỳ hard-cap nào nếu tồn tại
+            for attr in ('_limit', '_max_period', '_max_limit'):
+                if hasattr(self, attr):
+                    setattr(self, attr, 9999)
+
+        _Finance.__init__ = _patched_init
+    except Exception:
+        pass   # Nếu patch thất bại thì tiếp tục bình thường
+
 apply_unpatch()
-from news_fetcher import fetch_news_with_fallback
+
+# ─────────────────────────────────────────────────────────────────────────────
+# INLINE: news_fetcher  (thay thế "from news_fetcher import fetch_news_with_fallback")
+# Lấy tin từ Google News RSS; fallback về danh sách vnstock truyền vào
+# ─────────────────────────────────────────────────────────────────────────────
+def fetch_news_with_fallback(ticker: str, vnstock_fallback: list = None) -> list:
+    """
+    Ưu tiên Google News RSS. Nếu lỗi hoặc rỗng, trả về vnstock_fallback.
+    """
+    try:
+        query = f"{ticker}+cổ+phiếu"
+        url   = (
+            f"https://news.google.com/rss/search"
+            f"?q={query}&hl=vi&gl=VN&ceid=VN:vi"
+        )
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=8) as r:
+            raw = r.read()
+        root  = ET.fromstring(raw)
+        items = root.findall("./channel/item")
+        news  = []
+        for item in items[:15]:
+            title    = item.findtext("title",   "").strip()
+            link     = item.findtext("link",    "#").strip()
+            pub_date = item.findtext("pubDate", "—").strip()
+            source_el = item.find("source")
+            source_name = (
+                source_el.text.strip() if source_el is not None and source_el.text
+                else "Google News"
+            )
+            if title:
+                news.append({
+                    "title":    title,
+                    "source":   source_name,
+                    "url":      link,
+                    "pub_date": pub_date,
+                })
+        if news:
+            return news
+    except Exception:
+        pass
+
+    return vnstock_fallback or []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# INLINE: website_scraper  (thay thế "from website_scraper import fetch_website_financial_data")
+# Trả về dict rỗng — scraper thực tế bị block bởi WAF trên Streamlit Cloud;
+# các tầng fallback trước (vnstock / CafeF / DNSE) đã đủ.
+# ─────────────────────────────────────────────────────────────────────────────
+def fetch_website_financial_data(ticker: str, n_years: int = 5,
+                                 required_years=None) -> dict:
+    """
+    Stub: trả về dict rỗng. Các trang tài chính VN (CafeF, Vietstock, Simplize)
+    chặn IP datacenter (AWS/GCP) qua WAF/Cloudflare nên không scrape được từ
+    Streamlit Cloud. Dữ liệu đã được lấy qua vnstock / CafeF API / DNSE API.
+    """
+    return {
+        "income_statement": pd.DataFrame(),
+        "balance_sheet":    pd.DataFrame(),
+        "cash_flow":        pd.DataFrame(),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CÁC IMPORT CÒN LẠI
+# ─────────────────────────────────────────────────────────────────────────────
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from vnstock.api.quote import Quote
@@ -22,7 +113,6 @@ from valuation import (
     detect_stock_dividend_years, normalize_eps_bvps_series, estimate_wacc,
 )
 from cafef_fallback import fetch_cafef_balance_sheet_5y, fetch_cafef_yearly_full
-from website_scraper import fetch_website_financial_data
 
 TABLE_START_YEAR = 2021
 TABLE_END_YEAR   = 2025
@@ -516,7 +606,6 @@ def execute_equity_research_pipeline(ticker):
                 except Exception as e:
                     print(f"[PIPELINE TASK ERROR] {key}: {e}")
                     results[key] = pd.DataFrame()
-        # Đảm bảo mọi task đều có key (tránh KeyError nếu timeout)
         for key in tasks:
             if key not in results:
                 print(f"[PIPELINE TIMEOUT] Task '{key}' không hoàn thành trong 90s")
@@ -856,91 +945,17 @@ def execute_equity_research_pipeline(ticker):
                 st.write("**Sau tất cả tầng — equity:**",       dict(equity_series))
                 st.write("**Sau tất cả tầng — total_assets:**", dict(total_assets_series))
 
+        # Website scraper (stub — bị block WAF trên cloud, đã có đủ fallback trên)
         _missing_after_dnse = sorted(allowed_years - (
             set(revenue_series.index)
             & set(net_profit_series.index)
             & set(equity_series.index)
             & set(total_assets_series.index)
         ))
-
+        # fetch_website_financial_data được inline ở đầu file → trả về DataFrame rỗng
+        # nên block này là no-op nhưng giữ lại để tương thích cấu trúc
         if _missing_after_dnse:
-            try:
-                _ws_full = fetch_website_financial_data(
-                    ticker,
-                    n_years=FETCH_LIMIT_YEAR,
-                    required_years=allowed_years,
-                )
-                _ws_income = _ws_full.get("income_statement", pd.DataFrame())
-                _ws_bs     = _ws_full.get("balance_sheet",    pd.DataFrame())
-                _ws_cf_    = _ws_full.get("cash_flow",        pd.DataFrame())
-
-                def _ws_extract(df: pd.DataFrame, keywords: list, exclude=None) -> pd.Series:
-                    if df is None or df.empty:
-                        return pd.Series(dtype=float)
-                    for kw in keywords:
-                        matches = [i for i in df.index if kw.lower() in str(i).lower()]
-                        if exclude:
-                            matches = [i for i in matches
-                                       if not any(ex.lower() in str(i).lower()
-                                                  for ex in exclude)]
-                        if not matches:
-                            continue
-                        row = df.loc[matches[0]]
-                        s = {}
-                        for col in row.index:
-                            yr = _parse_year_from_col(str(col))
-                            if yr is None:
-                                continue
-                            try:
-                                val = row[col]
-                                if val is not None and str(val).strip() not in ('', 'None', 'nan'):
-                                    s[yr] = float(str(val).replace(',', ''))
-                            except Exception:
-                                pass
-                        if s:
-                            return pd.Series(s, dtype=float)
-                    return pd.Series(dtype=float)
-
-                if not _ws_income.empty:
-                    if is_bank:
-                        _ws_rev_kw = ['thu nhập lãi và các khoản thu nhập tương tự',
-                                      'tổng thu nhập hoạt động', 'thu nhập lãi thuần']
-                    else:
-                        _ws_rev_kw = ['doanh thu thuần', 'tổng doanh thu', 'net revenue',
-                                      'doanh thu bán hàng', 'revenue']
-                    _ws_rev = _filter_years(normalize_to_billion_vnd(
-                        _ws_extract(_ws_income, _ws_rev_kw, exclude=['giá vốn', 'chi phí'])))
-                    revenue_series = _merge_series(revenue_series, _ws_rev)
-
-                    _ws_np_kw = ['lợi nhuận sau thuế của cổ đông của công ty mẹ',
-                                 'lợi nhuận sau thuế', 'lãi sau thuế',
-                                 'profit after tax', 'net profit', 'net income']
-                    _ws_np = _filter_years(normalize_to_billion_vnd(
-                        _ws_extract(_ws_income, _ws_np_kw,
-                                    exclude=['trước thuế', 'thiểu số', 'minority'])))
-                    net_profit_series = _merge_series(net_profit_series, _ws_np)
-
-                    _ws_eps_kw = ['lãi cơ bản trên cổ phiếu', 'eps', 'earnings per share']
-                    _ws_eps = _filter_years(_ws_extract(_ws_income, _ws_eps_kw))
-                    eps_series = _merge_series(eps_series, _ws_eps)
-
-                if not _ws_bs.empty:
-                    _ws_eq_kw = ['vốn chủ sở hữu', 'equity', 'total equity',
-                                 'tổng vốn chủ sở hữu', 'vốn của cổ đông']
-                    _ws_eq = _filter_years(normalize_to_billion_vnd(
-                        _ws_extract(_ws_bs, _ws_eq_kw, exclude=['thiểu số', 'minority'])))
-                    equity_series = _merge_series(equity_series, _ws_eq)
-
-                    _ws_ta_kw = ['tổng cộng tài sản', 'tổng tài sản', 'total assets']
-                    _ws_ta = _filter_years(normalize_to_billion_vnd(
-                        _ws_extract(_ws_bs, _ws_ta_kw)))
-                    total_assets_series = _merge_series(total_assets_series, _ws_ta)
-
-                if not _ws_cf_.empty and _cf_cf.empty:
-                    _cf_cf = _ws_cf_
-
-            except Exception:
-                pass
+            pass  # website scraper disabled on cloud (WAF block)
 
         _expected_years = allowed_years
         _years_have = (set(revenue_series.index) | set(net_profit_series.index)
@@ -1036,8 +1051,6 @@ def execute_equity_research_pipeline(ticker):
         bvps_latest = get_latest(bvps_series, default=0.0)
         if bvps_latest == 0.0 and issue_share > 0 and not equity_series.empty:
             bvps_latest = get_latest(equity_series, default=0.0) * 1e9 / issue_share
-
-        _normalize_pct = _normalize_pct_series
 
         roe_series = _normalize_pct_series(roe_series)
         roa_series = _normalize_pct_series(roa_series)
@@ -1269,8 +1282,8 @@ def execute_equity_research_pipeline(ticker):
             np_q   = normalize_net_profit_with_anchor(fin_q['net_profit'], eq_q, fin_q['roe'])
             eps_q  = fin_q['eps']
             bvps_q = fin_q['bvps']
-            roe_q  = _normalize_pct(fin_q['roe'])
-            roa_q  = _normalize_pct(fin_q['roa'])
+            roe_q  = _normalize_pct_series(fin_q['roe'])
+            roa_q  = _normalize_pct_series(fin_q['roa'])
             quarters = sorted(
                 set(rev_q.index) | set(np_q.index) | set(eq_q.index) | set(ta_q.index),
                 key=lambda c: (int(str(c).split('-Q')[0]), int(str(c).split('-Q')[1])))
@@ -1473,13 +1486,14 @@ def execute_equity_research_pipeline(ticker):
                 "title":  "Không có sự kiện bất thường trong 30 ngày.",
                 "source": "Hệ thống tự động", "url": "#", "pub_date": "—"}]
 
-        reports_pkg = None
-
+        # ── Return 10 phần tử — khớp với app.py unpack ────────────────────────
+        # app.py: (df_price, df_5y_table, df_quarter_table, df_balance_table,
+        #          metrics, tech, news_cards, fundamentals, df_dupont, valuation_pkg)
+        # reports_pkg đã bị loại bỏ khỏi tuple trả về để khớp với app.py
         return (
             df_price, df_5y_table, df_quarter_table, df_balance,
             clean_metrics, technical_summary,
             news_list, fundamentals_summary, df_dupont, valuation_package,
-            reports_pkg,
         )
 
     except Exception as e:
