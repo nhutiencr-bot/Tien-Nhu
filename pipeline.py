@@ -8,9 +8,9 @@ apply_unpatch()
 from news_fetcher import fetch_news_with_fallback
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from vnstock.explorer.vci.quote import Quote
-from vnstock.explorer.vci.financial import Finance
-from vnstock.explorer.vci.company import Company
+from vnstock.explorer.tcbs.quote import Quote
+from vnstock.explorer.tcbs.financial import Finance
+from vnstock.explorer.tcbs.company import Company
     find_row_series, build_5y_financial_table, build_financial_table,
     get_latest, get_latest_n_years, cagr,
 )
