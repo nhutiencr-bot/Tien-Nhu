@@ -1,8 +1,6 @@
 import pandas as pd
 import numpy as np
 import streamlit as st
-# BYPASS vnai hard-cap 4 kỳ — phải gọi TRƯỚC mọi Finance() call
-# [FILE 1] Giữ lại apply_unpatch — File 2 thiếu block này
 from unpatch_vnai import apply_unpatch
 apply_unpatch()
 from news_fetcher import fetch_news_with_fallback
@@ -11,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from vnstock.explorer.tcbs.quote import Quote
 from vnstock.explorer.tcbs.financial import Finance
 from vnstock.explorer.tcbs.company import Company
+from financial_normalizer import (
     find_row_series, build_5y_financial_table, build_financial_table,
     get_latest, get_latest_n_years, cagr,
 )
