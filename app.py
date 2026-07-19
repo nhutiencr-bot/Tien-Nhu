@@ -137,7 +137,7 @@ if pipeline_output is None:
     st.stop()
 
 (df_price_clean, df_5y_table, df_quarter_table, df_balance_table, metrics, tech,
- news_cards, fundamentals, df_dupont, valuation_pkg, reports_pkg) = pipeline_output
+ news_cards, fundamentals, df_dupont, valuation_pkg) = pipeline_output
 
 # --- Header ---
 st.markdown(f"## Báo Cáo Định Giá Toàn Diện: {ticker_input}")
