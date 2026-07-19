@@ -23,7 +23,7 @@ from valuation import (
 from cafef_fallback import fetch_cafef_balance_sheet_5y, fetch_cafef_yearly_full
 from website_scraper import fetch_website_financial_data
 
-SOURCE_FALLBACK_ORDER = ['KBS', 'VCI', 'DNSE']
+SOURCE_FALLBACK_ORDER = ['KBS', 'DNSE']
 
 # PATCH 1 — Khóa cứng khoảng năm bảng 5 năm: 2021–2025
 TABLE_START_YEAR = 2021
