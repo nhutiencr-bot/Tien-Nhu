@@ -1,9 +1,6 @@
 import re
 import requests
 from bs4 import BeautifulSoup
-# FIX: đã bỏ `from cafef_reports import fetch_cafef_reports` — bị shadow
-# hoàn toàn bởi hàm fetch_cafef_reports định nghĩa ngay bên dưới (dòng ~26),
-# import cũ không hề được dùng, chỉ gây hiểu nhầm là "name collision".
 
 import streamlit as st
 from styles import apply_premium_fintech_theme
@@ -11,7 +8,8 @@ from pipeline import execute_equity_research_pipeline
 from symbols_loader import load_all_symbols, build_display_options
 from ui_components import (
     render_kpi_cards, render_tab_kqkd, render_tab_valuation,
-    render_tab_dcf, render_tab_dupont, render_tab_technical, render_tab_forecast, fmt,
+    render_tab_multiples, render_tab_dcf, render_tab_dupont,
+    render_tab_technical, render_tab_forecast, fmt,
 )
 
 st.set_page_config(page_title="Equity Research AI", layout="wide")
@@ -137,7 +135,7 @@ if pipeline_output is None:
     st.stop()
 
 (df_price_clean, df_5y_table, df_quarter_table, df_balance_table, metrics, tech,
- news_cards, fundamentals, df_dupont, valuation_pkg) = pipeline_output
+ news_cards, fundamentals, df_dupont, valuation_pkg, reports_pkg) = pipeline_output
 
 # --- Header ---
 st.markdown(f"## Báo Cáo Định Giá Toàn Diện: {ticker_input}")
@@ -166,6 +164,7 @@ render_kpi_cards(metrics, fundamentals)
 
 with tab_kqkd:
     render_tab_kqkd(df_5y_table, fundamentals, period_col="Năm")
+
 with tab_valuation:
     render_tab_valuation(valuation_pkg, metrics)
 
@@ -178,22 +177,12 @@ with tab_multiples:
     ebitda_b = metrics.get('ebitda_latest_billion', 0) or 0
     net_debt_b = metrics.get('net_debt_billion', 0) or 0
 
-    # ⚠️ Sanity guard: không có công ty niêm yết thực nào có vốn hóa < 100 tỷ
-    # VNĐ. Nếu market_cap_billion về gần 0 (lỗi tính toán/đơn vị ở pipeline),
-    # MỌI multiple tính từ nó (P/S, P/CF, EV/EBITDA) sẽ ra một tỷ số cực nhỏ
-    # (VD 0.0003x) — số này truthy (không phải chính xác 0.0) nên vẫn lọt qua
-    # điều kiện "if value" và hiển thị "0.00x" kèm nhãn "hấp dẫn" (SAI, vì đây
-    # là lỗi dữ liệu chứ không phải định giá rẻ thật). Chặn tại nguồn: coi
-    # market_cap_b là "thiếu dữ liệu" nếu dưới ngưỡng hợp lý.
-    MIN_SANE_MARKET_CAP_B = 100.0  # tỷ VNĐ
+    MIN_SANE_MARKET_CAP_B = 100.0
     if market_cap_b < MIN_SANE_MARKET_CAP_B:
         market_cap_b = 0.0
     ev_b = market_cap_b + net_debt_b
 
     def _sane_ratio(value, min_sane=0.05, max_sane=200.0):
-        """Trả về None nếu tỷ số nằm ngoài dải hợp lý cho CP VN — tỷ số gần 0
-        hoặc cực lớn gần như chắc chắn là lỗi dữ liệu/đơn vị, không phải một
-        định giá thật. Tránh lặp lại lỗi BVPS≈0 → nhãn sai đã xảy ra trước đó."""
         if value is None:
             return None
         if not (min_sane <= value <= max_sane):
@@ -207,9 +196,6 @@ with tab_multiples:
     pe_now = metrics.get('pe', 0) or 0
     pb_now = metrics.get('pb', 0) or 0
 
-    # So sánh với median 5N CỦA CHÍNH MÃ (không dùng ngưỡng cố định chung cho mọi
-    # ngành/mã — trước đây P/B<2 luôn bị gắn "Định giá cao", sai với ngân hàng
-    # thường giao dịch quanh P/B 1.5-2.5x, gây mâu thuẫn với kết luận ở tab 9PP).
     pe_hist_series = valuation_pkg.get('pe_series')
     pb_hist_series = valuation_pkg.get('pb_series')
     pe_median_5y = float(pe_hist_series.dropna().median()) if pe_hist_series is not None and not pe_hist_series.dropna().empty else None
@@ -225,7 +211,6 @@ with tab_multiples:
 
     def _card_label(value, avg=None, low_note="Dưới TB 5N", high_note="Trên TB 5N",
                      low_thresh=None, low_msg=None, high_msg=None):
-        """Trả về (màu, dòng chú thích nhỏ) theo phong cách dashboard tham chiếu."""
         if value is None:
             return "#888", "Thiếu dữ liệu"
         if avg is not None and avg > 0:
@@ -280,12 +265,6 @@ with tab_multiples:
         )
     else:
         e1, e2, e3 = st.columns(3)
-        # P/S: dùng median 5N của chính mã nếu có, fallback ngưỡng ngành
-        # CTCK P/S 3-6x bình thường, ngưỡng 1.5 cũ quá thấp → luôn vàng/đỏ
-        ps_median_ref = None
-        if pe_hist_series is not None and not pe_hist_series.dropna().empty:
-            # Dùng pe_median như proxy scale, hoặc tính ps_series riêng nếu có
-            pass  # pe_median_5y đã tính ở trên
         c, n = _card_label(ps, avg=None, low_thresh=8.0,
                             low_msg="Định giá hợp lý", high_msg="Định giá cao")
         _render_card(e1, "P/S", f"{ps:.2f}x" if ps else "—", c, n)
