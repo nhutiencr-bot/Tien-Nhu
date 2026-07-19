@@ -1,107 +1,104 @@
-import streamlit as st
+"""
+symbols_loader.py
+-----------------
+Load danh sách mã cổ phiếu — dùng vnstock v3.1.0 (explorer) thay vnstock.api
+"""
+
 import pandas as pd
-from vnstock.api.listing import Listing
 
-# Cache danh sách mã 12 giờ
-LISTING_CACHE_TTL = 12 * 60 * 60
 
-EXCHANGE_NORMALIZE_MAP = {
-    "HSX": "HOSE",
-    "HOSE": "HOSE",
-    "HNX": "HNX",
-    "UPCOM": "UPCOM",
-}
+def load_all_symbols() -> pd.DataFrame:
+    """Trả về DataFrame(symbol, organ_name, exchange)."""
+    try:
+        from vnstock.explorer.vci.listing import Listing
+        lst = Listing()
+        df = lst.all_symbols()
+        if df is not None and not df.empty:
+            return df
+    except Exception:
+        pass
 
-def _normalize_exchange_label(value):
-    if pd.isna(value):
-        return "KHÁC"
-    v = str(value).strip().upper()
-    return EXCHANGE_NORMALIZE_MAP.get(v, v)
+    try:
+        from vnstock.explorer.tcbs.listing import Listing
+        lst = Listing()
+        df = lst.all_symbols()
+        if df is not None and not df.empty:
+            return df
+    except Exception:
+        pass
 
-@st.cache_data(ttl=LISTING_CACHE_TTL)
-def load_all_symbols():
+    # Fallback: danh sách tĩnh các mã phổ biến
+    data = [
+        ("ACB","Ngân hàng TMCP Á Châu","HOSE"),
+        ("VCB","Ngân hàng TMCP Ngoại thương Việt Nam","HOSE"),
+        ("BID","Ngân hàng TMCP Đầu tư và Phát triển VN","HOSE"),
+        ("CTG","Ngân hàng TMCP Công thương Việt Nam","HOSE"),
+        ("TCB","Ngân hàng TMCP Kỹ thương Việt Nam","HOSE"),
+        ("MBB","Ngân hàng TMCP Quân đội","HOSE"),
+        ("VPB","Ngân hàng TMCP Việt Nam Thịnh Vượng","HOSE"),
+        ("STB","Ngân hàng TMCP Sài Gòn Thương Tín","HOSE"),
+        ("HDB","Ngân hàng TMCP Phát triển TP.HCM","HOSE"),
+        ("TPB","Ngân hàng TMCP Tiên Phong","HOSE"),
+        ("HPG","Tập đoàn Hòa Phát","HOSE"),
+        ("VNM","Công ty CP Sữa Việt Nam","HOSE"),
+        ("FPT","Công ty CP FPT","HOSE"),
+        ("MSN","Tập đoàn Masan","HOSE"),
+        ("VIC","Tập đoàn Vingroup","HOSE"),
+        ("VHM","Công ty CP Vinhomes","HOSE"),
+        ("VRE","Công ty CP Vincom Retail","HOSE"),
+        ("GVR","Tập đoàn Công nghiệp Cao su VN","HOSE"),
+        ("PLX","Tập đoàn Xăng dầu Việt Nam","HOSE"),
+        ("GAS","Tổng Công ty Khí Việt Nam","HOSE"),
+        ("POW","Tổng Công ty Điện lực Dầu khí VN","HOSE"),
+        ("MWG","Công ty CP Đầu tư Thế Giới Di Động","HOSE"),
+        ("PNJ","Công ty CP Vàng bạc Đá quý Phú Nhuận","HOSE"),
+        ("DGC","Công ty CP Tập đoàn Hóa chất Đức Giang","HOSE"),
+        ("SSI","Công ty CP Chứng khoán SSI","HOSE"),
+        ("VND","Công ty CP Chứng khoán VNDirect","HOSE"),
+        ("HCM","Công ty CP Chứng khoán TP.HCM","HOSE"),
+        ("NLG","Công ty CP Đầu tư Nam Long","HOSE"),
+        ("KDH","Công ty CP Đầu tư và Kinh doanh Nhà Khang Điền","HOSE"),
+        ("DXG","Công ty CP Tập đoàn Đất Xanh","HOSE"),
+        ("BCM","Tổng Công ty Đầu tư và Phát triển Công nghiệp","HOSE"),
+        ("BSR","Công ty CP Lọc hóa dầu Bình Sơn","UPCOM"),
+        ("OIL","Tổng Công ty Dầu Việt Nam","UPCOM"),
+        ("PVD","Tổng Công ty CP Khoan và Dịch vụ Khoan Dầu khí","HOSE"),
+        ("PVS","Tổng Công ty CP Dịch vụ Kỹ thuật Dầu khí VN","HNX"),
+    ]
+    return pd.DataFrame(data, columns=["symbol", "organ_name", "exchange"])
+
+
+def build_display_options(df: pd.DataFrame):
     """
-    Lấy toàn bộ mã cổ phiếu trên 3 sàn HOSE/HNX/UPCOM kèm tên công ty và sàn.
-    Trả về DataFrame với 3 cột chuẩn hoá: symbol, organ_name, exchange.
-    Fallback lần lượt qua VCI -> KBS -> DNSE.
-
-    FIX: Mở rộng regex từ [A-Z]{3} -> [A-Z0-9]{2,5} để không bỏ sót
-         mã 4-5 ký tự (ví dụ: VNPT, C4G, ...) hoặc có số.
+    Trả về (display_list, display_to_symbol).
+    display_list: ["ACB — Ngân hàng TMCP Á Châu (HOSE)", ...]
+    display_to_symbol: {"ACB — ...": "ACB"}
     """
-    last_error = None
-    for source in ["VCI", "KBS", "DNSE"]:
-        try:
-            lst = Listing(source=source)
-            df = lst.symbols_by_exchange()
-
-            # Chuẩn hóa tên cột
-            cols_lower = {c.lower(): c for c in df.columns}
-            symbol_col   = cols_lower.get("symbol", "symbol")
-            exchange_col = cols_lower.get("exchange", cols_lower.get("board", "exchange"))
-            name_col     = cols_lower.get("organ_name", cols_lower.get("organ_short_name", None))
-
-            if symbol_col not in df.columns:
-                raise ValueError(f"Nguồn {source} thiếu cột symbol")
-
-            out = pd.DataFrame()
-            out["symbol"] = df[symbol_col].astype(str).str.strip().str.upper()
-            out["exchange"] = (
-                df[exchange_col].apply(_normalize_exchange_label)
-                if exchange_col in df.columns
-                else "KHÁC"
-            )
-            out["organ_name"] = (
-                df[name_col] if name_col and name_col in df.columns else ""
-            )
-
-            # Giữ lại 3 sàn chính
-            out = out[out["exchange"].isin(["HOSE", "HNX", "UPCOM"])]
-
-            # FIX: Chấp nhận mã 2–5 ký tự gồm chữ và số (bao phủ toàn bộ 1403+ mã VN)
-            # Bỏ filter cũ: out["symbol"].str.fullmatch(r"[A-Z]{3}")
-            out = out[out["symbol"].str.fullmatch(r"[A-Z][A-Z0-9]{1,4}")]
-
-            # Bỏ dòng không có tên công ty
-            out["organ_name"] = out["organ_name"].astype(str).str.strip()
-            out = out[~out["organ_name"].isin(["", "nan", "None", "NaN"])]
-
-            if out.empty:
-                raise ValueError(f"Nguồn {source} trả về danh sách rỗng sau khi lọc")
-
-            out = out.drop_duplicates(subset="symbol")
-            out = out.sort_values(["exchange", "symbol"]).reset_index(drop=True)
-            out.attrs["source_used"] = source
-            return out
-
-        except Exception as e:
-            last_error = e
-            print(f"[SYMBOLS] Fallback từ nguồn {source}: {e}")
-            continue
-
-    st.warning(
-        f"Không tải được danh sách mã từ VCI/KBS/DNSE (lỗi cuối: {last_error}). "
-        "Bạn vẫn có thể gõ tay mã cổ phiếu."
-    )
-    return pd.DataFrame(columns=["symbol", "exchange", "organ_name"])
-
-
-def build_display_options(df_symbols: pd.DataFrame):
-    """
-    Tạo list string hiển thị dạng 'MÃ — Tên công ty (SÀN)' và dict map ngược.
-    """
-    if df_symbols.empty:
+    if df is None or df.empty:
         return [], {}
 
     display_list = []
     display_to_symbol = {}
 
-    for _, row in df_symbols.iterrows():
-        name = row["organ_name"] if row["organ_name"] else ""
-        if name:
-            label = f"{row['symbol']} — {name} ({row['exchange']})"
+    # Chuẩn hoá tên cột
+    sym_col  = next((c for c in df.columns if c.lower() in ["symbol", "ticker"]), None)
+    name_col = next((c for c in df.columns if "name" in c.lower() or "organ" in c.lower()), None)
+    exch_col = next((c for c in df.columns if "exchange" in c.lower() or "comgroup" in c.lower()), None)
+
+    if sym_col is None:
+        return [], {}
+
+    for _, row in df.iterrows():
+        sym  = str(row[sym_col]).strip().upper()
+        name = str(row[name_col]).strip() if name_col else ""
+        exch = str(row[exch_col]).strip() if exch_col else ""
+
+        if exch and exch.upper() not in ("NAN", "NONE", ""):
+            label = f"{sym} — {name} ({exch})" if name else f"{sym} ({exch})"
         else:
-            label = f"{row['symbol']} ({row['exchange']})"
+            label = f"{sym} — {name}" if name else sym
+
         display_list.append(label)
-        display_to_symbol[label] = row["symbol"]
+        display_to_symbol[label] = sym
 
     return display_list, display_to_symbol
