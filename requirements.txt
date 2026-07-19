@@ -3,7 +3,7 @@ plotly
 pandas
 numpy
 yfinance
-vnstock>=4.0.0
+vnstock==0.3.0.9
 requests
 lxml
 beautifulsoup4
