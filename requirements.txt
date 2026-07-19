@@ -6,4 +6,5 @@ yfinance
 requests
 lxml
 beautifulsoup4
-vnstock<4.0.0
+vnstock==3.1.0
+pytz
