@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 import streamlit as st
-# BYPASS vnai hard-cap 5 kỳ — phải gọi TRƯỚC mọi Finance() call
+# BYPASS vnai hard-cap 4 kỳ — phải gọi TRƯỚC mọi Finance() call
 # [FILE 1] Giữ lại apply_unpatch — File 2 thiếu block này
 from unpatch_vnai import apply_unpatch
 apply_unpatch()
