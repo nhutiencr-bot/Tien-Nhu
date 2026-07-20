@@ -821,6 +821,10 @@ def execute_equity_research_pipeline(ticker):
             try:
                 _cafef_full = fetch_cafef_yearly_full(ticker, years=list(allowed_years))
 
+                # Expose lỗi nội bộ từ cafef_fallback (nếu có)
+                _cafef_internal_err = _cafef_full.pop('__error__', None)
+                _cafef_trace        = _cafef_full.pop('__trace__', None)
+
                 _rev_cf = _filter_years(_cafef_full.get("revenue",      pd.Series(dtype=float)))
                 _np_cf  = _filter_years(_cafef_full.get("net_profit",   pd.Series(dtype=float)))
                 _eq_cf  = _filter_years(_cafef_full.get("equity",       pd.Series(dtype=float)))
@@ -832,6 +836,9 @@ def execute_equity_research_pipeline(ticker):
                     "equity":       dict(_eq_cf),
                     "total_assets": dict(_ta_cf),
                 }
+                if _cafef_internal_err:
+                    _cafef_debug["__internal_error__"] = _cafef_internal_err
+                    _cafef_debug["__trace__"]          = _cafef_trace
 
                 revenue_series      = _merge_series(revenue_series,      _rev_cf)
                 net_profit_series   = _merge_series(net_profit_series,   _np_cf)
@@ -844,7 +851,9 @@ def execute_equity_research_pipeline(ticker):
                     eps_series = _merge_series(eps_series, _eps_cf)
 
             except Exception as _cafef_exc:
-                _cafef_debug["error"] = str(_cafef_exc)
+                import traceback as _tb_cf
+                _cafef_debug["error"] = f"{type(_cafef_exc).__name__}: {_cafef_exc}"
+                _cafef_debug["trace"] = _tb_cf.format_exc(limit=5)
 
         # ─────────────────────────────────────────────────────────────────
         # TẦNG 2 — DNSE fallback
@@ -860,45 +869,89 @@ def execute_equity_research_pipeline(ticker):
         _dnse_debug = {}
         if _missing_after_cafef:
             try:
+                import requests as _req_dnse
+                # Probe DNSE API trực tiếp để lấy raw response cho debug
+                _dnse_probe_url = (
+                    f"https://api.dnse.com.vn/analysis-api/v1/analysis/financial-report"
+                    f"?symbol={ticker}&type=IS&period=YEARLY"
+                )
+                try:
+                    _probe_r = _req_dnse.get(_dnse_probe_url,
+                                             headers={"Accept": "application/json", "User-Agent": "Mozilla/5.0"},
+                                             timeout=10)
+                    _dnse_debug["__probe_status__"] = _probe_r.status_code
+                    _dnse_debug["__probe_keys__"]   = list(_probe_r.json().keys()) if _probe_r.ok else _probe_r.text[:300]
+                except Exception as _pe:
+                    _dnse_debug["__probe_error__"] = str(_pe)
+
                 _dnse_data = _fetch_dnse_financials(ticker, allowed_years)
                 _rev_dn  = _filter_years(normalize_to_billion_vnd(_dnse_data.get("revenue",      pd.Series(dtype=float))))
                 _np_dn   = _filter_years(normalize_to_billion_vnd(_dnse_data.get("net_profit",   pd.Series(dtype=float))))
                 _eq_dn   = _filter_years(normalize_to_billion_vnd(_dnse_data.get("equity",       pd.Series(dtype=float))))
                 _ta_dn   = _filter_years(normalize_to_billion_vnd(_dnse_data.get("total_assets", pd.Series(dtype=float))))
 
-                _dnse_debug = {
+                _dnse_debug.update({
                     "revenue":      dict(_rev_dn),
                     "net_profit":   dict(_np_dn),
                     "equity":       dict(_eq_dn),
                     "total_assets": dict(_ta_dn),
-                }
+                })
 
                 revenue_series      = _merge_series(revenue_series,      _rev_dn)
                 net_profit_series   = _merge_series(net_profit_series,   _np_dn)
                 equity_series       = _merge_series(equity_series,       _eq_dn)
                 total_assets_series = _merge_series(total_assets_series, _ta_dn)
             except Exception as _dnse_exc:
-                _dnse_debug["error"] = str(_dnse_exc)
+                import traceback as _tb_dn
+                _dnse_debug["error"] = f"{type(_dnse_exc).__name__}: {_dnse_exc}"
+                _dnse_debug["trace"] = _tb_dn.format_exc(limit=5)
 
         # DEBUG EXPANDER
         if _missing_any:
             with st.expander(f"🔍 DEBUG fallback — {ticker} (năm thiếu: {_missing_any})", expanded=False):
+                # ── Quarterly column debug (chẩn đoán tại sao 2025 thiếu) ──
+                _inc_q_cols  = list(df_income_q.columns)  if df_income_q  is not None and not df_income_q.empty  else []
+                _bal_q_cols  = list(df_balance_q.columns) if df_balance_q is not None and not df_balance_q.empty else []
+                _cols_2025_inc = [c for c in _inc_q_cols  if '2025' in str(c)]
+                _cols_2025_bal = [c for c in _bal_q_cols  if '2025' in str(c)]
+                st.write("**df_income_q — tất cả cột:**",  _inc_q_cols)
+                st.write("**df_balance_q — tất cả cột:**", _bal_q_cols)
+                st.write("**Cột income_q chứa '2025':**",  _cols_2025_inc  or "⚠️ KHÔNG CÓ — vnstock không trả Q 2025")
+                st.write("**Cột balance_q chứa '2025':**", _cols_2025_bal  or "⚠️ KHÔNG CÓ — vnstock không trả Q 2025")
+                st.write("---")
                 st.write("**Tầng 0 (quarterly agg) — revenue sau merge:**", dict(revenue_series))
                 st.write("**Tầng 0 (quarterly agg) — net_profit sau merge:**", dict(net_profit_series))
                 st.write("**Năm còn thiếu trước CafeF:**", _missing_any)
                 if "error" in _cafef_debug:
                     st.error(f"CafeF exception: {_cafef_debug.get('error')}")
+                    if "trace" in _cafef_debug:
+                        st.code(_cafef_debug["trace"], language="")
+                elif "__internal_error__" in _cafef_debug:
+                    st.error(f"CafeF internal error: {_cafef_debug['__internal_error__']}")
+                    if "__trace__" in _cafef_debug:
+                        st.code(_cafef_debug["__trace__"], language="")
                 else:
                     st.write("**CafeF trả về:**")
                     for k, v in _cafef_debug.items():
+                        if k.startswith("__"):
+                            continue
                         st.write(f"- `{k}`: {v if v else '⚠️ RỖNG — CafeF chưa cập nhật hoặc bị block'}")
                 if _missing_after_cafef:
                     st.write("**Năm còn thiếu sau CafeF (→ thử DNSE):**", _missing_after_cafef)
+                    if "__probe_status__" in _dnse_debug:
+                        st.write(f"**DNSE probe HTTP status:** `{_dnse_debug['__probe_status__']}`")
+                        st.write(f"**DNSE probe response keys/body:** `{_dnse_debug.get('__probe_keys__')}`")
+                    if "__probe_error__" in _dnse_debug:
+                        st.error(f"DNSE probe error: {_dnse_debug['__probe_error__']}")
                     if "error" in _dnse_debug:
                         st.error(f"DNSE exception: {_dnse_debug.get('error')}")
+                        if "trace" in _dnse_debug:
+                            st.code(_dnse_debug["trace"], language="")
                     else:
                         st.write("**DNSE trả về:**")
                         for k, v in _dnse_debug.items():
+                            if k.startswith("__"):
+                                continue
                             st.write(f"- `{k}`: {v if v else '⚠️ DNSE không có dữ liệu'}")
                 st.write("**Sau tất cả tầng — revenue:**",      dict(revenue_series))
                 st.write("**Sau tất cả tầng — net_profit:**",   dict(net_profit_series))
