@@ -1,16 +1,25 @@
 import pandas as pd
 import numpy as np
 import streamlit as st
-# BYPASS vnai hard-cap 4 kỳ — phải gọi TRƯỚC mọi Finance() call
-# [FILE 1] Giữ lại apply_unpatch — File 2 thiếu block này
-from unpatch_vnai import apply_unpatch
-apply_unpatch()
+# BYPASS vnai hard-cap 4 kỳ
+# QUAN TRỌNG: Import Finance/Quote/Company TRƯỚC, rồi mới unpatch
+# Lý do: vnai._ensure_patches_applied() chỉ chạy 1 lần (có guard).
+# Nếu unpatch trước khi trigger guard, vnai sẽ re-patch lại sau đó.
 from news_fetcher import fetch_news_with_fallback
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from vnstock.api.quote import Quote
 from vnstock.api.financial import Finance
 from vnstock.api.company import Company
+# Trigger vnai patch để set guard _patches_initialized = True
+try:
+    import vnai as _vnai_init
+    _vnai_init._ensure_patches_applied()
+except Exception:
+    pass
+# Bây giờ mới unpatch — vnai sẽ không re-patch nữa (guard đã set)
+from unpatch_vnai import apply_unpatch
+apply_unpatch()
 from financial_normalizer import (
     find_row_series, build_5y_financial_table, build_financial_table,
     get_latest, get_latest_n_years, cagr,
@@ -432,6 +441,9 @@ def execute_equity_research_pipeline(ticker):
         fin5 = build_5y_financial_table(df_income, df_balance, df_ratio, ticker=ticker)
 
         revenue_series            = normalize_to_billion_vnd(fin5['revenue'])
+        # Doanh thu = 0 là dữ liệu lỗi (API trả 0 thay vì null) → drop để fallback lấy đúng
+        if not revenue_series.empty:
+            revenue_series = revenue_series[revenue_series > 0]
         equity_series             = normalize_to_billion_vnd(fin5['equity'])
         total_assets_series       = normalize_to_billion_vnd(fin5['total_assets'])
         net_profit_series         = normalize_net_profit_with_anchor(
@@ -1285,8 +1297,6 @@ def execute_equity_research_pipeline(ticker):
         df_5y_table['Số CP lưu hành (tỷ)'] = df_5y_table['Năm'].map(
             lambda y: _shares_map.get(y, None))
 
-        def _ros_annual(y):
-            rev = revenue_serie
         def _ros_annual(y):
             rev = revenue_series.get(y)    if y in revenue_series.index    else None
             np_ = net_profit_series.get(y) if y in net_profit_series.index else None
