@@ -557,7 +557,13 @@ def execute_equity_research_pipeline(ticker):
                 if target_year < current_year and n < 4:
                     # Năm đã qua nhưng thiếu quý → không ngoại suy, bỏ qua
                     continue
-                out[key]         = round(float(valid.sum()) * 4 / n, 2)
+                # Năm hiện tại: cộng thực các quý có được (không annualize)
+                # Năm đã qua đủ 4 quý: cộng thực
+                # Năm đã qua thiếu quý: annualize nhẹ chỉ nếu có >= 2 quý
+                if target_year == current_year:
+                    out[key] = round(float(valid.sum()), 2)  # TTM thực, không project
+                else:
+                    out[key] = round(float(valid.sum()), 2) if n == 4 else round(float(valid.sum()) * 4 / n, 2)
                 out[f'_{key}_q'] = n   # debug: số quý dùng để tính
             # Stock: quý mới nhất
             if not _eq_q.dropna().empty:
@@ -579,14 +585,19 @@ def execute_equity_research_pipeline(ticker):
         # Dùng OR ở đây vì ta muốn fill TỪng field còn thiếu, không phải bỏ qua
         # năm chỉ vì một vài field đã có.
         # ─────────────────────────────────────────────────────────────────
+        # FIX: trigger Tầng 0 nếu thiếu BẤT KỲ field nào (OR), không phải cả 4 (AND)
         _years_q0_check = sorted(
             allowed_years - (
-                set(revenue_series.index)
-                & set(net_profit_series.index)
-                & set(equity_series.index)
-                & set(total_assets_series.index)
+                set(revenue_series.dropna().index)
+                & set(net_profit_series.dropna().index)
+                & set(equity_series.dropna().index)
+                & set(total_assets_series.dropna().index)
             )
         )
+        # Luôn thêm năm hiện tại vì annual có thể chưa cập nhật
+        _current_yr_q0 = datetime.today().year
+        if _current_yr_q0 in allowed_years:
+            _years_q0_check = sorted(set(_years_q0_check) | {_current_yr_q0})
         for _yr0 in _years_q0_check:
             _agg = _aggregate_year_from_quarters(_yr0)
             if not _agg:
@@ -611,13 +622,18 @@ def execute_equity_research_pipeline(ticker):
         # _missing_any: dùng AND (giao) để phát hiện năm chưa đủ cả 4 field.
         # Gọi CafeF nếu có bất kỳ năm nào chưa đủ cả 4 field.
         # ─────────────────────────────────────────────────────────────────
+        # FIX: _missing_any = năm thiếu ÍT NHẤT 1 field (OR logic)
         _years_have_all = (
-            set(revenue_series.index)
-            & set(net_profit_series.index)
-            & set(equity_series.index)
-            & set(total_assets_series.index)
+            set(revenue_series.dropna().index)
+            & set(net_profit_series.dropna().index)
+            & set(equity_series.dropna().index)
+            & set(total_assets_series.dropna().index)
         )
         _missing_any = sorted(allowed_years - _years_have_all)
+        # Luôn retry năm hiện tại qua CafeF/DNSE (dữ liệu có thể mới cập nhật)
+        _current_yr_miss = datetime.today().year
+        if _current_yr_miss in allowed_years and _current_yr_miss not in _missing_any:
+            _missing_any = sorted(set(_missing_any) | {_current_yr_miss})
 
         # Khởi tạo _cf_cf ở ngoài if để CFO fallback block luôn có thể dùng
         _cf_cf = pd.DataFrame()
