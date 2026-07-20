@@ -689,12 +689,18 @@ def render_tab_dupont(df_dupont):
     latest_year = df_dupont.index.max()
     r = df_dupont.loc[latest_year]
     d1, d2, d3 = st.columns(3)
+    import pandas as _pd
+    def _fmt(val, fmt):
+        try:
+            return fmt.format(float(val)) if _pd.notna(val) and val != '' else '—'
+        except (TypeError, ValueError):
+            return '—'
     d1.metric(f"Biên LN {latest_year}",
-              f"{r[COL_MARGIN]:.1f}%" if COL_MARGIN in r and r[COL_MARGIN] == r[COL_MARGIN] else '—')
+              _fmt(r.get(COL_MARGIN) if hasattr(r, 'get') else r[COL_MARGIN] if COL_MARGIN in r else None, "{:.1f}%"))
     d2.metric("Vòng Quay TS",
-              f"{r[COL_TURNOVER]:.2f}x" if COL_TURNOVER in r and r[COL_TURNOVER] == r[COL_TURNOVER] else '—')
+              _fmt(r.get(COL_TURNOVER) if hasattr(r, 'get') else r[COL_TURNOVER] if COL_TURNOVER in r else None, "{:.2f}x"))
     d3.metric("Đòn Bẩy",
-              f"{r[COL_LEVERAGE]:.2f}x" if COL_LEVERAGE in r and r[COL_LEVERAGE] == r[COL_LEVERAGE] else '—')
+              _fmt(r.get(COL_LEVERAGE) if hasattr(r, 'get') else r[COL_LEVERAGE] if COL_LEVERAGE in r else None, "{:.2f}x"))
 
 
 def render_tab_technical(df_price, tech, metrics):
