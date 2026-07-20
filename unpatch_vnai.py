@@ -36,6 +36,14 @@ def apply_unpatch() -> bool:
 
     success = False
 
+    # ── CRITICAL: trigger vnai patch trước để guard _patches_initialized = True
+    # Nếu không, vnai sẽ re-patch lại sau khi ta override (vì guard chưa set)
+    try:
+        import vnai as _vnai
+        _vnai._ensure_patches_applied()
+    except Exception:
+        pass
+
     # ── VCI ────────────────────────────────────────────────────────────────
     try:
         from vnstock.explorer.vci.financial import Finance as VCI_Finance
