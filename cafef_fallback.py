@@ -178,19 +178,7 @@ def fetch_cafef_balance_sheet_5y(
     end_year: int | None = None,
 ) -> dict[str, pd.Series]:
     """
-    Public API: lấy Vốn CSH + Tổng TS từ CafeF cho 5 NĂM TÀI CHÍNH ĐÃ
-    KẾT THÚC gần nhất (KHÔNG bao gồm năm hiện tại đang chạy dở).
-
-    TRƯỚC ĐÂY (bug): `end_year` được nhận vào nhưng không hề dùng, và
-    "trang năm cũ" bị hard-code cứng year=2021 — không tự trượt theo
-    thời gian, và không có bước loại bỏ năm hiện tại (VD 2026) nếu nó
-    lỡ xuất hiện trong bảng CafeF (dữ liệu tạm/chưa kiểm toán).
-
-    BÂY GIỜ: end_year mặc định = năm hiện tại (datetime.today().year).
-    Cửa sổ mục tiêu = [end_year - 5, end_year - 1] — tức LOẠI năm hiện
-    tại ra khỏi tập cần lấy (vì FY đó chưa kết toán, không có báo cáo
-    năm đầy đủ để so sánh) và tự dịch theo thời gian mỗi khi chạy lại,
-    không còn hard-code số năm cụ thể nào.
+    Public API: lấy Vốn CSH + Tổng TS từ CafeF cho ~5 năm gần nhất.
 
     Trả về:
     {
@@ -200,24 +188,13 @@ def fetch_cafef_balance_sheet_5y(
 
     Nếu lỗi → trả về 2 Series rỗng (không crash pipeline).
     """
-    from datetime import datetime as _dt
-
     empty = {'equity': pd.Series(dtype=float), 'total_assets': pd.Series(dtype=float)}
     try:
-        if end_year is None:
-            end_year = _dt.today().year
-
-        # Năm tài chính CUỐI CÙNG đã kết thúc = end_year - 1
-        # (vd chạy vào 2026 -> năm gần nhất cần lấy là 2025, không phải 2026)
-        last_completed_year = end_year - 1
-        target_years = set(range(last_completed_year - 4, last_completed_year + 1))
-
         data = _scrape_cafef_balance(ticker, year=0)
 
-        # "Trang năm cũ" tính động: lùi về đủ để phủ hết target_years,
-        # thay vì hard-code year=2021.
-        old_anchor_year = min(target_years)
-        data_old = _scrape_cafef_balance(ticker, year=old_anchor_year)
+        # CafeF default trả 5 năm gần nhất (2022–2026 khi đang ở 2026).
+        # Merge thêm trang year=2021 để đảm bảo có đủ 2021–2025.
+        data_old = _scrape_cafef_balance(ticker, year=2021)
         for k in ('equity', 'total_assets'):
             for yr, val in data_old.get(k, {}).items():
                 data.setdefault(k, {})[yr] = data[k].get(yr) or val
@@ -228,13 +205,6 @@ def fetch_cafef_balance_sheet_5y(
         # Sanity check: loại bỏ giá trị bất thường (< 0 hoặc > 50,000 tỷ cho từng chỉ số)
         eq_series = eq_series[(eq_series > 0) & (eq_series < 5e7)]
         ta_series = ta_series[(ta_series > 0) & (ta_series < 5e7)]
-
-        # QUAN TRỌNG: chỉ giữ lại các năm ĐÃ KẾT THÚC trong cửa sổ mục
-        # tiêu — loại bỏ năm hiện tại (vd 2026) nếu CafeF lỡ trả về số
-        # tạm/dở dang cho năm chưa kết toán, tránh hiển thị nhầm số
-        # chưa đầy đủ như thể là số cả năm.
-        eq_series = eq_series[eq_series.index.isin(target_years)]
-        ta_series = ta_series[ta_series.index.isin(target_years)]
 
         return {'equity': eq_series, 'total_assets': ta_series}
 
@@ -433,34 +403,12 @@ def fetch_cafef_yearly_full(ticker: str, years: list = None, debug: bool = False
 
     Chiến lược 2 tầng:
       Tầng 1 — AJAX API (JSON): đáng tin, không bị ảnh hưởng bởi thay đổi HTML.
-               page=1 → 5 năm gần nhất tính từ lúc gọi.
-               page=2 → 5 năm trước đó nữa.
+               page=1 → 5 năm gần nhất (hiện tại: 2022-2026).
+               page=2 → 5 năm trước đó (2017-2021) — bắt buộc nếu cần 2021.
       Tầng 2 — HTML scraping: fallback khi AJAX trả rỗng (hiếm gặp).
-
-    Nếu `years=None` (không chỉ định), mặc định chỉ trả về các năm TÀI
-    CHÍNH ĐÃ KẾT THÚC (không bao gồm năm hiện tại đang chạy dở, vì FY đó
-    chưa có báo cáo năm đầy đủ để so sánh) — tránh nhầm lẫn "cào năm nay"
-    thay vì năm gần nhất đã xong.
-
-    TRƯỚC ĐÂY (bug): ngưỡng "cần trang năm cũ" bị hard-code cứng
-    `y <= 2021`, và trang năm cũ luôn gọi `year=2021` — không tự trượt
-    theo thời gian khi những năm sau này (2023, 2024, 2025...) cũng cần
-    trang cũ. Giờ tính động theo min(years) thực tế được yêu cầu.
     """
-    from datetime import datetime as _dt
-
     empty_s = pd.Series(dtype=float)
-
-    current_year = _dt.today().year
-    last_completed_year = current_year - 1
-
-    if years is None:
-        # Mặc định: 5 năm tài chính gần nhất ĐÃ kết thúc (vd chạy giữa
-        # 2026 -> [2021, 2022, 2023, 2024, 2025], KHÔNG có 2026).
-        years = list(range(last_completed_year - 4, last_completed_year + 1))
-
-    need_old = bool(years) and (min(years) <= last_completed_year - 4)
-    old_anchor_year = min(years) if years else (last_completed_year - 4)
+    need_old = bool(years and any(y <= 2021 for y in years))
 
     try:
         # ── Tầng 1: AJAX API ─────────────────────────────────────────────
@@ -488,8 +436,8 @@ def fetch_cafef_yearly_full(ticker: str, years: list = None, debug: bool = False
             bs  = _scrape_cafef_balance(ticker, year=0)
             inc = _scrape_cafef_income(ticker, year=0)
             if need_old:
-                bs_old  = _scrape_cafef_balance(ticker, year=old_anchor_year)
-                inc_old = _scrape_cafef_income(ticker, year=old_anchor_year)
+                bs_old  = _scrape_cafef_balance(ticker, year=2021)
+                inc_old = _scrape_cafef_income(ticker, year=2021)
                 for k in ('equity', 'total_assets'):
                     for yr, val in bs_old.get(k, {}).items():
                         bs[k].setdefault(yr, val)
