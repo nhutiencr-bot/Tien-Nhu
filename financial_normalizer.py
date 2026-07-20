@@ -38,15 +38,31 @@ TARGET_YEARS = list(range(2021, 2026))
 
 
 def _get_year_columns(df: pd.DataFrame):
+    """
+    Trả về các cột năm từ DataFrame BCTC vnstock.
+
+    Hỗ trợ 2 format vnstock trả về:
+      - Format cũ: '2021', '2022', ..., '2025'          (int hoặc str)
+      - Format mới: '2021-Q4', '2022-Q4', ..., '2025-Q4' (annual = Q4)
+
+    Trả về cột nguyên gốc (dùng làm key tra DataFrame),
+    sorted theo năm tăng dần.
+    """
     meta_cols = {'item', 'item_en', 'item_id'}
     year_cols = []
     for c in df.columns:
         if c in meta_cols:
             continue
         c_str = str(c).strip()
-        if re.fullmatch(r'\d{4}', c_str):
+        if re.fullmatch(r'\d{4}', c_str):           # '2025'
             year_cols.append(c)
-    return sorted(year_cols, key=lambda x: int(str(x).strip()))
+        elif re.fullmatch(r'\d{4}-Q4', c_str):      # '2025-Q4'
+            year_cols.append(c)
+
+    def _year_sort_key(col):
+        return int(str(col).strip()[:4])  # lấy 4 ký tự đầu = năm
+
+    return sorted(year_cols, key=_year_sort_key)
 
 
 def _quarter_sort_key(c):
@@ -122,7 +138,8 @@ def find_row_series(df: pd.DataFrame, keywords, exclude_keywords=None,
             if period == 'quarter':
                 result[str(yc).strip()] = float(val)
             else:
-                yr = int(str(yc).strip())
+                # Hỗ trợ cả '2025' (format cũ) và '2025-Q4' (format mới)
+                yr = int(str(yc).strip()[:4])
                 result[yr] = float(val)
 
     if period == 'quarter':
