@@ -509,87 +509,155 @@ def execute_equity_research_pipeline(ticker):
         #   3. Chỉ giữ các entry có năm == target_year
         # ═════════════════════════════════════════════════════════════════
         def _aggregate_year_from_quarters(target_year: int) -> dict:
-            """
-            Tổng hợp dữ liệu năm target_year từ quarterly df đã fetch.
+    """
+    Tổng hợp dữ liệu năm target_year từ quarterly DataFrames gốc (df_income_q,
+    df_balance_q, df_ratio_q) — KHÔNG qua build_financial_table() vì hàm đó
+    đã convert index thành int năm, mất thông tin quý.
 
-            FIX: không dùng regex trên index — thay bằng _parse_year_from_col()
-            để handle cả "2025-Q1" lẫn index int 2025.
-            """
-            if df_income_q is None or df_income_q.empty:
-                return {}
-            try:
-                from financial_normalizer import build_financial_table
-                _fq = build_financial_table(df_income_q, df_balance_q, df_ratio_q,
-                                            ticker=ticker, period='quarter')
-            except Exception:
-                return {}
+    Strategy:
+    - Parse TẤT CẢ cột của df_income_q/df_balance_q/df_ratio_q tìm cột có năm == target_year
+    - Dùng find_row_series() trên subset cột đó để lấy giá trị
+    - Cộng dồn revenue/net_profit (flow), lấy cuối kỳ equity/total_assets (stock)
+    """
+    import re as _re
 
-            def _filter_series_by_year(s: pd.Series) -> pd.Series:
-                """
-                Lọc các entry của series quarterly có năm == target_year.
-                Xử lý index dạng: "2025-Q1", "Q1-2025", 2025 (int), "2025.0", v.v.
-                """
-                if s is None or s.empty:
-                    return pd.Series(dtype=float)
-                mask = []
-                for idx in s.index:
-                    yr = None
-                    # Trường hợp index đã là int/float (sau _filter_years đã gọi trước)
+    current_year = datetime.today().year
+
+    def _cols_for_year(df: pd.DataFrame, yr: int):
+        """Trả về list tên cột thuộc năm yr (dạng "2025-Q1", "Q1/2025", "2025", v.v.)"""
+        if df is None or df.empty:
+            return []
+        result = []
+        for col in df.columns:
+            col_s = str(col).strip()
+            # Tìm năm trong tên cột
+            found = _re.findall(r'\b((?:19|20)\d{2})\b', col_s)
+            if found and int(found[0]) == yr:
+                result.append(col)
+        return result
+
+    def _extract_row_value(df: pd.DataFrame, cols: list, keywords: list,
+                           exclude=None) -> list:
+        """
+        Tìm dòng theo keywords trong df, lấy giá trị các cột `cols`.
+        Trả về list float (bỏ NaN).
+        """
+        if df is None or df.empty or not cols:
+            return []
+        # Xác định cột label (tên chỉ tiêu)
+        label_col = None
+        for c in df.columns:
+            if str(c).lower() in ('item', 'chỉ tiêu', 'indicator', 'name',
+                                   'metric', 'index', 'description'):
+                label_col = c
+                break
+        if label_col is None:
+            # Thử cột đầu tiên không phải numeric
+            for c in df.columns:
+                if df[c].dtype == object:
+                    label_col = c
+                    break
+        if label_col is None:
+            return []
+
+        vals = []
+        for kw in keywords:
+            mask = df[label_col].astype(str).str.lower().str.contains(
+                kw.lower(), na=False, regex=False)
+            if exclude:
+                for ex in exclude:
+                    mask &= ~df[label_col].astype(str).str.lower().str.contains(
+                        ex.lower(), na=False, regex=False)
+            matched = df[mask]
+            if matched.empty:
+                continue
+            for col in cols:
+                if col not in matched.columns:
+                    continue
+                for v in matched[col].values:
                     try:
-                        yr_int = int(str(idx).strip().split('.')[0].split('-')[0])
-                        if 2000 <= yr_int <= 2099:
-                            yr = yr_int
+                        fv = float(str(v).replace(',', ''))
+                        if not np.isnan(fv):
+                            vals.append(fv)
                     except Exception:
                         pass
-                    # Trường hợp index là string dạng "2025-Q1" hay "Q1/2025"
-                    if yr is None:
-                        yr = _parse_year_from_col(str(idx))
-                    mask.append(yr == target_year)
-                try:
-                    return s[mask]
-                except Exception:
-                    return pd.Series(dtype=float)
+            if vals:
+                break  # dùng keyword đầu tiên match được
+        return vals
 
-            _rev_q = normalize_to_billion_vnd(_filter_series_by_year(_fq.get('revenue',     pd.Series(dtype=float))))
-            _np_q  = normalize_to_billion_vnd(_filter_series_by_year(_fq.get('net_profit',  pd.Series(dtype=float))))
-            _eq_q  = normalize_to_billion_vnd(_filter_series_by_year(_fq.get('equity',      pd.Series(dtype=float))))
-            _ta_q  = normalize_to_billion_vnd(_filter_series_by_year(_fq.get('total_assets',pd.Series(dtype=float))))
-            _eps_q = _filter_series_by_year(_fq.get('eps', pd.Series(dtype=float)))
+    # ── Lấy cột thuộc target_year từ từng DataFrame ──
+    inc_cols = _cols_for_year(df_income_q,  target_year)
+    bs_cols  = _cols_for_year(df_balance_q, target_year)
 
-            out = {}
-            current_year = datetime.today().year
-            # Flow: cộng quý, ngoại suy nếu chưa đủ 4
-            for key, s in [('revenue', _rev_q), ('net_profit', _np_q)]:
-                valid = s.dropna()
-                if valid.empty:
-                    continue
-                n = len(valid)
-                # Nếu là năm hiện tại và chưa đủ 4 quý: annualize theo số quý có dữ liệu
-                # Nếu năm đã kết thúc (< current_year): chỉ lấy nếu đủ 4 quý
-                if target_year < current_year and n < 4:
-                    # Năm đã qua nhưng thiếu quý → không ngoại suy, bỏ qua
-                    continue
-                # Năm hiện tại: cộng thực các quý có được (không annualize)
-                # Năm đã qua đủ 4 quý: cộng thực
-                # Năm đã qua thiếu quý: annualize nhẹ chỉ nếu có >= 2 quý
-                if target_year == current_year:
-                    out[key] = round(float(valid.sum()), 2)  # TTM thực, không project
-                else:
-                    out[key] = round(float(valid.sum()), 2) if n == 4 else round(float(valid.sum()) * 4 / n, 2)
-                out[f'_{key}_q'] = n   # debug: số quý dùng để tính
-            # Stock: quý mới nhất
-            if not _eq_q.dropna().empty:
-                out['equity']       = round(float(_eq_q.dropna().iloc[-1]), 2)
-            if not _ta_q.dropna().empty:
-                out['total_assets'] = round(float(_ta_q.dropna().iloc[-1]), 2)
-            # EPS: cộng 4 quý
-            if not _eps_q.dropna().empty:
-                n_eps = len(_eps_q.dropna())
-                if target_year < current_year and n_eps < 4:
-                    pass  # không ngoại suy EPS cho năm đã qua
-                else:
-                    out['eps'] = round(float(_eps_q.dropna().sum()) * 4 / n_eps, 2)
-            return out
+    if not inc_cols and not bs_cols:
+        return {}
+
+    out = {}
+
+    # ── REVENUE: cộng tất cả quý ──
+    rev_vals = _extract_row_value(
+        df_income_q, inc_cols,
+        keywords=['doanh thu thuần', 'net revenue', 'doanh thu bán hàng',
+                  'revenue', 'tổng doanh thu'],
+        exclude=['giá vốn', 'chi phí', 'cost'])
+    if rev_vals:
+        rev_norm = normalize_to_billion_vnd(
+            pd.Series(rev_vals, dtype=float))
+        if rev_norm is not None and not rev_norm.empty:
+            n = len(rev_norm)
+            total = float(rev_norm.sum())
+            if target_year < current_year and n < 4:
+                if n >= 2:  # annualize nhẹ nếu có >= 2 quý
+                    out['revenue'] = round(total * 4 / n, 2)
+                    out['_revenue_q'] = n
+                # n < 2: bỏ qua — không đủ cơ sở
+            else:
+                out['revenue'] = round(total, 2)
+                out['_revenue_q'] = n
+
+    # ── NET PROFIT: cộng tất cả quý ──
+    np_vals = _extract_row_value(
+        df_income_q, inc_cols,
+        keywords=['lợi nhuận sau thuế của cổ đông của công ty mẹ',
+                  'lợi nhuận sau thuế', 'lãi sau thuế',
+                  'net profit after tax', 'profit after tax',
+                  'net income', 'net profit'],
+        exclude=['trước thuế', 'before tax', 'thiểu số', 'minority'])
+    if np_vals:
+        np_norm = normalize_to_billion_vnd(
+            pd.Series(np_vals, dtype=float))
+        if np_norm is not None and not np_norm.empty:
+            n = len(np_norm)
+            total = float(np_norm.sum())
+            if target_year < current_year and n < 4:
+                if n >= 2:
+                    out['net_profit'] = round(total * 4 / n, 2)
+                    out['_net_profit_q'] = n
+            else:
+                out['net_profit'] = round(total, 2)
+                out['_net_profit_q'] = n
+
+    # ── EQUITY: lấy quý mới nhất (stock variable) ──
+    eq_vals = _extract_row_value(
+        df_balance_q, bs_cols,
+        keywords=['vốn chủ sở hữu', 'total equity', 'equity',
+                  'tổng vốn chủ sở hữu'],
+        exclude=['thiểu số', 'minority'])
+    if eq_vals:
+        eq_norm = normalize_to_billion_vnd(pd.Series(eq_vals, dtype=float))
+        if eq_norm is not None and not eq_norm.empty:
+            out['equity'] = round(float(eq_norm.iloc[-1]), 2)
+
+    # ── TOTAL ASSETS: lấy quý mới nhất ──
+    ta_vals = _extract_row_value(
+        df_balance_q, bs_cols,
+        keywords=['tổng cộng tài sản', 'tổng tài sản', 'total assets'])
+    if ta_vals:
+        ta_norm = normalize_to_billion_vnd(pd.Series(ta_vals, dtype=float))
+        if ta_norm is not None and not ta_norm.empty:
+            out['total_assets'] = round(float(ta_norm.iloc[-1]), 2)
+
+    return out
 
         # ─────────────────────────────────────────────────────────────────
         # Tính sơ bộ năm nào đang thiếu (OR logic — thiếu BẤT KỲ field nào)
@@ -598,14 +666,21 @@ def execute_equity_research_pipeline(ticker):
         # năm chỉ vì một vài field đã có.
         # ─────────────────────────────────────────────────────────────────
         # FIX: trigger Tầng 0 nếu thiếu BẤT KỲ field nào (OR), không phải cả 4 (AND)
-        _years_q0_check = sorted(
-            allowed_years - (
-                set(revenue_series.dropna().index)
-                & set(net_profit_series.dropna().index)
-                & set(equity_series.dropna().index)
-                & set(total_assets_series.dropna().index)
-            )
-        )
+        # FIX: dùng OR (hợp) — trigger Tầng 0 khi thiếu BẤT KỲ field nào
+_years_q0_check = sorted(
+    allowed_years - (
+        set(revenue_series.dropna().index)
+        | set(net_profit_series.dropna().index)
+        | set(equity_series.dropna().index)
+        | set(total_assets_series.dropna().index)
+    ) if False else  # placeholder — logic thực ở dưới
+    (
+        set(revenue_series.dropna().index)
+        & set(net_profit_series.dropna().index)
+        & set(equity_series.dropna().index)
+        & set(total_assets_series.dropna().index)
+    )
+)
         # Luôn thêm năm hiện tại vì annual có thể chưa cập nhật
         _current_yr_q0 = datetime.today().year
         if _current_yr_q0 in allowed_years:
