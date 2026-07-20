@@ -95,7 +95,11 @@ st.title("🎯 AI Equity Research Terminal")
 st.caption("Khởi chạy hệ thống tự động 7 bước kết hợp cơ chế kiểm toán vượt 7 bẫy BCTC đặc thù thị trường Việt Nam.")
 
 # --- BÍ QUYẾT LÀM MƯỢT (CACHE DỮ LIỆU) ---
-@st.cache_data(ttl=3600, show_spinner=False)
+# Số liệu KQKD 2021-2025 là dữ liệu lịch sử đã chốt, không đổi mỗi ngày ->
+# cache 7 ngày để lấy 1 lần/mã, không fetch lại liên tục (trước là 1 giờ).
+_PIPELINE_CACHE_TTL = 7 * 24 * 3600  # 7 ngày
+
+@st.cache_data(ttl=_PIPELINE_CACHE_TTL, show_spinner=False)
 def get_cached_pipeline(ticker):
     return execute_equity_research_pipeline(ticker)
 
