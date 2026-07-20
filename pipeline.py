@@ -638,12 +638,11 @@ def execute_equity_research_pipeline(ticker):
         # Trigger Tầng 0: năm nào thiếu ÍT NHẤT 1 field (OR logic)
         # ─────────────────────────────────────────────────────────────────
         _years_q0_check = sorted(
-            allowed_years - (
-                set(revenue_series.dropna().index)
-                & set(net_profit_series.dropna().index)
-                & set(equity_series.dropna().index)
-                & set(total_assets_series.dropna().index)
-            )
+            yr for yr in allowed_years
+            if (yr not in revenue_series.dropna().index
+                or yr not in net_profit_series.dropna().index
+                or yr not in equity_series.dropna().index
+                or yr not in total_assets_series.dropna().index)
         )
         # Luôn thêm năm hiện tại vì annual có thể chưa cập nhật
         _current_yr_q0 = datetime.today().year
@@ -676,12 +675,11 @@ def execute_equity_research_pipeline(ticker):
         # Safety net: nếu Tầng 0 vẫn thiếu, thử parse cột năm từ annual df
         # ─────────────────────────────────────────────────────────────────
         _still_missing_0b = sorted(
-            allowed_years - (
-                set(revenue_series.dropna().index)
-                & set(net_profit_series.dropna().index)
-                & set(equity_series.dropna().index)
-                & set(total_assets_series.dropna().index)
-            )
+            yr for yr in allowed_years
+            if (yr not in revenue_series.dropna().index
+                or yr not in net_profit_series.dropna().index
+                or yr not in equity_series.dropna().index
+                or yr not in total_assets_series.dropna().index)
         )
         _current_yr_0b = datetime.today().year
         if _current_yr_0b in allowed_years:
@@ -764,13 +762,13 @@ def execute_equity_research_pipeline(ticker):
         # ─────────────────────────────────────────────────────────────────
         # _missing_any: năm thiếu ÍT NHẤT 1 field → gọi CafeF
         # ─────────────────────────────────────────────────────────────────
-        _years_have_all = (
-            set(revenue_series.dropna().index)
-            & set(net_profit_series.dropna().index)
-            & set(equity_series.dropna().index)
-            & set(total_assets_series.dropna().index)
+        _missing_any = sorted(
+            yr for yr in allowed_years
+            if (yr not in revenue_series.dropna().index
+                or yr not in net_profit_series.dropna().index
+                or yr not in equity_series.dropna().index
+                or yr not in total_assets_series.dropna().index)
         )
-        _missing_any = sorted(allowed_years - _years_have_all)
         # Luôn retry năm hiện tại qua CafeF/DNSE
         _current_yr_miss = datetime.today().year
         if _current_yr_miss in allowed_years and _current_yr_miss not in _missing_any:
@@ -851,12 +849,13 @@ def execute_equity_research_pipeline(ticker):
         # ─────────────────────────────────────────────────────────────────
         # TẦNG 2 — DNSE fallback
         # ─────────────────────────────────────────────────────────────────
-        _missing_after_cafef = sorted(allowed_years - (
-            set(revenue_series.index)
-            & set(net_profit_series.index)
-            & set(equity_series.index)
-            & set(total_assets_series.index)
-        ))
+        _missing_after_cafef = sorted(
+            yr for yr in allowed_years
+            if (yr not in revenue_series.dropna().index
+                or yr not in net_profit_series.dropna().index
+                or yr not in equity_series.dropna().index
+                or yr not in total_assets_series.dropna().index)
+        )
 
         _dnse_debug = {}
         if _missing_after_cafef:
@@ -909,12 +908,13 @@ def execute_equity_research_pipeline(ticker):
         # ─────────────────────────────────────────────────────────────────
         # TẦNG 3 — Website scraping
         # ─────────────────────────────────────────────────────────────────
-        _missing_after_dnse = sorted(allowed_years - (
-            set(revenue_series.index)
-            & set(net_profit_series.index)
-            & set(equity_series.index)
-            & set(total_assets_series.index)
-        ))
+        _missing_after_dnse = sorted(
+            yr for yr in allowed_years
+            if (yr not in revenue_series.dropna().index
+                or yr not in net_profit_series.dropna().index
+                or yr not in equity_series.dropna().index
+                or yr not in total_assets_series.dropna().index)
+        )
 
         if _missing_after_dnse:
             try:
