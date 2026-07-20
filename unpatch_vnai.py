@@ -1,10 +1,8 @@
 """
 unpatch_vnai.py
 ---------------
-Bypass vnai beam patching — khôi phục VCI/KBS Finance về không bị limit 4 kỳ.
-
-ROOT CAUSE đã xác nhận:
-  vnai.beam.patching.py (guest tier) hard-cap 4 kỳ gần nhất = chỉ 2022-2025.
+# BYPASS vnai hard-cap 4 kỳ (guest tier) — gọi SAU khi Finance/Quote/Company đã import
+# để vnai._ensure_patches_applied() set guard trước, tránh bị re-patch lại
   Năm 2021 bị cắt hoàn toàn trước khi pipeline nhận DataFrame.
 
 CÁCH DÙNG trong pipeline.py:
