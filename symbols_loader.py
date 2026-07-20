@@ -6,66 +6,45 @@ Load danh sách mã cổ phiếu — dùng vnstock v3.1.0 (explorer) thay vnstoc
 
 import pandas as pd
 
+from vn_symbols_data import VN_SYMBOLS
+
+# Nếu nguồn live trả về ít hơn ngưỡng này thì coi như bị chặn (403) / lỗi và
+# dùng danh sách tĩnh đầy đủ (~1398 mã) thay vì rơi về vài chục mã.
+MIN_LIVE_SYMBOLS = 500
+
+
+def _static_symbols_df() -> pd.DataFrame:
+    """
+    Danh sách TĨNH ~1398 mã HOSE/HNX/UPCOM (embed sẵn trong vn_symbols_data.py).
+    Dùng làm fallback khi API live bị 403/timeout trên Streamlit Cloud, để
+    dropdown luôn đủ mã thay vì chỉ còn ~35 mã.
+    """
+    return pd.DataFrame(VN_SYMBOLS, columns=["symbol", "organ_name", "exchange"])
+
 
 def load_all_symbols() -> pd.DataFrame:
-    """Trả về DataFrame(symbol, organ_name, exchange)."""
-    try:
-        from vnstock.explorer.vci.listing import Listing
-        lst = Listing()
-        df = lst.all_symbols()
-        if df is not None and not df.empty:
-            return df
-    except Exception:
-        pass
+    """
+    Trả về DataFrame(symbol, organ_name, exchange).
 
-    try:
-        from vnstock.explorer.tcbs.listing import Listing
-        lst = Listing()
-        df = lst.all_symbols()
-        if df is not None and not df.empty:
-            return df
-    except Exception:
-        pass
+    Thử VCI rồi TCBS (vnstock explorer). Chỉ chấp nhận kết quả live khi có
+    >= MIN_LIVE_SYMBOLS mã; nếu ít hơn (dấu hiệu 403/bị chặn — chỉ trả vài
+    chục mã) hoặc lỗi, dùng danh sách tĩnh đầy đủ ~1398 mã.
+    """
+    for provider in ("vci", "tcbs"):
+        try:
+            if provider == "vci":
+                from vnstock.explorer.vci.listing import Listing
+            else:
+                from vnstock.explorer.tcbs.listing import Listing
+            lst = Listing()
+            df = lst.all_symbols()
+            if df is not None and not df.empty and len(df) >= MIN_LIVE_SYMBOLS:
+                return df
+        except Exception:
+            continue
 
-    # Fallback: danh sách tĩnh các mã phổ biến
-    data = [
-        ("ACB","Ngân hàng TMCP Á Châu","HOSE"),
-        ("VCB","Ngân hàng TMCP Ngoại thương Việt Nam","HOSE"),
-        ("BID","Ngân hàng TMCP Đầu tư và Phát triển VN","HOSE"),
-        ("CTG","Ngân hàng TMCP Công thương Việt Nam","HOSE"),
-        ("TCB","Ngân hàng TMCP Kỹ thương Việt Nam","HOSE"),
-        ("MBB","Ngân hàng TMCP Quân đội","HOSE"),
-        ("VPB","Ngân hàng TMCP Việt Nam Thịnh Vượng","HOSE"),
-        ("STB","Ngân hàng TMCP Sài Gòn Thương Tín","HOSE"),
-        ("HDB","Ngân hàng TMCP Phát triển TP.HCM","HOSE"),
-        ("TPB","Ngân hàng TMCP Tiên Phong","HOSE"),
-        ("HPG","Tập đoàn Hòa Phát","HOSE"),
-        ("VNM","Công ty CP Sữa Việt Nam","HOSE"),
-        ("FPT","Công ty CP FPT","HOSE"),
-        ("MSN","Tập đoàn Masan","HOSE"),
-        ("VIC","Tập đoàn Vingroup","HOSE"),
-        ("VHM","Công ty CP Vinhomes","HOSE"),
-        ("VRE","Công ty CP Vincom Retail","HOSE"),
-        ("GVR","Tập đoàn Công nghiệp Cao su VN","HOSE"),
-        ("PLX","Tập đoàn Xăng dầu Việt Nam","HOSE"),
-        ("GAS","Tổng Công ty Khí Việt Nam","HOSE"),
-        ("POW","Tổng Công ty Điện lực Dầu khí VN","HOSE"),
-        ("MWG","Công ty CP Đầu tư Thế Giới Di Động","HOSE"),
-        ("PNJ","Công ty CP Vàng bạc Đá quý Phú Nhuận","HOSE"),
-        ("DGC","Công ty CP Tập đoàn Hóa chất Đức Giang","HOSE"),
-        ("SSI","Công ty CP Chứng khoán SSI","HOSE"),
-        ("VND","Công ty CP Chứng khoán VNDirect","HOSE"),
-        ("HCM","Công ty CP Chứng khoán TP.HCM","HOSE"),
-        ("NLG","Công ty CP Đầu tư Nam Long","HOSE"),
-        ("KDH","Công ty CP Đầu tư và Kinh doanh Nhà Khang Điền","HOSE"),
-        ("DXG","Công ty CP Tập đoàn Đất Xanh","HOSE"),
-        ("BCM","Tổng Công ty Đầu tư và Phát triển Công nghiệp","HOSE"),
-        ("BSR","Công ty CP Lọc hóa dầu Bình Sơn","UPCOM"),
-        ("OIL","Tổng Công ty Dầu Việt Nam","UPCOM"),
-        ("PVD","Tổng Công ty CP Khoan và Dịch vụ Khoan Dầu khí","HOSE"),
-        ("PVS","Tổng Công ty CP Dịch vụ Kỹ thuật Dầu khí VN","HNX"),
-    ]
-    return pd.DataFrame(data, columns=["symbol", "organ_name", "exchange"])
+    # Tất cả nguồn live lỗi hoặc trả quá ít mã -> danh sách tĩnh đầy đủ.
+    return _static_symbols_df()
 
 
 def build_display_options(df: pd.DataFrame):
