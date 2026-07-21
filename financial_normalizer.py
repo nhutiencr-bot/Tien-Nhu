@@ -26,7 +26,6 @@ FINANCIAL_TICKERS = {
     'BVH', 'PVI', 'PTI', 'MIG', 'BMI', 'VNR', 'BIC', 'PRE', 'PGI',
     'SSI', 'VND', 'HCM', 'MBS', 'VCI', 'FTS', 'AGR', 'SBS', 'BSI', 'VPX', 'VCK', 'TCX', 'SHS',
 }
-}
 
 RETAIL_TICKERS = {
     'MWG', 'FRT', 'DGW', 'PNJ', 'HAX', 'SVC', 'MCH', 'PET',
