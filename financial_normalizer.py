@@ -2,12 +2,14 @@
 financial_normalizer.py
 ------------------------
 Các sửa đổi chính so với bản trước:
-  1. Thêm RETAIL_TICKERS vào nhóm detect — keyword revenue bán lẻ đặc thù
-  2. REAL_ESTATE_TICKERS: dùng keyword "doanh thu cho thuê"
-  3. build_5y_financial_table() nhận ticker và truyền xuống build_financial_table()
-  4. find_row_series() ưu tiên dòng có nhiều data nhất (không bỏ sót năm 2021)
-  5. _find_revenue_for_retail(): hàm riêng cho bán lẻ/phân phối
-  6. Phân loại ngành (bank/financial/retail/real_estate) để chọn đúng field
+  1. FIX CRITICAL: _get_year_columns() có dead code — return thứ 2 không bao giờ chạy
+     vì return thứ 1 đã exit function. Đã gộp lại thành 1 return duy nhất.
+  2. Thêm RETAIL_TICKERS vào nhóm detect — keyword revenue bán lẻ đặc thù
+  3. REAL_ESTATE_TICKERS: dùng keyword "doanh thu cho thuê"
+  4. build_5y_financial_table() nhận ticker và truyền xuống build_financial_table()
+  5. find_row_series() ưu tiên dòng có nhiều data nhất (không bỏ sót năm 2021)
+  6. _find_revenue_for_retail(): hàm riêng cho bán lẻ/phân phối
+  7. Phân loại ngành (bank/financial/retail/real_estate) để chọn đúng field
      Doanh thu — khắc phục lỗi ngân hàng bị khớp nhầm dòng "Doanh thu thuần"
      tổng quát ra số vô lý (thay vì "Tổng thu nhập hoạt động"/"Thu nhập lãi
      thuần" đúng bản chất kinh doanh ngân hàng).
@@ -27,6 +29,10 @@ FINANCIAL_TICKERS = {
     'SSI', 'VND', 'HCM', 'MBS', 'VCI', 'FTS', 'AGR', 'SBS', 'BSI', 'VPX', 'VCK', 'TCX', 'SHS',
 }
 
+SECURITIES_TICKERS = {
+    'SSI', 'VND', 'HCM', 'MBS', 'VCI', 'FTS', 'AGR', 'SBS', 'BSI', 'VPX', 'VCK', 'TCX', 'SHS',
+}
+
 RETAIL_TICKERS = {
     'MWG', 'FRT', 'DGW', 'PNJ', 'HAX', 'SVC', 'MCH', 'PET',
     'PSD', 'HHS', 'HUT', 'AST', 'PTC',
@@ -34,25 +40,25 @@ RETAIL_TICKERS = {
 
 REAL_ESTATE_TICKERS = {'VRE', 'NLG', 'DXG', 'KDH', 'PDR', 'CEO', 'BCM'}
 
-TARGET_YEARS = list(range(2021, 2025))
+TARGET_YEARS = list(range(2021, 2026))
 
 
 def _get_year_columns(df: pd.DataFrame):
+    """
+    Trả về list các cột năm trong df (dạng int hoặc string '2021', '2022'...).
+    FIX: Bản cũ có 2 return statements — cái thứ 2 với _year_sort_key không bao giờ chạy.
+    Đã gộp lại: sort theo int(str(col)[:4]) để xử lý cả int lẫn string year columns.
+    """
     meta_cols = {'item', 'item_en', 'item_id'}
     year_cols = []
     for c in df.columns:
         if c in meta_cols:
             continue
         c_str = str(c).strip()
-        # ✅ Nhận cả cột int (2021, 2022...) lẫn string '2021'
+        # Nhận cả cột int (2021, 2022...) lẫn string '2021'
         if re.fullmatch(r'\d{4}', c_str):
             year_cols.append(c)
-    return sorted(year_cols, key=lambda x: int(str(x).strip()))
-
-    def _year_sort_key(col):
-        return int(str(col).strip()[:4])
-
-    return sorted(year_cols, key=_year_sort_key)
+    return sorted(year_cols, key=lambda col: int(str(col).strip()[:4]))
 
 
 def _quarter_sort_key(c):
@@ -128,7 +134,6 @@ def find_row_series(df: pd.DataFrame, keywords, exclude_keywords=None,
             if period == 'quarter':
                 result[str(yc).strip()] = float(val)
             else:
-                # Hỗ trợ cả '2025' (format cũ) và '2025-Q4' (format mới)
                 yr = int(str(yc).strip()[:4])
                 result[yr] = float(val)
 
@@ -141,13 +146,11 @@ def find_row_series(df: pd.DataFrame, keywords, exclude_keywords=None,
 def _find_revenue_for_bank(df_income, period='year'):
     """Ngân hàng/bảo hiểm/chứng khoán — dùng thu nhập thay doanh thu."""
     bank_revenue_keywords = [
-        # Chứng khoán — keyword đặc thù (ưu tiên cao nhất)
         (['doanh thu hoạt động', 'operating revenue'], []),
         (['tổng doanh thu hoạt động'], ['chi phí']),
         (['doanh thu từ hoạt động môi giới', 'brokerage revenue'], []),
         (['phí và hoa hồng', 'fee and commission', 'net fee', 'net commission'], []),
         (['doanh thu thuần từ hoạt động', 'net revenue from operations'], []),
-        # Ngân hàng/chung
         (['tổng thu nhập hoạt động', 'total operating income', 'net operating income'], ['chi phí', 'expense']),
         (['thu nhập lãi thuần', 'net interest income', 'lãi thuần'], ['chi phí lãi']),
         (['thu nhập thuần', 'net income from', 'total net income'], ['lợi nhuận', 'profit']),
