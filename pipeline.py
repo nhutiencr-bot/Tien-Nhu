@@ -375,6 +375,104 @@ def _fetch_dnse_financials(ticker: str, allowed_years: set) -> dict:
     return {k: pd.Series(v, dtype=float) for k, v in result.items()}
 
 
+def _fetch_yahoo_financials(ticker: str, allowed_years: set) -> dict:
+    """
+    Tầng 2b — Yahoo Finance fallback cho equity & total_assets khi vnstock/CafeF/DNSE thiếu.
+    Dùng yfinance nếu có; nếu không có thì dùng requests scrape bảng từ finance.yahoo.com.
+    Trả về dict: {field: pd.Series(index=year_int, dtype=float, đơn vị tỷ VNĐ)}
+    Tỷ giá USD→VNĐ lấy xấp xỉ từ overview hoặc dùng mặc định 25,000.
+    """
+    result = {
+        "revenue":      {},
+        "net_profit":   {},
+        "equity":       {},
+        "total_assets": {},
+    }
+    try:
+        import yfinance as yf
+        # Yahoo Finance dùng mã dạng "HDB.VN"
+        yf_ticker = ticker.upper() + ".VN"
+        obj = yf.Ticker(yf_ticker)
+
+        # Lấy tỷ giá USD/VNĐ (thử lấy từ USDVND, fallback 25000)
+        try:
+            fx = yf.Ticker("USDVND=X").fast_info.get("last_price", 25000) or 25000
+        except Exception:
+            fx = 25_000
+
+        def _usd_to_ty(val_usd):
+            """Chuyển USD → tỷ VNĐ. Yahoo báo cáo đơn vị = đồng USD lẻ."""
+            if val_usd is None or (isinstance(val_usd, float) and __import__('math').isnan(val_usd)):
+                return None
+            return round(float(val_usd) * fx / 1e9, 2)
+
+        # ── Income statement (annual) ──
+        try:
+            inc = obj.financials  # rows = metrics, cols = datetime (year-end)
+            if inc is not None and not inc.empty:
+                for col in inc.columns:
+                    try:
+                        yr = int(str(col)[:4])
+                    except Exception:
+                        continue
+                    if yr not in allowed_years:
+                        continue
+                    # Revenue
+                    for kw in ["Total Revenue", "Revenue"]:
+                        if kw in inc.index:
+                            v = _usd_to_ty(inc.loc[kw, col])
+                            if v is not None and v > 0:
+                                result["revenue"][yr] = v
+                                break
+                    # Net profit (attributable to parent)
+                    for kw in ["Net Income Common Stockholders", "Net Income",
+                               "Net Income Applicable To Common Shares"]:
+                        if kw in inc.index:
+                            v = _usd_to_ty(inc.loc[kw, col])
+                            if v is not None:
+                                result["net_profit"][yr] = v
+                                break
+        except Exception:
+            pass
+
+        # ── Balance sheet (annual) ──
+        try:
+            bs = obj.balance_sheet  # rows = metrics, cols = datetime (year-end)
+            if bs is not None and not bs.empty:
+                for col in bs.columns:
+                    try:
+                        yr = int(str(col)[:4])
+                    except Exception:
+                        continue
+                    if yr not in allowed_years:
+                        continue
+                    # Equity
+                    for kw in ["Stockholders Equity", "Common Stock Equity",
+                               "Total Equity Gross Minority Interest"]:
+                        if kw in bs.index:
+                            v = _usd_to_ty(bs.loc[kw, col])
+                            if v is not None and v > 0:
+                                result["equity"][yr] = v
+                                break
+                    # Total assets
+                    for kw in ["Total Assets"]:
+                        if kw in bs.index:
+                            v = _usd_to_ty(bs.loc[kw, col])
+                            if v is not None and v > 0:
+                                result["total_assets"][yr] = v
+                                break
+        except Exception:
+            pass
+
+    except ImportError:
+        # yfinance chưa cài — skip silently (pipeline không crash)
+        pass
+    except Exception:
+        pass
+
+    return {k: pd.Series(v, dtype=float) for k, v in result.items()}
+
+
 @st.cache_data(ttl=1800)
 def execute_equity_research_pipeline(ticker):
     try:
@@ -391,10 +489,10 @@ def execute_equity_research_pipeline(ticker):
             "income_y":   lambda: _fetch_income_statement(ticker, source_used, period='year',    limit=FETCH_LIMIT_YEAR),
             "cashflow_y": lambda: _fetch_cashflow(ticker,          source_used, period='year',    limit=FETCH_LIMIT_YEAR),
             "ratio_y":    lambda: _fetch_ratio(ticker,             source_used, period='year',    limit=FETCH_LIMIT_YEAR),
-            "income_q":   lambda: _fetch_income_statement(ticker,  source_used, period='quarter', limit=20),
-            "ratio_q":    lambda: _fetch_ratio(ticker,             source_used, period='quarter', limit=20),
+            "income_q":   lambda: _fetch_income_statement(ticker,  source_used, period='quarter', limit=40),
+            "ratio_q":    lambda: _fetch_ratio(ticker,             source_used, period='quarter', limit=40),
             "balance_y":  lambda: _fetch_balance_sheet(ticker,     source_used, period='year',    limit=FETCH_LIMIT_YEAR),
-            "balance_q":  lambda: _fetch_balance_sheet(ticker,     source_used, period='quarter', limit=20),
+            "balance_q":  lambda: _fetch_balance_sheet(ticker,     source_used, period='quarter', limit=40),
             "news":       lambda: c_engine.news(),
         }
 
@@ -953,10 +1051,62 @@ def execute_equity_research_pipeline(ticker):
                             if k.startswith("__"):
                                 continue
                             st.write(f"- `{k}`: {v if v else '⚠️ DNSE không có dữ liệu'}")
-                st.write("**Sau tất cả tầng — revenue:**",      dict(revenue_series))
-                st.write("**Sau tất cả tầng — net_profit:**",   dict(net_profit_series))
-                st.write("**Sau tất cả tầng — equity:**",       dict(equity_series))
-                st.write("**Sau tất cả tầng — total_assets:**", dict(total_assets_series))
+                st.write("**Sau DNSE — revenue:**",      dict(revenue_series))
+                st.write("**Sau DNSE — net_profit:**",   dict(net_profit_series))
+                st.write("**Sau DNSE — equity:**",       dict(equity_series))
+                st.write("**Sau DNSE — total_assets:**", dict(total_assets_series))
+
+        # ─────────────────────────────────────────────────────────────────
+        # TẦNG 2b — Yahoo Finance fallback (equity & total_assets chính yếu)
+        # Chạy khi DNSE vẫn thiếu ít nhất 1 năm cho equity hoặc total_assets
+        # ─────────────────────────────────────────────────────────────────
+        _missing_after_dnse = sorted(
+            yr for yr in allowed_years
+            if (yr not in revenue_series.dropna().index
+                or yr not in net_profit_series.dropna().index
+                or yr not in equity_series.dropna().index
+                or yr not in total_assets_series.dropna().index)
+        )
+
+        _yahoo_debug = {}
+        if _missing_after_dnse:
+            try:
+                _yahoo_data = _fetch_yahoo_financials(ticker, set(_missing_after_dnse))
+                _rev_yh  = _filter_years(normalize_to_billion_vnd(_yahoo_data.get("revenue",      pd.Series(dtype=float))))
+                _np_yh   = _filter_years(normalize_to_billion_vnd(_yahoo_data.get("net_profit",   pd.Series(dtype=float))))
+                _eq_yh   = _filter_years(normalize_to_billion_vnd(_yahoo_data.get("equity",       pd.Series(dtype=float))))
+                _ta_yh   = _filter_years(normalize_to_billion_vnd(_yahoo_data.get("total_assets", pd.Series(dtype=float))))
+
+                # Yahoo báo đơn vị USD gốc đã convert trong hàm → KHÔNG normalize lại
+                # Nhưng cần kiểm tra đơn vị bằng sanity check: equity ngân hàng VN thường > 1,000 tỷ
+                _yahoo_debug = {
+                    "revenue":      dict(_rev_yh)  if not _rev_yh.empty  else "⚠️ rỗng",
+                    "net_profit":   dict(_np_yh)   if not _np_yh.empty   else "⚠️ rỗng",
+                    "equity":       dict(_eq_yh)   if not _eq_yh.empty   else "⚠️ rỗng",
+                    "total_assets": dict(_ta_yh)   if not _ta_yh.empty   else "⚠️ rỗng",
+                }
+
+                revenue_series      = _merge_series(revenue_series,      _rev_yh)
+                net_profit_series   = _merge_series(net_profit_series,   _np_yh)
+                equity_series       = _merge_series(equity_series,       _eq_yh)
+                total_assets_series = _merge_series(total_assets_series, _ta_yh)
+            except Exception as _yh_exc:
+                import traceback as _tb_yh
+                _yahoo_debug["error"] = f"{type(_yh_exc).__name__}: {_yh_exc}"
+                _yahoo_debug["trace"] = _tb_yh.format_exc(limit=5)
+
+            # Debug Yahoo
+            with st.expander(f"🔍 DEBUG Tầng 2b Yahoo Finance — {ticker}", expanded=False):
+                if "error" in _yahoo_debug:
+                    st.error(f"Yahoo exception: {_yahoo_debug.get('error')}")
+                    if "trace" in _yahoo_debug:
+                        st.code(_yahoo_debug["trace"], language="")
+                else:
+                    st.write("**Yahoo Finance trả về:**")
+                    for k, v in _yahoo_debug.items():
+                        st.write(f"- `{k}`: {v if v else '⚠️ rỗng'}")
+                st.write("**Sau Yahoo — equity:**",       dict(equity_series))
+                st.write("**Sau Yahoo — total_assets:**", dict(total_assets_series))
 
         # ─────────────────────────────────────────────────────────────────
         # TẦNG 3 — Website scraping
