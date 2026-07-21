@@ -24,7 +24,8 @@ BANK_TICKERS = {
 
 FINANCIAL_TICKERS = {
     'BVH', 'PVI', 'PTI', 'MIG', 'BMI', 'VNR', 'BIC', 'PRE', 'PGI',
-    'SSI', 'VND', 'HCM', 'MBS', 'VCI', 'FTS', 'AGR', 'SBS', 'BSI',
+    'SSI', 'VND', 'HCM', 'MBS', 'VCI', 'FTS', 'AGR', 'SBS', 'BSI', 'VPX', 'VCK', 'TCX', 'SHS',
+}
 }
 
 RETAIL_TICKERS = {
@@ -34,7 +35,7 @@ RETAIL_TICKERS = {
 
 REAL_ESTATE_TICKERS = {'VRE', 'NLG', 'DXG', 'KDH', 'PDR', 'CEO', 'BCM'}
 
-TARGET_YEARS = list(range(2021, 2026))
+TARGET_YEARS = list(range(2021, 2025))
 
 
 def _get_year_columns(df: pd.DataFrame):
