@@ -141,11 +141,17 @@ def find_row_series(df: pd.DataFrame, keywords, exclude_keywords=None,
 def _find_revenue_for_bank(df_income, period='year'):
     """Ngân hàng/bảo hiểm/chứng khoán — dùng thu nhập thay doanh thu."""
     bank_revenue_keywords = [
+        # Chứng khoán — keyword đặc thù (ưu tiên cao nhất)
+        (['doanh thu hoạt động', 'operating revenue'], []),
+        (['tổng doanh thu hoạt động'], ['chi phí']),
+        (['doanh thu từ hoạt động môi giới', 'brokerage revenue'], []),
+        (['phí và hoa hồng', 'fee and commission', 'net fee', 'net commission'], []),
+        (['doanh thu thuần từ hoạt động', 'net revenue from operations'], []),
+        # Ngân hàng/chung
         (['tổng thu nhập hoạt động', 'total operating income', 'net operating income'], ['chi phí', 'expense']),
         (['thu nhập lãi thuần', 'net interest income', 'lãi thuần'], ['chi phí lãi']),
         (['thu nhập thuần', 'net income from', 'total net income'], ['lợi nhuận', 'profit']),
         (['tổng doanh thu', 'total revenue', 'gross revenue'], []),
-        (['doanh thu hoạt động', 'operating revenue'], []),
         (['thu nhập từ lãi', 'interest income'], ['chi phí']),
     ]
     for keywords, excludes in bank_revenue_keywords:
