@@ -489,9 +489,10 @@ def execute_equity_research_pipeline(ticker):
             "income_y":   lambda: _fetch_income_statement(ticker, source_used, period='year',    limit=FETCH_LIMIT_YEAR),
             "cashflow_y": lambda: _fetch_cashflow(ticker,          source_used, period='year',    limit=FETCH_LIMIT_YEAR),
             "ratio_y":    lambda: _fetch_ratio(ticker,             source_used, period='year',    limit=FETCH_LIMIT_YEAR),
-            "income_q":   lambda: _fetch_income_statement(ticker,  source_used, period='quarter', limit=40),
-            "ratio_q":    lambda: _fetch_ratio(ticker,             source_used, period='quarter', limit=40),
             "balance_y":  lambda: _fetch_balance_sheet(ticker,     source_used, period='year',    limit=FETCH_LIMIT_YEAR),
+            # ✅ quarterly chỉ cần 8 kỳ (2024-Q1 → 2026-Q1) để fill 2025
+            "income_q":   lambda: _fetch_income_statement(ticker,  source_used, period='quarter', limit=8),
+            "ratio_q":    lambda: _fetch_ratio(ticker,             source_used, period='quarter', limit=8),
             "balance_q":  lambda: _fetch_balance_sheet(ticker,     source_used, period='quarter', limit=40),
             "news":       lambda: c_engine.news(),
         }
