@@ -1762,5 +1762,7 @@ def execute_equity_research_pipeline(ticker):
         )
 
     except Exception as e:
+        import traceback as _tb_main
         st.error(f"Lỗi Pipeline: {str(e)}")
+        st.code(_tb_main.format_exc(), language="python")
         return None
