@@ -270,12 +270,19 @@ def _build_shares_series(outstanding_shares_series, net_profit_series, eps_serie
     PATCH 4 — Trả về Series số CP lưu hành (đơn vị: cổ phiếu lẻ) theo từng năm.
     Tầng 1: từ ratio API (outstanding_shares_series).
     Tầng 2: back-calc LNST(tỷ)*1e9 / EPS(đ) cho từng năm còn thiếu.
+
+    ⚠️ vnstock ratio() trả 'Số CP lưu hành' theo đơn vị TRIỆU CP (vd: 3610 = 3.61 tỷ).
+    Guard: nếu median < 1e8 → nhân 1e6 để ra đơn vị cổ phiếu lẻ.
     """
     result = {}
     if outstanding_shares_series is not None and not outstanding_shares_series.empty:
+        _sh = outstanding_shares_series.dropna()
+        _median_sh = _sh.median() if not _sh.empty else 0
+        # Nếu đơn vị triệu (median < 1e8) → nhân 1e6 → đơn vị lẻ
+        _sh_multiplier = 1e6 if (0 < _median_sh < 1e8) else 1.0
         for yr, val in outstanding_shares_series.items():
             if pd.notna(val) and val > 0:
-                result[yr] = float(val)
+                result[yr] = float(val) * _sh_multiplier
     if net_profit_series is not None and not net_profit_series.empty \
             and eps_series is not None and not eps_series.empty:
         for yr in net_profit_series.index:
@@ -872,6 +879,120 @@ def execute_equity_research_pipeline(ticker):
         total_assets_series = total_assets_series.sort_index()
 
         # ─────────────────────────────────────────────────────────────────
+        # Helper dùng cho sanity checks bên dưới (phải define trước khi dùng)
+        # ─────────────────────────────────────────────────────────────────
+        def _extract_row_values_eq(df, cols, keywords, exclude=None):
+            """Extract giá trị từ df quarterly cho sanity check equity/assets."""
+            if df is None or df.empty or not cols:
+                return []
+            label_col = next((c for c in df.columns
+                              if str(c).lower() in ('item', 'chỉ tiêu', 'indicator',
+                                                     'name', 'metric', 'description')), None)
+            if label_col is None:
+                label_col = next((c for c in df.columns if df[c].dtype == object), None)
+            if label_col is None:
+                return []
+            vals = []
+            for kw in keywords:
+                mask = df[label_col].astype(str).str.lower().str.contains(
+                    kw.lower(), na=False, regex=False)
+                if exclude:
+                    for ex in exclude:
+                        mask &= ~df[label_col].astype(str).str.lower().str.contains(
+                            ex.lower(), na=False, regex=False)
+                matched = df[mask]
+                if matched.empty:
+                    continue
+                for col in cols:
+                    if col not in matched.columns:
+                        continue
+                    for v in matched[col].values:
+                        try:
+                            fv = float(str(v).replace(',', ''))
+                            if not np.isnan(fv):
+                                vals.append(fv)
+                        except Exception:
+                            pass
+                if vals:
+                    break
+            return vals
+
+        # ─────────────────────────────────────────────────────────────────
+        # SANITY CHECK 1: Revenue bất thường (outlier so với median các năm khác)
+        # Nguyên nhân: income_q chỉ có Q3+Q4 → cộng 2 quý nhưng đơn vị sai
+        # → Xoá năm đó để trigger refetch từ annual/CafeF
+        # ─────────────────────────────────────────────────────────────────
+        if len(revenue_series.dropna()) >= 3:
+            _rev_median = revenue_series.dropna().median()
+            _rev_bad = [yr for yr in revenue_series.dropna().index
+                        if revenue_series[yr] > _rev_median * 10]
+            for _rbyr in _rev_bad:
+                # Thử lấy từ annual trước
+                _rv_annual = _raw_scan_annual(
+                    df_income, _rbyr,
+                    ['doanh thu thuần', 'net revenue', 'revenue', 'tổng doanh thu'],
+                    exclude=['giá vốn', 'chi phí'])
+                if _rv_annual is not None and _rv_annual < _rev_median * 10:
+                    revenue_series[_rbyr] = _rv_annual
+                else:
+                    revenue_series[_rbyr] = np.nan
+
+        # ─────────────────────────────────────────────────────────────────
+        # SANITY CHECK 2: equity không thể ≥ total_assets (VCSH < Tổng TS)
+        # Nếu equity[yr] ≥ total_assets[yr] * 0.99 → giá trị bị match sai
+        # → Tính lại bằng total_assets - total_liabilities, hoặc xoá để refetch
+        # ─────────────────────────────────────────────────────────────────
+        _common_eq_ta = equity_series.index.intersection(total_assets_series.index)
+        _bad_eq_years = [
+            yr for yr in _common_eq_ta
+            if (pd.notna(equity_series[yr]) and pd.notna(total_assets_series[yr])
+                and total_assets_series[yr] > 0
+                and equity_series[yr] >= total_assets_series[yr] * 0.99)
+        ]
+        if _bad_eq_years:
+            _liab_kws = ['tổng cộng nợ phải trả', 'tổng nợ phải trả', 'total liabilities',
+                         'nợ phải trả', 'liabilities']
+            for _byr in _bad_eq_years:
+                _fixed = False
+                # Thử tính lại từ quarterly balance: total_assets - total_liabilities
+                if df_balance_q is not None and not df_balance_q.empty:
+                    import re as _re_eq
+                    _bq_cols = [c for c in df_balance_q.columns
+                                if _re_eq.search(r'\b' + str(_byr) + r'\b', str(c))]
+                    if _bq_cols:
+                        _ta_vals = _extract_row_values_eq(
+                            df_balance_q, _bq_cols,
+                            ['tổng cộng tài sản', 'tổng tài sản', 'total assets'])
+                        _li_vals = _extract_row_values_eq(
+                            df_balance_q, _bq_cols, _liab_kws,
+                            exclude=['vốn chủ sở hữu', 'equity'])
+                        if _ta_vals and _li_vals:
+                            _ta_norm = normalize_to_billion_vnd(pd.Series(_ta_vals, dtype=float))
+                            _li_norm = normalize_to_billion_vnd(pd.Series(_li_vals, dtype=float))
+                            if (_ta_norm is not None and not _ta_norm.empty
+                                    and _li_norm is not None and not _li_norm.empty):
+                                _eq_calc = float(_ta_norm.iloc[-1]) - float(_li_norm.iloc[-1])
+                                if 0 < _eq_calc < float(_ta_norm.iloc[-1]):
+                                    equity_series[_byr] = round(_eq_calc, 2)
+                                    _fixed = True
+                # Fallback từ df_balance annual
+                if not _fixed:
+                    _ta_v = _raw_scan_annual(df_balance, _byr,
+                                             ['tổng cộng tài sản', 'tổng tài sản', 'total assets'])
+                    _li_v = _raw_scan_annual(df_balance, _byr, _liab_kws,
+                                             exclude=['vốn chủ sở hữu', 'equity'])
+                    if _ta_v is not None and _li_v is not None and _ta_v > 0:
+                        _eq_calc = _ta_v - _li_v
+                        if 0 < _eq_calc < _ta_v:
+                            equity_series[_byr] = round(_eq_calc, 2)
+                            _fixed = True
+                if not _fixed:
+                    # Xoá giá trị sai để trigger refetch từ CafeF/DNSE
+                    equity_series[_byr] = np.nan
+
+        equity_series = equity_series.sort_index()
+
+        # ─────────────────────────────────────────────────────────────────
         # _missing_any: năm thiếu ÍT NHẤT 1 field → gọi CafeF
         # ─────────────────────────────────────────────────────────────────
         _missing_any = sorted(
@@ -1018,57 +1139,7 @@ def execute_equity_research_pipeline(ticker):
                 _dnse_debug["error"] = f"{type(_dnse_exc).__name__}: {_dnse_exc}"
                 _dnse_debug["trace"] = _tb_dn.format_exc(limit=5)
 
-        # DEBUG EXPANDER
-        if _missing_any:
-            with st.expander(f"🔍 DEBUG fallback — {ticker} (năm thiếu: {_missing_any})", expanded=False):
-                # ── Quarterly column debug (chẩn đoán tại sao 2025 thiếu) ──
-                _inc_q_cols  = list(df_income_q.columns)  if df_income_q  is not None and not df_income_q.empty  else []
-                _bal_q_cols  = list(df_balance_q.columns) if df_balance_q is not None and not df_balance_q.empty else []
-                _cols_2025_inc = [c for c in _inc_q_cols  if '2025' in str(c)]
-                _cols_2025_bal = [c for c in _bal_q_cols  if '2025' in str(c)]
-                st.write("**df_income_q — tất cả cột:**",  _inc_q_cols)
-                st.write("**df_balance_q — tất cả cột:**", _bal_q_cols)
-                st.write("**Cột income_q chứa '2025':**",  _cols_2025_inc  or "⚠️ KHÔNG CÓ — vnstock không trả Q 2025")
-                st.write("**Cột balance_q chứa '2025':**", _cols_2025_bal  or "⚠️ KHÔNG CÓ — vnstock không trả Q 2025")
-                st.write("---")
-                st.write("**Tầng 0 (quarterly agg) — revenue sau merge:**", dict(revenue_series))
-                st.write("**Tầng 0 (quarterly agg) — net_profit sau merge:**", dict(net_profit_series))
-                st.write("**Năm còn thiếu trước CafeF:**", _missing_any)
-                if "error" in _cafef_debug:
-                    st.error(f"CafeF exception: {_cafef_debug.get('error')}")
-                    if "trace" in _cafef_debug:
-                        st.code(_cafef_debug["trace"], language="")
-                elif "__internal_error__" in _cafef_debug:
-                    st.error(f"CafeF internal error: {_cafef_debug['__internal_error__']}")
-                    if "__trace__" in _cafef_debug:
-                        st.code(_cafef_debug["__trace__"], language="")
-                else:
-                    st.write("**CafeF trả về:**")
-                    for k, v in _cafef_debug.items():
-                        if k.startswith("__"):
-                            continue
-                        st.write(f"- `{k}`: {v if v else '⚠️ RỖNG — CafeF chưa cập nhật hoặc bị block'}")
-                if _missing_after_cafef:
-                    st.write("**Năm còn thiếu sau CafeF (→ thử DNSE):**", _missing_after_cafef)
-                    if "__probe_status__" in _dnse_debug:
-                        st.write(f"**DNSE probe HTTP status:** `{_dnse_debug['__probe_status__']}`")
-                        st.write(f"**DNSE probe response keys/body:** `{_dnse_debug.get('__probe_keys__')}`")
-                    if "__probe_error__" in _dnse_debug:
-                        st.error(f"DNSE probe error: {_dnse_debug['__probe_error__']}")
-                    if "error" in _dnse_debug:
-                        st.error(f"DNSE exception: {_dnse_debug.get('error')}")
-                        if "trace" in _dnse_debug:
-                            st.code(_dnse_debug["trace"], language="")
-                    else:
-                        st.write("**DNSE trả về:**")
-                        for k, v in _dnse_debug.items():
-                            if k.startswith("__"):
-                                continue
-                            st.write(f"- `{k}`: {v if v else '⚠️ DNSE không có dữ liệu'}")
-                st.write("**Sau DNSE — revenue:**",      dict(revenue_series))
-                st.write("**Sau DNSE — net_profit:**",   dict(net_profit_series))
-                st.write("**Sau DNSE — equity:**",       dict(equity_series))
-                st.write("**Sau DNSE — total_assets:**", dict(total_assets_series))
+        # (debug expander đã được gỡ bỏ)
 
         # ─────────────────────────────────────────────────────────────────
         # TẦNG 2b — Yahoo Finance fallback (equity & total_assets chính yếu)
@@ -1111,18 +1182,7 @@ def execute_equity_research_pipeline(ticker):
                 _yahoo_debug["error"] = f"{type(_yh_exc).__name__}: {_yh_exc}"
                 _yahoo_debug["trace"] = _tb_yh.format_exc(limit=5)
 
-            # Debug Yahoo
-            with st.expander(f"🔍 DEBUG Tầng 2b Yahoo Finance — {ticker}", expanded=False):
-                if "error" in _yahoo_debug:
-                    st.error(f"Yahoo exception: {_yahoo_debug.get('error')}")
-                    if "trace" in _yahoo_debug:
-                        st.code(_yahoo_debug["trace"], language="")
-                else:
-                    st.write("**Yahoo Finance trả về:**")
-                    for k, v in _yahoo_debug.items():
-                        st.write(f"- `{k}`: {v if v else '⚠️ rỗng'}")
-                st.write("**Sau Yahoo — equity:**",       dict(equity_series))
-                st.write("**Sau Yahoo — total_assets:**", dict(total_assets_series))
+
 
         # ─────────────────────────────────────────────────────────────────
         # TẦNG 3 — Website scraping
@@ -1218,8 +1278,6 @@ def execute_equity_research_pipeline(ticker):
         _years_have = (set(revenue_series.index) | set(net_profit_series.index)
                        | set(equity_series.index) | set(total_assets_series.index))
         _missing_years = sorted(_expected_years - _years_have)
-        if _missing_years:
-            st.warning(f"⚠️ {ticker}: không lấy được dữ liệu năm {_missing_years} từ tất cả nguồn (vnstock / CafeF / DNSE / website).")
 
         def _cross_unit_recheck(np_s, rev_s, eq_s):
             if np_s.empty or (rev_s.empty and eq_s.empty):
@@ -1633,13 +1691,16 @@ def execute_equity_research_pipeline(ticker):
 
         _shares_map = {}
         if outstanding_shares_series is not None and not outstanding_shares_series.empty:
+            # outstanding_shares_series đã ở đơn vị cổ phiếu lẻ (do _build_shares_series)
             for _y, _v in (outstanding_shares_series / 1e9).items():
                 if pd.notna(_v) and _v > 0:
                     _shares_map[_y] = round(float(_v), 2)
         if issue_share > 0:
+            # issue_share từ overview → thường đơn vị lẻ, guard nếu < 1e7 → là triệu
+            _iss_norm = issue_share if issue_share >= 1e7 else issue_share * 1e6
             for _y in years_available:
                 if _y not in _shares_map:
-                    _shares_map[_y] = round(issue_share / 1e9, 2)
+                    _shares_map[_y] = round(_iss_norm / 1e9, 2)
         df_5y_table['Số CP lưu hành (tỷ)'] = df_5y_table['Năm'].map(
             lambda y: _shares_map.get(y, None))
 
@@ -1653,14 +1714,23 @@ def execute_equity_research_pipeline(ticker):
         df_5y_table['ROS (%)'] = df_5y_table['Năm'].map(_ros_annual)
 
         _price_eoy: dict = {}
-        if (df_price is not None and not df_price.empty
-                and 'time' in df_price.columns and 'close_vnd' in df_price.columns):
-            _dp = df_price[['time', 'close_vnd']].copy()
-            _dp['_year'] = pd.to_datetime(_dp['time']).dt.year
-            for _yr, _grp in _dp.groupby('_year'):
-                _last = _grp.sort_values('time')['close_vnd'].iloc[-1]
-                if pd.notna(_last) and _last > 0:
-                    _price_eoy[int(_yr)] = float(_last)
+        if df_price is not None and not df_price.empty and 'time' in df_price.columns:
+            _price_col = 'close_vnd' if 'close_vnd' in df_price.columns else (
+                'close' if 'close' in df_price.columns else None)
+            if _price_col:
+                _dp = df_price[['time', _price_col]].copy()
+                _dp['_val'] = _dp[_price_col] * (1000 if _price_col == 'close' else 1)
+                _dp['_year'] = pd.to_datetime(_dp['time']).dt.year
+                for _yr, _grp in _dp.groupby('_year'):
+                    _last = _grp.sort_values('time')['_val'].iloc[-1]
+                    if pd.notna(_last) and _last > 0:
+                        _price_eoy[int(_yr)] = float(_last)
+                # Năm hiện tại: nếu chưa có Dec → dùng giá mới nhất có sẵn
+                _cur_yr_price = datetime.today().year
+                if _cur_yr_price not in _price_eoy and _cur_yr_price in years_available:
+                    _last_any = _dp.sort_values('time')['_val'].iloc[-1]
+                    if pd.notna(_last_any) and _last_any > 0:
+                        _price_eoy[_cur_yr_price] = float(_last_any)
         df_5y_table['Giá cuối năm (đ)'] = df_5y_table['Năm'].map(
             lambda y: _price_eoy.get(int(y), None))
 
