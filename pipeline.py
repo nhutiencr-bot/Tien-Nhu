@@ -743,10 +743,14 @@ def execute_equity_research_pipeline(ticker):
                 or yr not in equity_series.dropna().index
                 or yr not in total_assets_series.dropna().index)
         )
-        # Luôn thêm năm hiện tại vì annual có thể chưa cập nhật
+        # Chỉ thêm năm hiện tại nếu income_q CÓ dữ liệu năm đó
         _current_yr_q0 = datetime.today().year
         if _current_yr_q0 in allowed_years:
-            _years_q0_check = sorted(set(_years_q0_check) | {_current_yr_q0})
+            _inc_q_cols_check = [c for c in df_income_q.columns
+                                 if str(_current_yr_q0) in str(c)] \
+                                if df_income_q is not None and not df_income_q.empty else []
+            if _inc_q_cols_check:  # chỉ thêm nếu thực sự có data
+                _years_q0_check = sorted(set(_years_q0_check) | {_current_yr_q0})
 
         for _yr0 in _years_q0_check:
             _agg = _aggregate_year_from_quarters(_yr0)
@@ -762,6 +766,22 @@ def execute_equity_research_pipeline(ticker):
                 if _field in _agg and _agg[_field] is not None:
                     if _yr0 not in _series.index or pd.isna(_series.get(_yr0)):
                         _series[_yr0] = _agg[_field]
+
+        # ── Tầng 0c: Balance sheet năm hiện tại từ annual nếu balance_q không có ──
+        _current_yr = datetime.today().year
+        if _current_yr in allowed_years:
+            for _field, _series, _df, _kws, _ex in [
+                ('equity',       equity_series,       df_balance,
+                 ['vốn chủ sở hữu', 'total equity', 'equity'],
+                 ['thiểu số', 'minority']),
+                ('total_assets', total_assets_series, df_balance,
+                 ['tổng cộng tài sản', 'tổng tài sản', 'total assets'],
+                 []),
+            ]:
+                if _current_yr not in _series.index or pd.isna(_series.get(_current_yr)):
+                    _v = _raw_scan_annual(_df, _current_yr, _kws, exclude=_ex)
+                    if _v is not None:
+                        _series[_current_yr] = _v
 
         revenue_series      = revenue_series.sort_index()
         net_profit_series   = net_profit_series.sort_index()
