@@ -83,7 +83,7 @@ def find_row_series(df: pd.DataFrame, keywords, exclude_keywords=None,
     if df is None or df.empty:
         return pd.Series(dtype=float)
 
-    year_cols = _get_quarter_columns(df) if period == 'quarter' else (df)
+    year_cols = _get_quarter_columns(df) if period == 'quarter' else _get_year_columns(df)
     if not year_cols:
         return pd.Series(dtype=float)
 
