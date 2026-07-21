@@ -482,9 +482,9 @@ def execute_equity_research_pipeline(ticker):
             "cashflow_y": lambda: _fetch_cashflow(ticker,          source_used, period='year',    limit=FETCH_LIMIT_YEAR),
             "ratio_y":    lambda: _fetch_ratio(ticker,             source_used, period='year',    limit=FETCH_LIMIT_YEAR),
             "balance_y":  lambda: _fetch_balance_sheet(ticker,     source_used, period='year',    limit=FETCH_LIMIT_YEAR),
-            # ✅ quarterly chỉ cần 8 kỳ (2024-Q1 → 2026-Q1) để fill 2025
-            "income_q":   lambda: _fetch_income_statement(ticker,  source_used, period='quarter', limit=8),
-            "ratio_q":    lambda: _fetch_ratio(ticker,             source_used, period='quarter', limit=8),
+            # ✅ quarterly: lấy 20 kỳ (~5 năm) để cover 2021-2025
+            "income_q":   lambda: _fetch_income_statement(ticker,  source_used, period='quarter', limit=20),
+            "ratio_q":    lambda: _fetch_ratio(ticker,             source_used, period='quarter', limit=20),
             "balance_q":  lambda: _fetch_balance_sheet(ticker,     source_used, period='quarter', limit=40),
             "news":       lambda: c_engine.news(),
         }
@@ -760,6 +760,42 @@ def execute_equity_research_pipeline(ticker):
                     if _yr0 not in _series.index or pd.isna(_series.get(_yr0)):
                         _series[_yr0] = _agg[_field]
 
+        def _raw_scan_annual(df, yr, keywords, exclude=None):
+            """Scan cột có năm == yr trong annual df, trả về giá trị float đầu tiên tìm được."""
+            if df is None or df.empty:
+                return None
+            import re as _re3
+            year_cols = [c for c in df.columns
+                         if _re3.search(r'\b' + str(yr) + r'\b', str(c))]
+            if not year_cols:
+                return None
+            label_col = next(
+                (c for c in df.columns if df[c].dtype == object), None)
+            if label_col is None:
+                return None
+            for kw in keywords:
+                mask = df[label_col].astype(str).str.lower().str.contains(
+                    kw.lower(), na=False, regex=False)
+                if exclude:
+                    for ex in exclude:
+                        mask &= ~df[label_col].astype(str).str.lower().str.contains(
+                            ex.lower(), na=False, regex=False)
+                rows = df[mask]
+                if rows.empty:
+                    continue
+                for yc in year_cols:
+                    for v in rows[yc].values:
+                        try:
+                            fv = float(str(v).replace(',', ''))
+                            if not np.isnan(fv):
+                                s_tmp = normalize_to_billion_vnd(
+                                    pd.Series([fv], dtype=float))
+                                if s_tmp is not None and not s_tmp.empty:
+                                    return round(float(s_tmp.iloc[0]), 2)
+                        except Exception:
+                            pass
+            return None
+
         # ── Tầng 0c: Balance sheet năm hiện tại từ annual nếu balance_q không có ──
         _current_yr = datetime.today().year
         if _current_yr in allowed_years:
@@ -796,42 +832,6 @@ def execute_equity_research_pipeline(ticker):
         _current_yr_0b = datetime.today().year
         if _current_yr_0b in allowed_years:
             _still_missing_0b = sorted(set(_still_missing_0b) | {_current_yr_0b})
-
-        def _raw_scan_annual(df, yr, keywords, exclude=None):
-            """Scan cột có năm == yr trong annual df, trả về giá trị float đầu tiên tìm được."""
-            if df is None or df.empty:
-                return None
-            import re as _re3
-            year_cols = [c for c in df.columns
-                         if _re3.search(r'\b' + str(yr) + r'\b', str(c))]
-            if not year_cols:
-                return None
-            label_col = next(
-                (c for c in df.columns if df[c].dtype == object), None)
-            if label_col is None:
-                return None
-            for kw in keywords:
-                mask = df[label_col].astype(str).str.lower().str.contains(
-                    kw.lower(), na=False, regex=False)
-                if exclude:
-                    for ex in exclude:
-                        mask &= ~df[label_col].astype(str).str.lower().str.contains(
-                            ex.lower(), na=False, regex=False)
-                rows = df[mask]
-                if rows.empty:
-                    continue
-                for yc in year_cols:
-                    for v in rows[yc].values:
-                        try:
-                            fv = float(str(v).replace(',', ''))
-                            if not np.isnan(fv):
-                                s_tmp = normalize_to_billion_vnd(
-                                    pd.Series([fv], dtype=float))
-                                if s_tmp is not None and not s_tmp.empty:
-                                    return round(float(s_tmp.iloc[0]), 2)
-                        except Exception:
-                            pass
-            return None
 
         for _yr0b in _still_missing_0b:
             if _yr0b not in revenue_series.index or pd.isna(revenue_series.get(_yr0b)):
