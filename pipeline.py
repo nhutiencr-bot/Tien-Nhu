@@ -378,9 +378,8 @@ def _fetch_dnse_financials(ticker: str, allowed_years: set) -> dict:
 def _fetch_yahoo_financials(ticker: str, allowed_years: set) -> dict:
     """
     Tầng 2b — Yahoo Finance fallback cho equity & total_assets khi vnstock/CafeF/DNSE thiếu.
-    Dùng yfinance nếu có; nếu không có thì dùng requests scrape bảng từ finance.yahoo.com.
+    Lưu ý: mã .VN trên Yahoo trả về đơn vị VNĐ (không phải USD).
     Trả về dict: {field: pd.Series(index=year_int, dtype=float, đơn vị tỷ VNĐ)}
-    Tỷ giá USD→VNĐ lấy xấp xỉ từ overview hoặc dùng mặc định 25,000.
     """
     result = {
         "revenue":      {},
@@ -390,25 +389,23 @@ def _fetch_yahoo_financials(ticker: str, allowed_years: set) -> dict:
     }
     try:
         import yfinance as yf
-        # Yahoo Finance dùng mã dạng "HDB.VN"
         yf_ticker = ticker.upper() + ".VN"
         obj = yf.Ticker(yf_ticker)
 
-        # Lấy tỷ giá USD/VNĐ (thử lấy từ USDVND, fallback 25000)
-        try:
-            fx = yf.Ticker("USDVND=X").fast_info.get("last_price", 25000) or 25000
-        except Exception:
-            fx = 25_000
-
-        def _usd_to_ty(val_usd):
-            """Chuyển USD → tỷ VNĐ. Yahoo báo cáo đơn vị = đồng USD lẻ."""
-            if val_usd is None or (isinstance(val_usd, float) and __import__('math').isnan(val_usd)):
+        def _vnd_to_ty(val):
+            """Mã .VN: Yahoo báo cáo đơn vị VNĐ lẻ → chia 1e9 ra tỷ."""
+            if val is None or (isinstance(val, float) and __import__('math').isnan(val)):
                 return None
-            return round(float(val_usd) * fx / 1e9, 2)
+            v = float(val)
+            if abs(v) > 1e10:        # đang ở đồng VNĐ
+                return round(v / 1e9, 2)
+            if abs(v) > 1e7:         # đang ở triệu
+                return round(v / 1e3, 2)
+            return round(v, 2)       # đã ở tỷ
 
         # ── Income statement (annual) ──
         try:
-            inc = obj.financials  # rows = metrics, cols = datetime (year-end)
+            inc = obj.financials
             if inc is not None and not inc.empty:
                 for col in inc.columns:
                     try:
@@ -417,18 +414,16 @@ def _fetch_yahoo_financials(ticker: str, allowed_years: set) -> dict:
                         continue
                     if yr not in allowed_years:
                         continue
-                    # Revenue
                     for kw in ["Total Revenue", "Revenue"]:
                         if kw in inc.index:
-                            v = _usd_to_ty(inc.loc[kw, col])
+                            v = _vnd_to_ty(inc.loc[kw, col])
                             if v is not None and v > 0:
                                 result["revenue"][yr] = v
                                 break
-                    # Net profit (attributable to parent)
                     for kw in ["Net Income Common Stockholders", "Net Income",
                                "Net Income Applicable To Common Shares"]:
                         if kw in inc.index:
-                            v = _usd_to_ty(inc.loc[kw, col])
+                            v = _vnd_to_ty(inc.loc[kw, col])
                             if v is not None:
                                 result["net_profit"][yr] = v
                                 break
@@ -437,7 +432,7 @@ def _fetch_yahoo_financials(ticker: str, allowed_years: set) -> dict:
 
         # ── Balance sheet (annual) ──
         try:
-            bs = obj.balance_sheet  # rows = metrics, cols = datetime (year-end)
+            bs = obj.balance_sheet
             if bs is not None and not bs.empty:
                 for col in bs.columns:
                     try:
@@ -446,18 +441,16 @@ def _fetch_yahoo_financials(ticker: str, allowed_years: set) -> dict:
                         continue
                     if yr not in allowed_years:
                         continue
-                    # Equity
                     for kw in ["Stockholders Equity", "Common Stock Equity",
                                "Total Equity Gross Minority Interest"]:
                         if kw in bs.index:
-                            v = _usd_to_ty(bs.loc[kw, col])
+                            v = _vnd_to_ty(bs.loc[kw, col])
                             if v is not None and v > 0:
                                 result["equity"][yr] = v
                                 break
-                    # Total assets
                     for kw in ["Total Assets"]:
                         if kw in bs.index:
-                            v = _usd_to_ty(bs.loc[kw, col])
+                            v = _vnd_to_ty(bs.loc[kw, col])
                             if v is not None and v > 0:
                                 result["total_assets"][yr] = v
                                 break
@@ -465,7 +458,6 @@ def _fetch_yahoo_financials(ticker: str, allowed_years: set) -> dict:
             pass
 
     except ImportError:
-        # yfinance chưa cài — skip silently (pipeline không crash)
         pass
     except Exception:
         pass
@@ -1094,10 +1086,12 @@ def execute_equity_research_pipeline(ticker):
         if _missing_after_dnse:
             try:
                 _yahoo_data = _fetch_yahoo_financials(ticker, set(_missing_after_dnse))
-                _rev_yh  = _filter_years(normalize_to_billion_vnd(_yahoo_data.get("revenue",      pd.Series(dtype=float))))
-                _np_yh   = _filter_years(normalize_to_billion_vnd(_yahoo_data.get("net_profit",   pd.Series(dtype=float))))
-                _eq_yh   = _filter_years(normalize_to_billion_vnd(_yahoo_data.get("equity",       pd.Series(dtype=float))))
-                _ta_yh   = _filter_years(normalize_to_billion_vnd(_yahoo_data.get("total_assets", pd.Series(dtype=float))))
+                # Yahoo data đã được convert sang tỷ VNĐ trong _fetch_yahoo_financials
+                # KHÔNG gọi normalize_to_billion_vnd lần nữa
+                _rev_yh  = _filter_years(_yahoo_data.get("revenue",      pd.Series(dtype=float)))
+                _np_yh   = _filter_years(_yahoo_data.get("net_profit",   pd.Series(dtype=float)))
+                _eq_yh   = _filter_years(_yahoo_data.get("equity",       pd.Series(dtype=float)))
+                _ta_yh   = _filter_years(_yahoo_data.get("total_assets", pd.Series(dtype=float)))
 
                 # Yahoo báo đơn vị USD gốc đã convert trong hàm → KHÔNG normalize lại
                 # Nhưng cần kiểm tra đơn vị bằng sanity check: equity ngân hàng VN thường > 1,000 tỷ
