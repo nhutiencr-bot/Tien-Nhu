@@ -102,61 +102,151 @@ def _filter_years(series: pd.Series, years=None) -> pd.Series:
 # NGUỒN 1: vnstock (VCI / KBS / DNSE)
 # ─────────────────────────────────────────────────────────────
 
-def _fetch_vnstock(ticker: str) -> dict | None:
+def _fetch_vnstock(ticker):
     try:
         from vnstock.api.financial import Finance
-        from financial_normalizer import build_5y_financial_table
+        from financial_normalizer import build_financial_table
 
-        result = {'income': pd.DataFrame(), 'balance': pd.DataFrame(), 'ratio': pd.DataFrame()}
+        YEARS = list(range(2021, 2026))  # 2021-2025
+
+        inc_y, bal_y, rat_y = pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
         for source in ['VCI', 'KBS', 'DNSE']:
             try:
-                f = Finance(symbol=ticker, source=source, period='year')
-                if result['income'].empty:
+                f = Finance(symbol=ticker, source=source)
+
+                # ── Tầng 1: Annual (nhẹ nhất, 1 request/bảng) ──
+                if inc_y.empty:
                     try:
-                        df = f.income_statement(period='year')
+                        df = f.income_statement(period='year', lang='vi')
                         if df is not None and not df.empty:
-                            result['income'] = df
+                            inc_y = df
                     except Exception:
                         pass
-                if result['balance'].empty:
+
+                if bal_y.empty:
                     try:
-                        df = f.balance_sheet(period='year')
+                        df = f.balance_sheet(period='year', lang='vi')
                         if df is not None and not df.empty:
-                            result['balance'] = df
+                            bal_y = df
                     except Exception:
                         pass
-                if result['ratio'].empty:
+
+                if rat_y.empty:
                     try:
-                        df = f.ratio(period='year')
+                        df = f.ratio(period='year', lang='vi')
                         if df is not None and not df.empty:
-                            result['ratio'] = df
+                            rat_y = df
                     except Exception:
                         pass
+
+                # Nếu đủ cả 3 thì dừng, không thử source tiếp
+                if not inc_y.empty and not bal_y.empty and not rat_y.empty:
+                    break
+
             except Exception:
                 continue
 
-        # ✅ FIX 1: truyền ticker vào để detect ngành đúng
-        fin5 = build_5y_financial_table(
-            result['income'], result['balance'], result['ratio'],
-            ticker=ticker  # <-- bug fix chính
-        )
+        # ── Tầng 2: Quarterly fallback — chỉ dùng nếu annual thiếu năm ──
+        # vnstock quarterly có gap 2023-2024, nhưng có 2025-Q3/Q4
+        # → dùng để ghép 2025 mà annual chưa có
+        def _agg_quarterly_to_annual(df_q, needed_years):
+            """Cộng 4 quý thành năm. Chỉ cho income/cashflow (flow items)."""
+            if df_q is None or df_q.empty:
+                return pd.DataFrame()
+            q_cols = [c for c in df_q.columns
+                      if re.fullmatch(r'\d{4}-Q[1-4]', str(c).strip())]
+            result_cols = {}
+            for yr in needed_years:
+                yr_q_cols = [c for c in q_cols if str(c).startswith(str(yr))]
+                if len(yr_q_cols) == 4:  # đủ 4 quý mới cộng
+                    result_cols[yr] = df_q[yr_q_cols].sum(axis=1, skipna=True)
+                elif len(yr_q_cols) >= 1:
+                    # Partial year — lấy Q4 làm proxy nếu có (balance sheet)
+                    q4_col = f"{yr}-Q4"
+                    if q4_col in yr_q_cols:
+                        result_cols[yr] = df_q[q4_col]
+            if not result_cols:
+                return pd.DataFrame()
+            meta = df_q[[c for c in ['item', 'item_en', 'item_id'] if c in df_q.columns]]
+            return pd.concat([meta, pd.DataFrame(result_cols, index=df_q.index)], axis=1)
+
+        # Kiểm tra năm nào còn thiếu trong annual
+        def _missing_years(df, years):
+            if df is None or df.empty:
+                return years
+            year_cols = [c for c in df.columns
+                         if re.fullmatch(r'\d{4}', str(c).strip())]
+            have = {int(c) for c in year_cols}
+            return [y for y in years if y not in have]
+
+        missing_inc = _missing_years(inc_y, YEARS)
+        missing_bal = _missing_years(bal_y, YEARS)
+
+        if missing_inc or missing_bal:
+            for source in ['VCI', 'KBS']:
+                try:
+                    f = Finance(symbol=ticker, source=source)
+                    if missing_inc:
+                        try:
+                            df_q = f.income_statement(period='quarter', lang='vi')
+                            if df_q is not None and not df_q.empty:
+                                df_agg = _agg_quarterly_to_annual(df_q, missing_inc)
+                                if not df_agg.empty:
+                                    # Merge vào inc_y
+                                    new_cols = [c for c in df_agg.columns
+                                                if str(c).strip().isdigit()]
+                                    for col in new_cols:
+                                        if str(col) not in [str(c) for c in inc_y.columns]:
+                                            inc_y = pd.concat([inc_y, df_agg[[col]]], axis=1) \
+                                                if not inc_y.empty else df_agg
+                        except Exception:
+                            pass
+                    if missing_bal:
+                        try:
+                            df_q = f.balance_sheet(period='quarter', lang='vi')
+                            if df_q is not None and not df_q.empty:
+                                # Balance sheet: dùng Q4 (snapshot cuối năm)
+                                df_agg = _agg_quarterly_to_annual(df_q, missing_bal)
+                                if not df_agg.empty:
+                                    new_cols = [c for c in df_agg.columns
+                                                if str(c).strip().isdigit()]
+                                    for col in new_cols:
+                                        if str(col) not in [str(c) for c in bal_y.columns]:
+                                            bal_y = pd.concat([bal_y, df_agg[[col]]], axis=1) \
+                                                if not bal_y.empty else df_agg
+                        except Exception:
+                            pass
+                    break
+                except Exception:
+                    continue
+
+        # ── Build bảng tài chính ──
+        fin = build_financial_table(inc_y, bal_y, rat_y, ticker=ticker, period='year')
+
+        def _to_ty_series(s):
+            if s is None or s.empty:
+                return s
+            return s.map(_to_ty).dropna()
 
         out = {}
-        for k in ['revenue', 'net_profit', 'equity', 'total_assets', 'eps', 'bvps', 'roe', 'roa']:
-            s = fin5.get(k, pd.Series(dtype=float))
-            if k in ['revenue', 'net_profit', 'equity', 'total_assets']:
-                # ✅ FIX 2: detect đơn vị từ metadata nếu có
-                s_conv = s.map(lambda v: _to_ty(v)).dropna() if not s.empty else s
-                out[k] = _filter_years(s_conv)
-            else:
-                out[k] = _filter_years(s)
+        for k in ['revenue', 'net_profit', 'equity', 'total_assets']:
+            raw = fin.get(k, pd.Series(dtype=float))
+            out[k] = _to_ty_series(raw) if raw is not None else pd.Series(dtype=float)
+            # Lọc chỉ 2021-2025
+            if not out[k].empty:
+                out[k] = out[k][out[k].index.isin(YEARS)]
+
+        for k in ['eps', 'bvps', 'roe', 'roa']:
+            raw = fin.get(k, pd.Series(dtype=float))
+            out[k] = raw[raw.index.isin(YEARS)] if raw is not None and not raw.empty \
+                     else pd.Series(dtype=float)
+
         out['_source'] = 'vnstock'
         return out
 
-    except Exception:
+    except Exception as e:
         return None
-
 
 # ─────────────────────────────────────────────────────────────
 # NGUỒN 2: CafeF scrape — phiên bản vá lỗi
