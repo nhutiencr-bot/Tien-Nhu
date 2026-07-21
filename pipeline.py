@@ -493,7 +493,6 @@ def execute_equity_research_pipeline(ticker):
             "ratio_q":    lambda: _fetch_ratio(ticker,             source_used, period='quarter', limit=40),
             "balance_y":  lambda: _fetch_balance_sheet(ticker,     source_used, period='year',    limit=FETCH_LIMIT_YEAR),
             "balance_q":  lambda: _fetch_balance_sheet(ticker,     source_used, period='quarter', limit=40),
-            "cashflow_q": lambda: _fetch_cashflow(ticker,          source_used, period='quarter', limit=40),
             "news":       lambda: c_engine.news(),
         }
 
@@ -515,8 +514,7 @@ def execute_equity_research_pipeline(ticker):
         df_income_q  = results.get("income_q",   pd.DataFrame())
         df_ratio_q   = results.get("ratio_q",    pd.DataFrame())
         df_balance   = results.get("balance_y",  pd.DataFrame())
-        df_balance_q   = results.get("balance_q",  pd.DataFrame())
-        df_cashflow_q  = results.get("cashflow_q", pd.DataFrame())
+        df_balance_q = results.get("balance_q",  pd.DataFrame())
 
         if df_price is None or df_price.empty:
             st.error(f"Không có dữ liệu giá lịch sử cho mã {ticker}.")
@@ -673,19 +671,11 @@ def execute_equity_research_pipeline(ticker):
             out = {}
 
             # ── REVENUE: cộng tất cả quý ──
-            # Keywords revenue: thêm schema ngân hàng (thu nhập lãi thuần / tổng thu nhập HĐ)
-            _rev_kw = (
-                ['thu nhập lãi và các khoản thu nhập tương tự',
-                 'tổng thu nhập hoạt động', 'thu nhập lãi thuần',
-                 'net interest income', 'total operating income']
-                if is_bank else
-                ['doanh thu thuần', 'net revenue', 'doanh thu bán hàng',
-                 'revenue', 'tổng doanh thu']
-            )
             rev_vals = _extract_row_values(
                 df_income_q, inc_cols,
-                keywords=_rev_kw,
-                exclude=([] if is_bank else ['giá vốn', 'chi phí', 'cost']))
+                keywords=['doanh thu thuần', 'net revenue', 'doanh thu bán hàng',
+                          'revenue', 'tổng doanh thu'],
+                exclude=['giá vốn', 'chi phí', 'cost'])
             if rev_vals:
                 rev_norm = normalize_to_billion_vnd(pd.Series(rev_vals, dtype=float))
                 if rev_norm is not None and not rev_norm.empty:
@@ -700,22 +690,13 @@ def execute_equity_research_pipeline(ticker):
                         out['_revenue_q'] = n
 
             # ── NET PROFIT: cộng tất cả quý ──
-            # Keywords LNST: ngân hàng dùng 'lợi nhuận sau thuế' (không có 'cổ đông công ty mẹ')
-            _np_kw = (
-                ['lợi nhuận sau thuế', 'lãi sau thuế',
-                 'net profit after tax', 'profit after tax', 'net income']
-                if is_bank else
-                ['lợi nhuận sau thuế của cổ đông của công ty mẹ',
-                 'lợi nhuận sau thuế', 'lãi sau thuế',
-                 'net profit after tax', 'profit after tax',
-                 'net income', 'net profit']
-            )
-            _np_excl = (['trước thuế', 'before tax'] if is_bank
-                        else ['trước thuế', 'before tax', 'thiểu số', 'minority'])
             np_vals = _extract_row_values(
                 df_income_q, inc_cols,
-                keywords=_np_kw,
-                exclude=_np_excl)
+                keywords=['lợi nhuận sau thuế của cổ đông của công ty mẹ',
+                          'lợi nhuận sau thuế', 'lãi sau thuế',
+                          'net profit after tax', 'profit after tax',
+                          'net income', 'net profit'],
+                exclude=['trước thuế', 'before tax', 'thiểu số', 'minority'])
             if np_vals:
                 np_norm = normalize_to_billion_vnd(pd.Series(np_vals, dtype=float))
                 if np_norm is not None and not np_norm.empty:
@@ -766,131 +747,26 @@ def execute_equity_research_pipeline(ticker):
         if _current_yr_q0 in allowed_years:
             _years_q0_check = sorted(set(_years_q0_check) | {_current_yr_q0})
 
-        def _series_set(s: pd.Series, yr: int, val: float) -> pd.Series:
-            """Ghi val vào Series tại index yr — safe với cả index mới lẫn cũ."""
-            patch = pd.Series({yr: val}, dtype=float)
-            if yr in s.index:
-                s = s.copy()
-                if pd.isna(s.loc[yr]):
-                    s.loc[yr] = val
-            else:
-                s = pd.concat([s, patch])
-            return s
-
         for _yr0 in _years_q0_check:
             _agg = _aggregate_year_from_quarters(_yr0)
             if not _agg:
                 continue
-            # Ghi trực tiếp vào từng series — tránh closure/reference bug
-            if 'revenue' in _agg and _agg['revenue'] is not None:
-                revenue_series      = _series_set(revenue_series,      _yr0, _agg['revenue'])
-            if 'net_profit' in _agg and _agg['net_profit'] is not None:
-                net_profit_series   = _series_set(net_profit_series,   _yr0, _agg['net_profit'])
-            if 'equity' in _agg and _agg['equity'] is not None:
-                equity_series       = _series_set(equity_series,       _yr0, _agg['equity'])
-            if 'total_assets' in _agg and _agg['total_assets'] is not None:
-                total_assets_series = _series_set(total_assets_series, _yr0, _agg['total_assets'])
-            if 'eps' in _agg and _agg['eps'] is not None:
-                eps_series          = _series_set(eps_series,          _yr0, _agg['eps'])
+            for _field, _series in [
+                ('revenue',      revenue_series),
+                ('net_profit',   net_profit_series),
+                ('equity',       equity_series),
+                ('total_assets', total_assets_series),
+                ('eps',          eps_series),
+            ]:
+                if _field in _agg and _agg[_field] is not None:
+                    if _yr0 not in _series.index or pd.isna(_series.get(_yr0)):
+                        _series[_yr0] = _agg[_field]
 
         revenue_series      = revenue_series.sort_index()
         net_profit_series   = net_profit_series.sort_index()
         equity_series       = equity_series.sort_index()
         total_assets_series = total_assets_series.sort_index()
         eps_series          = eps_series.sort_index()
-
-        # ─────────────────────────────────────────────────────────────────
-        # TẦNG 0c — Lấy equity/total_assets từ kỳ Q gần nhất của df_balance_q
-        # khi năm đó không có trong df_balance_q (vnstock trả đứt đoạn)
-        # Ví dụ: balance_q thiếu 2025 hoàn toàn → dùng kỳ Q gần nhất có data
-        # của df_balance_q bất kể năm nào (thường là 2022-Q4) làm proxy
-        # HOẶC đọc từ df_balance_q cột 2026-Q1 cho equity/total_assets 2025
-        # (balance sheet là stock variable — Q1/2026 proxy cho cuối 2025 OK)
-        # ─────────────────────────────────────────────────────────────────
-        import re as _re_0c
-
-        def _balance_q_latest_col(df, prefer_year=None):
-            """
-            Tìm cột quarterly mới nhất trong df (ưu tiên năm prefer_year nếu có).
-            Trả về tên cột hoặc None.
-            """
-            if df is None or df.empty:
-                return None
-            q_cols = [c for c in df.columns
-                      if _re_0c.match(r'\d{4}-Q\d', str(c).strip())]
-            if not q_cols:
-                return None
-            if prefer_year:
-                yr_cols = [c for c in q_cols if str(c).startswith(str(prefer_year))]
-                if yr_cols:
-                    return sorted(yr_cols)[-1]  # Q4 > Q3 > Q2 > Q1
-            # Trả về kỳ mới nhất toàn bộ
-            return sorted(q_cols)[-1]
-
-        _yrs_need_balance = sorted(
-            yr for yr in allowed_years
-            if (yr not in equity_series.dropna().index
-                or yr not in total_assets_series.dropna().index)
-        )
-
-        if _yrs_need_balance and df_balance_q is not None and not df_balance_q.empty:
-            # Tìm cột label
-            _lc_0c = next((c for c in df_balance_q.columns
-                           if str(c).lower() in ('item', 'chỉ tiêu', 'indicator',
-                                                 'name', 'metric', 'description')), None)
-            if _lc_0c is None:
-                _lc_0c = next((c for c in df_balance_q.columns
-                               if df_balance_q[c].dtype == object), None)
-
-            if _lc_0c is not None:
-                for _yr_bs in _yrs_need_balance:
-                    # Ưu tiên: cột của năm đó → năm kế tiếp Q1 → kỳ mới nhất toàn bộ
-                    _col_try = (
-                        _balance_q_latest_col(df_balance_q, prefer_year=_yr_bs)
-                        or _balance_q_latest_col(df_balance_q, prefer_year=_yr_bs + 1)
-                        or _balance_q_latest_col(df_balance_q)
-                    )
-                    if _col_try is None:
-                        continue
-
-                    def _scan_bs_col(keywords, exclude=None):
-                        for kw in keywords:
-                            mask = df_balance_q[_lc_0c].astype(str).str.lower().str.contains(
-                                kw.lower(), na=False, regex=False)
-                            if exclude:
-                                for ex in exclude:
-                                    mask &= ~df_balance_q[_lc_0c].astype(str).str.lower().str.contains(
-                                        ex.lower(), na=False, regex=False)
-                            rows = df_balance_q[mask]
-                            if rows.empty:
-                                continue
-                            for v in rows[_col_try].values:
-                                try:
-                                    fv = float(str(v).replace(',', ''))
-                                    if not np.isnan(fv) and fv > 0:
-                                        norm = normalize_to_billion_vnd(pd.Series([fv], dtype=float))
-                                        if norm is not None and not norm.empty:
-                                            return round(float(norm.iloc[0]), 2)
-                                except Exception:
-                                    pass
-                        return None
-
-                    if _yr_bs not in equity_series.dropna().index:
-                        _eq_0c = _scan_bs_col(
-                            ['vốn chủ sở hữu', 'total equity', 'equity',
-                             'tổng vốn chủ sở hữu'],
-                            exclude=['thiểu số', 'minority'])
-                        if _eq_0c is not None:
-                            equity_series = _series_set(equity_series, _yr_bs, _eq_0c)
-
-                    if _yr_bs not in total_assets_series.dropna().index:
-                        _ta_0c = _scan_bs_col(
-                            ['tổng cộng tài sản', 'tổng tài sản', 'total assets'])
-                        if _ta_0c is not None:
-                            total_assets_series = _series_set(total_assets_series, _yr_bs, _ta_0c)
-
-        equity_series       = equity_series.sort_index()
-        total_assets_series = total_assets_series.sort_index()
 
         # ─────────────────────────────────────────────────────────────────
         # TẦNG 0b — Raw column scan từ df_income/df_balance (annual df)
@@ -1466,69 +1342,6 @@ def execute_equity_research_pipeline(ticker):
                 cfo_series_for_multiples = cfo_series_for_multiples.sort_index()
             except Exception:
                 pass
-
-        # ── Tầng 0 CFO: annualize từ df_cashflow_q khi annual thiếu năm ──
-        _yrs_need_cfo = sorted(
-            yr for yr in allowed_years
-            if yr not in cfo_series_for_multiples.dropna().index
-        )
-        if _yrs_need_cfo and df_cashflow_q is not None and not df_cashflow_q.empty:
-            import re as _re_cfo
-            _lc_cf = next((c for c in df_cashflow_q.columns
-                           if str(c).lower() in ('item', 'chỉ tiêu', 'indicator',
-                                                 'name', 'metric', 'description')), None)
-            if _lc_cf is None:
-                _lc_cf = next((c for c in df_cashflow_q.columns
-                               if df_cashflow_q[c].dtype == object), None)
-            if _lc_cf is not None:
-                _cfo_kw_q = ['lưu chuyển tiền thuần từ hoạt động kinh doanh',
-                             'lưu chuyển tiền thuần từ hđkd',
-                             'net cash flow from operating',
-                             'cash flows from operating activities',
-                             'operating cash flow']
-                for _yr_cfo in _yrs_need_cfo:
-                    _qcols_cfo = [c for c in df_cashflow_q.columns
-                                  if _re_cfo.match(r'\d{4}-Q\d', str(c).strip())
-                                  and str(c).startswith(str(_yr_cfo))]
-                    if not _qcols_cfo:
-                        # Thử năm kế tiếp Q1 như Tầng 0c
-                        _qcols_cfo = [c for c in df_cashflow_q.columns
-                                      if _re_cfo.match(r'\d{4}-Q\d', str(c).strip())
-                                      and str(c).startswith(str(_yr_cfo + 1))]
-                    if not _qcols_cfo:
-                        continue
-                    _cfo_vals_q = []
-                    for kw in _cfo_kw_q:
-                        mask = df_cashflow_q[_lc_cf].astype(str).str.lower().str.contains(
-                            kw.lower(), na=False, regex=False)
-                        rows_cfo = df_cashflow_q[mask]
-                        if rows_cfo.empty:
-                            continue
-                        for qc in _qcols_cfo:
-                            if qc not in rows_cfo.columns:
-                                continue
-                            for v in rows_cfo[qc].values:
-                                try:
-                                    fv = float(str(v).replace(',', ''))
-                                    if not np.isnan(fv):
-                                        _cfo_vals_q.append(fv)
-                                except Exception:
-                                    pass
-                        if _cfo_vals_q:
-                            break
-                    if _cfo_vals_q:
-                        _cfo_norm_q = normalize_to_billion_vnd(pd.Series(_cfo_vals_q, dtype=float))
-                        if _cfo_norm_q is not None and not _cfo_norm_q.empty:
-                            n_cfo = len(_cfo_norm_q)
-                            total_cfo = float(_cfo_norm_q.sum())
-                            current_year_cfo = datetime.today().year
-                            if _yr_cfo < current_year_cfo and n_cfo < 4 and n_cfo >= 2:
-                                _cfo_est = round(total_cfo * 4 / n_cfo, 2)
-                            else:
-                                _cfo_est = round(total_cfo, 2)
-                            cfo_series_for_multiples = _series_set(
-                                cfo_series_for_multiples, _yr_cfo, _cfo_est)
-                cfo_series_for_multiples = cfo_series_for_multiples.sort_index()
 
         if not cfo_series_for_multiples.empty and not equity_series.empty:
             common_ce = cfo_series_for_multiples.index.intersection(equity_series.index)
