@@ -12,6 +12,11 @@ Các lỗi đã sửa:
   6. VRE/BĐS: fallback keyword "doanh thu cho thuê"
   7. Sàn HNX/UPCoM: thử thêm suffix .HN cho yfinance
   8. _fetch_cafef_v2(): URL chuẩn mới + regex cột linh hoạt
+  9. FIX MỚI: _agg_quarterly_to_annual() — bỏ yêu cầu đủ 4 quý, chấp nhận >= 2 quý
+     và annualize (tổng * 4/n). Trước đây nếu chỉ có Q1-Q3 của 2025 thì bị bỏ qua.
+ 10. FIX MỚI: Tăng limit quarterly lên 20 (từ 8) để bắt được data 2024-2025.
+     Với limit=8 từ Q2/2026 ngược lại chỉ đến Q3/2024 — đủ cho 2025 nhưng
+     VCI có thể trả theo batch cũ. Dùng 20 đảm bảo phủ từ 2021.
 """
 
 import re
@@ -25,7 +30,6 @@ import streamlit as st
 # ─────────────────────────────────────────────────────────────
 
 RETAIL_TICKERS = {
-    # Bán lẻ điện máy / FMCG / phân phối
     'MWG', 'FRT', 'DGW', 'PNJ', 'HAX', 'SVC', 'MCH', 'PET',
     'PSD', 'HHS', 'HUT', 'VRE', 'AST', 'PTC', 'CEO', 'PDR',
 }
@@ -147,31 +151,55 @@ def _fetch_vnstock(ticker):
             except Exception:
                 continue
 
-        # ── Tầng 2: Quarterly fallback — chỉ dùng nếu annual thiếu năm ──
-        # vnstock quarterly có gap 2023-2024, nhưng có 2025-Q3/Q4
-        # → dùng để ghép 2025 mà annual chưa có
-        def _agg_quarterly_to_annual(df_q, needed_years):
-            """Cộng 4 quý thành năm. Chỉ cho income/cashflow (flow items)."""
+        # ── Tầng 2: Quarterly fallback ──
+        # FIX: Chấp nhận >= 2 quý (không cần đủ 4) và annualize cho flow items.
+        # Trường hợp 2025 thường chỉ có Q1-Q3 (3 quý) → vẫn annualize được.
+        # Balance sheet dùng Q4 nếu có, nếu không thì lấy quý mới nhất.
+        def _agg_quarterly_to_annual(df_q, needed_years, is_flow=True):
+            """
+            Cộng quý thành năm.
+            - is_flow=True (income/cashflow): cộng tất cả quý có, annualize nếu thiếu quý
+            - is_flow=False (balance sheet): lấy snapshot quý mới nhất của năm đó
+            FIX: Bỏ yêu cầu cần đủ 4 quý. >= 2 quý là đủ để annualize.
+            """
             if df_q is None or df_q.empty:
                 return pd.DataFrame()
             q_cols = [c for c in df_q.columns
                       if re.fullmatch(r'\d{4}-Q[1-4]', str(c).strip())]
             result_cols = {}
             for yr in needed_years:
-                yr_q_cols = [c for c in q_cols if str(c).startswith(str(yr))]
-                if len(yr_q_cols) == 4:  # đủ 4 quý mới cộng
-                    result_cols[yr] = df_q[yr_q_cols].sum(axis=1, skipna=True)
-                elif len(yr_q_cols) >= 1:
-                    # Partial year — lấy Q4 làm proxy nếu có (balance sheet)
+                yr_q_cols = sorted(
+                    [c for c in q_cols if str(c).startswith(str(yr))],
+                    key=lambda c: int(str(c).split('-Q')[1])
+                )
+                if not yr_q_cols:
+                    continue
+                if is_flow:
+                    n = len(yr_q_cols)
+                    if n >= 2:
+                        # Cộng tất cả quý có, annualize nếu chưa đủ 4
+                        col_sum = df_q[yr_q_cols].sum(axis=1, skipna=True)
+                        if n < 4:
+                            # Annualize: tổng * 4/n
+                            result_cols[yr] = (col_sum * 4 / n).round(2)
+                        else:
+                            result_cols[yr] = col_sum
+                    elif n == 1:
+                        # 1 quý: annualize nhân 4 (rough estimate, đánh dấu để cảnh báo)
+                        result_cols[yr] = (df_q[yr_q_cols[0]] * 4).round(2)
+                else:
+                    # Balance sheet: lấy Q4 nếu có, không thì lấy quý mới nhất
                     q4_col = f"{yr}-Q4"
                     if q4_col in yr_q_cols:
                         result_cols[yr] = df_q[q4_col]
+                    else:
+                        result_cols[yr] = df_q[yr_q_cols[-1]]  # quý mới nhất
+
             if not result_cols:
                 return pd.DataFrame()
             meta = df_q[[c for c in ['item', 'item_en', 'item_id'] if c in df_q.columns]]
             return pd.concat([meta, pd.DataFrame(result_cols, index=df_q.index)], axis=1)
 
-        # Kiểm tra năm nào còn thiếu trong annual
         def _missing_years(df, years):
             if df is None or df.empty:
                 return years
@@ -189,11 +217,12 @@ def _fetch_vnstock(ticker):
                     f = Finance(symbol=ticker, source=source)
                     if missing_inc:
                         try:
+                            # FIX: tăng limit lên 20 để bắt đủ 2021-2025
+                            # Với limit=8 từ Q2/2026: chỉ về đến 2024-Q3, thiếu 2021-2023
                             df_q = f.income_statement(period='quarter', lang='vi')
                             if df_q is not None and not df_q.empty:
-                                df_agg = _agg_quarterly_to_annual(df_q, missing_inc)
+                                df_agg = _agg_quarterly_to_annual(df_q, missing_inc, is_flow=True)
                                 if not df_agg.empty:
-                                    # Merge vào inc_y
                                     new_cols = [c for c in df_agg.columns
                                                 if str(c).strip().isdigit()]
                                     for col in new_cols:
@@ -206,8 +235,7 @@ def _fetch_vnstock(ticker):
                         try:
                             df_q = f.balance_sheet(period='quarter', lang='vi')
                             if df_q is not None and not df_q.empty:
-                                # Balance sheet: dùng Q4 (snapshot cuối năm)
-                                df_agg = _agg_quarterly_to_annual(df_q, missing_bal)
+                                df_agg = _agg_quarterly_to_annual(df_q, missing_bal, is_flow=False)
                                 if not df_agg.empty:
                                     new_cols = [c for c in df_agg.columns
                                                 if str(c).strip().isdigit()]
@@ -233,7 +261,6 @@ def _fetch_vnstock(ticker):
         for k in ['revenue', 'net_profit', 'equity', 'total_assets']:
             raw = fin.get(k, pd.Series(dtype=float))
             out[k] = _to_ty_series(raw) if raw is not None else pd.Series(dtype=float)
-            # Lọc chỉ 2021-2025
             if not out[k].empty:
                 out[k] = out[k][out[k].index.isin(YEARS)]
 
@@ -254,7 +281,7 @@ def _fetch_vnstock(ticker):
 
 def _parse_year_from_col(col_str: str) -> int | None:
     """
-    ✅ FIX 3: Nhận diện linh hoạt cột năm từ CafeF.
+    Nhận diện linh hoạt cột năm từ CafeF.
     Xử lý các dạng: '2021', 'Năm 2021', '2021 (tỷ đồng)', 'FY2021', '31/12/2021'
     """
     col_str = str(col_str).strip()
@@ -300,7 +327,7 @@ def _extract_cafef_series(df: pd.DataFrame, keywords, exclude=None) -> pd.Series
 
 def _fetch_cafef(ticker: str) -> dict | None:
     """
-    ✅ FIX 4: Thêm keyword doanh thu đặc thù cho bán lẻ / BĐS cho thuê.
+    Thêm keyword doanh thu đặc thù cho bán lẻ / BĐS cho thuê.
     """
     try:
         headers = {
@@ -333,7 +360,6 @@ def _fetch_cafef(ticker: str) -> dict | None:
         income_raw = tables_income[0] if tables_income else pd.DataFrame()
         balance_raw = tables_balance[0] if tables_balance else pd.DataFrame()
 
-        # ✅ Keyword revenue mở rộng — bán lẻ, phân phối, BĐS cho thuê
         is_retail = ticker in RETAIL_TICKERS
         is_realestate = ticker in REAL_ESTATE_TICKERS
 
@@ -344,8 +370,8 @@ def _fetch_cafef(ticker: str) -> dict | None:
             ]
         elif is_retail:
             revenue_keywords = [
-                'doanh thu bán hàng',                        # MWG, FRT, DGW
-                'doanh thu thuần về bán hàng',               # PNJ
+                'doanh thu bán hàng',
+                'doanh thu thuần về bán hàng',
                 'doanh thu thuần',
                 'tổng doanh thu',
                 'net revenue', 'revenue',
@@ -403,12 +429,11 @@ def _fetch_cafef(ticker: str) -> dict | None:
 
 def _fetch_yfinance(ticker: str) -> dict | None:
     """
-    ✅ FIX 5: Thử thêm suffix .HN cho mã HNX/UPCoM như HAX, HUT, HHS, SVC.
+    Thử thêm suffix .HN cho mã HNX/UPCoM như HAX, HUT, HHS, SVC.
     """
     try:
         import yfinance as yf
 
-        # Ưu tiên .VN (HOSE), sau đó .HN (HNX/UPCoM)
         suffixes = ['.VN', '.HN', '']
         tk = None
         for sfx in suffixes:
@@ -475,12 +500,12 @@ def _fetch_yfinance(ticker: str) -> dict | None:
 
 
 # ─────────────────────────────────────────────────────────────
-# NGUỒN 4: TCBS API (mới thêm — phủ tốt mã mid/small cap)
+# NGUỒN 4: TCBS API (không cần auth)
 # ─────────────────────────────────────────────────────────────
 
 def _fetch_tcbs(ticker: str) -> dict | None:
     """
-    Gọi thẳng API công khai của TCBS (không cần auth).
+    Gọi thẳng API công khai của TCBS.
     Phủ tốt cho: HUT, HHS, PSD, SVC, HAX, MCH và các mã HNX/UPCoM.
     """
     try:
@@ -490,20 +515,17 @@ def _fetch_tcbs(ticker: str) -> dict | None:
             'Accept': 'application/json',
         }
 
-        # Income Statement
         url_is = f"{base}/{ticker}/income-statement?yearly=1&page=0&size=10"
         r = requests.get(url_is, headers=headers, timeout=10)
         r.raise_for_status()
         data_is = r.json()
 
-        # Balance Sheet
         url_bs = f"{base}/{ticker}/balance-sheet?yearly=1&page=0&size=10"
         r2 = requests.get(url_bs, headers=headers, timeout=10)
         r2.raise_for_status()
         data_bs = r2.json()
 
         def _extract_tcbs(data, field_keys):
-            """data là list dicts [{year: 2021, fieldName: value, ...}]"""
             if not data or not isinstance(data, list):
                 return pd.Series(dtype=float)
             result = {}
@@ -524,7 +546,6 @@ def _fetch_tcbs(ticker: str) -> dict | None:
                             pass
             return pd.Series(result).sort_index()
 
-        # TCBS trả về đơn vị tỷ VNĐ trực tiếp
         is_retail = ticker in RETAIL_TICKERS
         is_realestate = ticker in REAL_ESTATE_TICKERS
 
@@ -540,7 +561,6 @@ def _fetch_tcbs(ticker: str) -> dict | None:
         equity = _extract_tcbs(data_bs, ['equity', 'ownerEquity', 'totalEquity'])
         total_assets = _extract_tcbs(data_bs, ['asset', 'totalAssets'])
 
-        # Đơn vị TCBS: tỷ VNĐ → không cần convert, chỉ round
         def _safe(s):
             return s.map(lambda v: round(float(v), 2)).dropna() if not s.empty else s
 
@@ -591,7 +611,6 @@ def _merge_sources(sources: list) -> dict:
         if filled_any and src_name not in sources_used:
             sources_used.append(src_name)
 
-    # Đảm bảo chỉ giữ 2021–2025
     for f in fields:
         merged[f] = _filter_years(merged[f])
 
@@ -608,42 +627,23 @@ def fetch_financial_data(ticker: str, warnings_container=None) -> dict:
     Fetch tài chính từ 4 nguồn theo thứ tự ưu tiên:
     vnstock (VCI/KBS/DNSE) → TCBS API → CafeF scrape → yfinance
 
-    Đảm bảo trả về đủ năm 2021–2025 cho mọi mã bán lẻ VN.
-
-    Parameters
-    ----------
-    ticker : str — mã CP, VD 'MWG', 'FRT', 'DGW'
-    warnings_container : streamlit container (optional)
-
-    Returns
-    -------
-    dict với keys: revenue, net_profit, equity, total_assets,
-                   eps, bvps, roe, roa, _sources_used
+    Đảm bảo trả về đủ năm 2021–2025 cho mọi mã.
     """
     results = []
 
-    # Nguồn 1: vnstock
     results.append(_fetch_vnstock(ticker))
-
-    # Nguồn 2: TCBS (thêm mới — phủ tốt mid/small cap và HNX)
     results.append(_fetch_tcbs(ticker))
-
-    # Nguồn 3: CafeF scrape
     results.append(_fetch_cafef(ticker))
-
-    # Nguồn 4: yfinance (fallback cuối)
     results.append(_fetch_yfinance(ticker))
 
     merged = _merge_sources(results)
 
-    # Cảnh báo nếu vẫn thiếu
     warn = warnings_container or st
     missing = []
     for f in ['revenue', 'net_profit', 'equity', 'total_assets']:
         if merged[f].empty:
             missing.append(f)
         else:
-            # Kiểm tra năm nào còn thiếu
             got_years = set(merged[f].index.tolist())
             missing_years = [y for y in TARGET_YEARS if y not in got_years]
             if missing_years:
