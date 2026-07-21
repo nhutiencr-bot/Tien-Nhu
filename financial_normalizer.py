@@ -60,7 +60,7 @@ def _get_year_columns(df: pd.DataFrame):
             year_cols.append(c)
 
     def _year_sort_key(col):
-        return int(str(col).strip()[:4])  # lấy 4 ký tự đầu = năm
+        return int(str(col).strip()[:4])
 
     return sorted(year_cols, key=_year_sort_key)
 
@@ -351,12 +351,6 @@ def cagr(series: pd.Series, n_years=None):
     except Exception:
         return None
 
-
-# NOTE: các hàm dưới đây (ddm_gordon/graham_number/nine_methods_valuation)
-# CHỈ giữ lại để tương thích ngược nếu có nơi nào khác lỡ import từ
-# financial_normalizer. pipeline.py hiện tại import các hàm cùng tên này
-# từ valuation.py (bản đầy đủ hơn) — KHÔNG phải từ đây. Hai module định
-# nghĩa trùng tên không xung đột (namespace tách biệt theo module import).
 
 def ddm_gordon(dps, required_return=0.11, g=0.04):
     if dps is None or dps <= 0 or required_return <= g:
