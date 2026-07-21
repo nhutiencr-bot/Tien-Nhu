@@ -746,12 +746,13 @@ def execute_equity_research_pipeline(ticker):
         # Chỉ thêm năm hiện tại nếu income_q CÓ dữ liệu năm đó
         _current_yr_q0 = datetime.today().year
         if _current_yr_q0 in allowed_years:
-            _inc_q_cols_check = [c for c in df_income_q.columns
-                                 if str(_current_yr_q0) in str(c)] \
-                                if df_income_q is not None and not df_income_q.empty else []
-            if _inc_q_cols_check:  # chỉ thêm nếu thực sự có data
-                _years_q0_check = sorted(set(_years_q0_check) | {_current_yr_q0})
-
+            if df_income_q is not None and not df_income_q.empty:
+                _inc_q_cols_check = [c for c in df_income_q.columns
+                                     if str(_current_yr_q0) in str(c)]
+                else:
+                    _inc_q_cols_check = []
+                    if _inc_q_cols_check:
+                        _years_q0_check = sorted(set(_years_q0_check) | {_current_yr_q0})
         for _yr0 in _years_q0_check:
             _agg = _aggregate_year_from_quarters(_yr0)
             if not _agg:
