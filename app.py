@@ -139,7 +139,7 @@ def get_cached_pipeline(ticker: str, _today: str):
 
 
 # ---------------------------------------------------------------------------
-# Header
+# Header (đặt TRƯỚC sidebar guard, ngay sau apply_premium_fintech_theme())
 # ---------------------------------------------------------------------------
 st.title("🎯 Tien-Nhu · AI Equity Research Terminal")
 st.caption(
@@ -148,19 +148,20 @@ st.caption(
 )
 
 # ---------------------------------------------------------------------------
-# Sidebar: chỉ giữ phần chọn mã — bỏ Debug & Cache
+# Chọn mã — inline dưới caption, KHÔNG dùng sidebar
 # ---------------------------------------------------------------------------
-with st.sidebar:
-    st.markdown("## 📌 Chọn mã")
-    df_symbols = load_all_symbols()
-    display_list, display_to_symbol = build_display_options(df_symbols)
+df_symbols = load_all_symbols()
+display_list, display_to_symbol = build_display_options(df_symbols)
 
-    ticker_input = None
+ticker_input = None
+col_sel, col_spacer = st.columns([2, 5])
+with col_sel:
     if display_list:
         selected_label = st.selectbox(
             f"Đang có {len(display_list)} mã (HOSE/HNX/UPCOM):",
             options=["— Chọn mã —"] + display_list,
             index=0,
+            label_visibility="visible",
         )
         if selected_label != "— Chọn mã —":
             ticker_input = display_to_symbol[selected_label]
@@ -170,7 +171,6 @@ with st.sidebar:
             value="", placeholder="Nhập mã...",
         ).strip().upper()
         ticker_input = raw if raw else None
-
 # ---------------------------------------------------------------------------
 # Guard
 # ---------------------------------------------------------------------------
