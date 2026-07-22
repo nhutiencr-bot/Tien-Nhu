@@ -13,12 +13,26 @@ def apply_premium_fintech_theme():
     st.markdown("""
 <style>
 
-/* ── Nền Dark + Radial Gradient ─────────────────────────────────────── */
+/* ── Nền Dark + Radial Gradient (phủ full màn hình) ─────────────────── */
 .stApp {
-    background-color: #0a0a14;
-    background-image: radial-gradient(circle at 50% 0%, #1a0933 0%, #0a0a14 65%);
+    background-color: #0a0a14 !important;
+    background-image: radial-gradient(ellipse 140% 55% at 50% 0%, #3d0f6e 0%, #1a0933 40%, #0a0a14 72%) !important;
     color: #f1f1f6;
     font-family: 'Inter', sans-serif;
+}
+
+/* ── Ẩn sidebar hoàn toàn — layout full-width ────────────────────────── */
+[data-testid="stSidebar"],
+[data-testid="collapsedControl"] {
+    display: none !important;
+}
+
+/* ── Content full-width ──────────────────────────────────────────────── */
+.main .block-container {
+    max-width: 1600px !important;
+    padding-left: 3rem !important;
+    padding-right: 3rem !important;
+    padding-top: 1.5rem !important;
 }
 
 /* ── Glassmorphism KPI cards ─────────────────────────────────────────── */
@@ -70,12 +84,8 @@ h1, h2, h3 {
 
 /* ══════════════════════════════════════════════════════════════════════
    FIX: THANH ĐEN TRÊN CÙNG (Share / ☆ / ✏ / GitHub icons)
-   ══════════════════════════════════════════════════════════════════════
-   Streamlit render thanh này qua nhiều lớp selector khác nhau tùy version.
-   Phủ TẤT CẢ các selector liên quan để không có khe hở màu khác lộ ra.
-   ─────────────────────────────────────────────────────────────────────── */
+   ══════════════════════════════════════════════════════════════════════ */
 
-/* Lớp 1: Header wrapper chính */
 [data-testid="stHeader"],
 header[data-testid="stHeader"] {
     background-color: #0a0a14 !important;
@@ -84,7 +94,6 @@ header[data-testid="stHeader"] {
     box-shadow: none !important;
 }
 
-/* Lớp 2: Toolbar chứa Share/☆/✏/GitHub (nằm trong header) */
 [data-testid="stToolbar"],
 [data-testid="stHeader"] > div,
 [data-testid="stHeader"] > div > div {
@@ -92,33 +101,23 @@ header[data-testid="stHeader"] {
     background-image: none !important;
 }
 
-/* Lớp 3: Các action buttons (icon Share, star, edit, GitHub) */
 [data-testid="stToolbarActions"],
 [data-testid="stToolbarActionButtonContainer"] {
     background-color: transparent !important;
 }
 
-/* Lớp 4: Vạch "đang chạy" mỏng trên cùng — ẩn hẳn */
 [data-testid="stDecoration"] {
     display: none !important;
 }
 
-/* Lớp 5: App container top — đảm bảo không có padding/margin tạo khe */
 .appview-container > section:first-child {
     background-color: #0a0a14 !important;
 }
 
-/* Lớp 6: Main iframe và block container */
 .main > div:first-child {
     background-color: #0a0a14 !important;
 }
 
-/* Lớp 7: Sidebar toggle nếu có */
-[data-testid="collapsedControl"] {
-    background-color: #0a0a14 !important;
-}
-
-/* Lớp 8: CSS variable override (Streamlit 1.30+ dùng var(--background-color)) */
 :root {
     --background-color: #0a0a14;
 }
