@@ -1,37 +1,3 @@
-"""
-app.py — Tien-Nhu Equity Research Terminal
-============================================
-Các thay đổi so với bản cũ (419 dòng):
-
-[FIX 1] Cache TTL: dữ liệu lịch sử 2021-2024 cache 7 ngày (giữ nguyên),
-        nhưng bổ sung cache_key gồm cả ngày hôm nay để năm hiện tại (2025)
-        tự động refresh mỗi ngày thay vì stuck 7 ngày.
-
-[FIX 2] Unpack pipeline_output: thêm try/except + kiểm tra len()
-        để không crash khi pipeline trả về tuple thiếu phần tử.
-
-[FIX 3] tab_multiples: _card_label và _render_card được định nghĩa
-        NGOÀI with-block (bản cũ định nghĩa bên trong → redefined mỗi lần render,
-        gây warning Streamlit và không tái sử dụng được).
-
-[FIX 4] tab_multiples: is_bank_flag mở rộng nhận diện thêm
-        is_securities và is_insurance từ metrics để ẩn P/S, EV/EBITDA đúng.
-
-[FIX 5] tab_report: fetch_cafef_reports cache key bao gồm ticker
-        (bản cũ chỉ cache theo positional arg, đúng rồi nhưng thêm comment rõ hơn).
-
-[FIX 6] tab_insights: Bull/Bear case mở rộng — thêm Revenue CAGR, hiển thị
-        sector-aware warning (ngân hàng → NIM/NPL, BĐS → bàn giao lag).
-
-[FIX 7] Thêm st.cache_data.clear() button ẩn trong sidebar để force refresh
-        khi cần (debug, sau khi push code mới).
-
-[FIX 8] render_tab_dcf import bị thiếu trong bản cũ — thêm vào import block.
-
-[NEW]   Sidebar: hiển thị metadata mã (sàn, ngành, ngày cập nhật).
-[NEW]   Tab KQKD: thêm toggle Năm/Quý đồng bộ với df_quarter_table.
-"""
-
 import re
 import datetime
 import requests
@@ -48,27 +14,24 @@ from ui_components import (
     render_tab_technical, render_tab_forecast, fmt,
 )
 
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
-st.set_page_config(page_title="Tien-Nhu · Equity Research", layout="wide")
+st.set_page_config(
+    page_title="Tien-Nhu · Equity Research",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 apply_premium_fintech_theme()
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
 REC_KEYWORDS = [
     "MUA", "BÁN", "TĂNG TỈ TRỌNG", "TĂNG TỶ TRỌNG",
     "GIẢM TỈ TRỌNG", "GIẢM TỶ TRỌNG", "NẮM GIỮ",
     "TRUNG LẬP", "KHẢ QUAN", "THEO DÕI", "PHÙ HỢP THỊ TRƯỜNG",
 ]
 
-# Cache 7 ngày cho data lịch sử; intraday/hôm nay cache 1 giờ
-_HIST_CACHE_TTL = 7 * 24 * 3600
+_HIST_CACHE_TTL  = 7 * 24 * 3600
 _TODAY_CACHE_TTL = 3600
 
 # ---------------------------------------------------------------------------
-# Helpers: card UI (định nghĩa NGOÀI tab để tránh redefinition warning)
+# Helpers
 # ---------------------------------------------------------------------------
 def _card_label(value, avg=None, low_note="Dưới TB 5N", high_note="Trên TB 5N",
                 low_thresh=None, low_msg=None, high_msg=None):
@@ -112,11 +75,10 @@ def fmt_price(v):
 
 
 # ---------------------------------------------------------------------------
-# CafeF analyst reports scraper
+# CafeF scraper
 # ---------------------------------------------------------------------------
 @st.cache_data(ttl=_TODAY_CACHE_TTL, show_spinner=False)
 def fetch_cafef_reports(ticker: str, limit: int = 8):
-    """Cào danh sách báo cáo phân tích từ CafeF, parse khuyến nghị + giá mục tiêu."""
     url = f"https://s.cafef.vn/bao-cao-phan-tich/{ticker.lower()}.chn"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     out = []
@@ -126,10 +88,9 @@ def fetch_cafef_reports(ticker: str, limit: int = 8):
         soup = BeautifulSoup(resp.text, "html.parser")
         items = soup.select("a[href*='.chn']")
         seen_links = set()
-
         for a in items:
             title = a.get_text(strip=True)
-            href = a.get("href", "")
+            href  = a.get("href", "")
             if not title or len(title) < 15 or href in seen_links:
                 continue
             if "report" not in href:
@@ -138,17 +99,15 @@ def fetch_cafef_reports(ticker: str, limit: int = 8):
                 href = ("https://s.cafef.vn" + href if href.startswith("/")
                         else "https://s.cafef.vn/" + href)
             seen_links.add(href)
-
             rec = "—"
             for kw in REC_KEYWORDS:
                 if kw in title.upper():
                     rec = kw
                     break
-
             target_price = None
             m = re.search(
                 r"(?:giá mục tiêu|gmt)[:\s]*([\d.,]+)\s*(?:vnđ|đồng|đ)?",
-                title, re.IGNORECASE
+                title, re.IGNORECASE,
             )
             if m:
                 raw = m.group(1).replace(".", "").replace(",", "")
@@ -156,19 +115,13 @@ def fetch_cafef_reports(ticker: str, limit: int = 8):
                     target_price = float(raw)
                 except ValueError:
                     pass
-
             source_match = re.search(r"-\s*([A-Z]{2,6})\s*$", title)
             source = source_match.group(1) if source_match else "—"
-
             out.append({
-                "ticker": ticker.upper(),
-                "recommendation": rec,
-                "target_price": target_price,
-                "ref_price": None,
-                "report_date": "—",
-                "source": source,
-                "url": href,
-                "title": title,
+                "ticker": ticker.upper(), "recommendation": rec,
+                "target_price": target_price, "ref_price": None,
+                "report_date": "—", "source": source,
+                "url": href, "title": title,
             })
             if len(out) >= limit:
                 break
@@ -178,11 +131,10 @@ def fetch_cafef_reports(ticker: str, limit: int = 8):
 
 
 # ---------------------------------------------------------------------------
-# Pipeline cache — key gồm ngày hôm nay để năm hiện tại auto-refresh mỗi ngày
+# Pipeline cache
 # ---------------------------------------------------------------------------
 @st.cache_data(ttl=_HIST_CACHE_TTL, show_spinner=False)
 def get_cached_pipeline(ticker: str, _today: str):
-    """_today chỉ dùng để bust cache mỗi ngày, không truyền vào pipeline."""
     return execute_equity_research_pipeline(ticker)
 
 
@@ -196,7 +148,7 @@ st.caption(
 )
 
 # ---------------------------------------------------------------------------
-# Sidebar: chọn mã + debug tools
+# Sidebar: chỉ giữ phần chọn mã — bỏ Debug & Cache
 # ---------------------------------------------------------------------------
 with st.sidebar:
     st.markdown("## 📌 Chọn mã")
@@ -219,34 +171,25 @@ with st.sidebar:
         ).strip().upper()
         ticker_input = raw if raw else None
 
-    st.divider()
-    st.markdown("### 🔧 Debug")
-    if st.button("🔄 Xóa cache & reload", help="Dùng sau khi deploy code mới"):
-        st.cache_data.clear()
-        st.rerun()
-    st.caption(f"Cache: 7 ngày lịch sử / 1 giờ hôm nay")
-    st.caption(f"Ngày: {datetime.date.today().strftime('%d/%m/%Y')}")
-
 # ---------------------------------------------------------------------------
-# Guard: chưa chọn mã
+# Guard
 # ---------------------------------------------------------------------------
 if not ticker_input:
-    st.info("👈 Vui lòng chọn hoặc nhập mã cổ phiếu trong sidebar để bắt đầu.")
+    st.info("👈 Vui lòng chọn mã cổ phiếu trong sidebar để bắt đầu.")
     st.stop()
 
 # ---------------------------------------------------------------------------
-# Run pipeline
+# Pipeline
 # ---------------------------------------------------------------------------
 today_str = datetime.date.today().isoformat()
 
-with st.spinner(f"⏳ Đang tải dữ liệu {ticker_input}… Lần đầu ~10-15s, sau đó mượt ngay."):
+with st.spinner(f"⏳ Đang tải dữ liệu {ticker_input}…"):
     pipeline_output = get_cached_pipeline(ticker_input, _today=today_str)
 
 if pipeline_output is None:
     st.error(f"❌ Không thể tải dữ liệu cho mã **{ticker_input}**. Vui lòng thử mã khác.")
     st.stop()
 
-# Unpack an toàn — bảo vệ khi pipeline thêm/bớt phần tử
 try:
     (df_price_clean, df_5y_table, df_quarter_table, df_balance_table,
      metrics, tech, news_cards, fundamentals, df_dupont,
@@ -256,18 +199,20 @@ except (ValueError, TypeError) as e:
     st.stop()
 
 # ---------------------------------------------------------------------------
-# Header: tên mã + metadata
+# Ticker header
 # ---------------------------------------------------------------------------
-sector_label = metrics.get('sector', '') or metrics.get('industry', '') or ''
+sector_label   = metrics.get('sector', '') or metrics.get('industry', '') or ''
 exchange_label = metrics.get('exchange', '') or ''
 
-st.markdown(f"## 📊 {ticker_input}"
-            + (f" · {exchange_label}" if exchange_label else "")
-            + (f" · {sector_label}" if sector_label else ""))
+st.markdown(
+    f"## 📊 {ticker_input}"
+    + (f" · {exchange_label}" if exchange_label else "")
+    + (f" · {sector_label}"   if sector_label   else "")
+)
 st.caption(
     f"Nguồn dữ liệu: vnstock ({metrics.get('source_used', 'N/A')}) · "
     f"Cập nhật: {today_str} · "
-    f"Không phải lời khuyên đầu tư · Đầu tư cổ phiếu có rủi ro mất vốn."
+    "Không phải lời khuyên đầu tư · Đầu tư cổ phiếu có rủi ro mất vốn."
 )
 
 # ---------------------------------------------------------------------------
@@ -292,25 +237,15 @@ render_kpi_cards(metrics, fundamentals)
     "📑 Báo Cáo Phân Tích",
 ])
 
-# ── Tab KQKD ────────────────────────────────────────────────────────────────
+# ── KQKD: chỉ theo Năm ──────────────────────────────────────────────────────
 with tab_kqkd:
-    period_toggle = st.radio(
-        "Kỳ hiển thị:", ["Năm", "Quý"],
-        horizontal=True, label_visibility="collapsed",
-    )
-    if period_toggle == "Năm":
-        render_tab_kqkd(df_5y_table, fundamentals, period_col="Năm")
-    else:
-        if df_quarter_table is not None and not df_quarter_table.empty:
-            render_tab_kqkd(df_quarter_table, fundamentals, period_col="Quý")
-        else:
-            st.info("Chưa có dữ liệu quý cho mã này.")
+    render_tab_kqkd(df_5y_table, fundamentals, period_col="Năm")
 
-# ── Tab Định giá PE/PB ──────────────────────────────────────────────────────
+# ── Định giá ────────────────────────────────────────────────────────────────
 with tab_valuation:
     render_tab_valuation(valuation_pkg, metrics)
 
-# ── Tab Multiples Mở Rộng ───────────────────────────────────────────────────
+# ── Multiples Mở Rộng ───────────────────────────────────────────────────────
 with tab_multiples:
     st.markdown("### Multiples Mở Rộng")
 
@@ -320,15 +255,13 @@ with tab_multiples:
     ebitda_b     = metrics.get('ebitda_latest_billion', 0) or 0
     net_debt_b   = metrics.get('net_debt_billion', 0) or 0
 
-    MIN_SANE_MARKET_CAP_B = 100.0
-    if market_cap_b < MIN_SANE_MARKET_CAP_B:
+    if market_cap_b < 100.0:
         market_cap_b = 0.0
 
     ev_b = market_cap_b + net_debt_b
-
-    ps       = _sane_ratio((market_cap_b / revenue_b) if revenue_b > 0 else None)
-    pcf      = _sane_ratio((market_cap_b / cfo_b)     if cfo_b > 0     else None)
-    ev_ebitda = _sane_ratio((ev_b / ebitda_b)          if ebitda_b > 0  else None)
+    ps        = _sane_ratio((market_cap_b / revenue_b) if revenue_b > 0 else None)
+    pcf       = _sane_ratio((market_cap_b / cfo_b)     if cfo_b > 0     else None)
+    ev_ebitda = _sane_ratio((ev_b / ebitda_b)           if ebitda_b > 0  else None)
 
     pe_now = metrics.get('pe', 0) or 0
     pb_now = metrics.get('pb', 0) or 0
@@ -352,12 +285,11 @@ with tab_multiples:
     c, n = _card_label(pb_now or None, avg=pb_median_5y, low_note="Rẻ hơn TB 5N", high_note="Đắt hơn TB 5N")
     _render_card(m2, "P/B", f"{pb_now:.2f}x" if pb_now else "—", c, n)
 
-    m3.metric("EPS", fmt(fundamentals.get('eps_latest', 0), suffix=" đ", decimals=0))
+    m3.metric("EPS",  fmt(fundamentals.get('eps_latest', 0),    suffix=" đ", decimals=0))
     m4.metric("BVPS", fmt(fundamentals.get('bvps_latest') or None, suffix=" đ", decimals=0))
 
     st.markdown("---")
 
-    # [FIX 4] Mở rộng nhận diện ngành không dùng P/S, EV/EBITDA
     is_bank       = metrics.get('is_bank', False) or metrics.get('excl_extended_multiples', False)
     is_securities = metrics.get('is_securities', False)
     is_insurance  = metrics.get('is_insurance', False)
@@ -365,14 +297,13 @@ with tab_multiples:
 
     if excl_ps_ev:
         sector_reason = (
-            "ngân hàng" if is_bank else
+            "ngân hàng"   if is_bank       else
             "chứng khoán" if is_securities else
             "bảo hiểm"
         )
         st.info(
             f"ℹ️ **P/S và EV/EBITDA không áp dụng cho {sector_reason}** — "
-            f"khái niệm doanh thu và EBITDA không phản ánh đúng bản chất kinh doanh. "
-            f"Nên dùng P/B + ROE, NIM, NPL, CAR (ngân hàng) hoặc P/B + ROE (CTCK)."
+            f"khái niệm doanh thu và EBITDA không phản ánh đúng bản chất kinh doanh."
         )
         e1, e2 = st.columns(2)
         c, n = _card_label(pcf, low_thresh=10, low_msg="Dòng tiền hấp dẫn", high_msg="Bình thường")
@@ -387,31 +318,29 @@ with tab_multiples:
         e1, e2, e3 = st.columns(3)
         c, n = _card_label(ps, low_thresh=8.0, low_msg="Định giá hợp lý", high_msg="Định giá cao")
         _render_card(e1, "P/S", f"{ps:.2f}x" if ps else "—", c, n)
-
         c, n = _card_label(pcf, low_thresh=10, low_msg="Dòng tiền hấp dẫn", high_msg="Bình thường")
         _render_card(e2, "P/CF", f"{pcf:.2f}x" if pcf else "—", c, n)
-
         c, n = _card_label(ev_ebitda, low_thresh=10, low_msg="Định giá hợp lý", high_msg="Bình thường")
         _render_card(e3, "EV/EBITDA", f"{ev_ebitda:.2f}x" if ev_ebitda else "—", c, n)
 
     if not excl_ps_ev and not (ps and pcf and ev_ebitda):
         st.caption("ℹ️ Một số chỉ số hiển thị '—' do thiếu dữ liệu từ API cho mã này.")
 
-# ── Tab DCF & Graham ────────────────────────────────────────────────────────
+# ── DCF & Graham ────────────────────────────────────────────────────────────
 with tab_dcf:
     render_tab_dcf(valuation_pkg, metrics)
 
-# ── Tab DuPont ──────────────────────────────────────────────────────────────
+# ── DuPont ──────────────────────────────────────────────────────────────────
 with tab_dupont:
     render_tab_dupont(df_dupont)
 
-# ── Tab Special Insights ────────────────────────────────────────────────────
+# ── Special Insights ────────────────────────────────────────────────────────
 with tab_insights:
     box_bull, box_bear = st.columns(2)
 
-    revenue_cagr_pct = fundamentals.get('revenue_cagr_pct', 0) or 0
+    revenue_cagr_pct    = fundamentals.get('revenue_cagr_pct', 0) or 0
     net_profit_cagr_pct = fundamentals.get('net_profit_cagr_pct', 0) or 0
-    roe_latest = fundamentals.get('roe_latest', 0) or 0
+    roe_latest          = fundamentals.get('roe_latest', 0) or 0
 
     box_bull.success(
         f"**🟢 BULL CASE**\n"
@@ -420,16 +349,14 @@ with tab_insights:
         f"- CAGR LNST 5N: {fmt(net_profit_cagr_pct, suffix='%')}\n"
         f"- ROE: {fmt(roe_latest, suffix='%')}"
     )
-
     box_bear.error(
-        f"**🔴 BEAR CASE**\n"
-        f"- Rủi ro vĩ mô ảnh hưởng biên lợi nhuận\n"
-        f"- Cần kiểm tra pha loãng cổ phiếu\n"
-        f"- DCF/Graham chỉ mang tính tham khảo\n"
-        f"- Dữ liệu API có thể trễ 1-2 quý"
+        "**🔴 BEAR CASE**\n"
+        "- Rủi ro vĩ mô ảnh hưởng biên lợi nhuận\n"
+        "- Cần kiểm tra pha loãng cổ phiếu\n"
+        "- DCF/Graham chỉ mang tính tham khảo\n"
+        "- Dữ liệu API có thể trễ 1-2 quý"
     )
 
-    # Sector-specific warnings
     if is_bank:
         st.info(
             "🏦 **Ngân hàng:** Doanh thu = Thu nhập lãi thuần (NII). "
@@ -438,22 +365,21 @@ with tab_insights:
     elif metrics.get('is_realestate', False):
         st.warning(
             "🏗️ **BĐS:** Doanh thu ghi nhận theo bàn giao, không theo ký HĐ. "
-            "Con số có thể nhảy mạnh giữa các năm do tiến độ bàn giao, không phải do kinh doanh xấu đi."
+            "Con số có thể nhảy mạnh giữa các năm do tiến độ bàn giao."
         )
 
     if tech.get('oil_correlation', 0.0) != 0.0:
-        corr = tech['oil_correlation']
-        st.warning(f"🛢️ Tương quan giá dầu WTI: **{corr:.2f}** — mã nhạy cảm với biến động dầu thô.")
+        st.warning(f"🛢️ Tương quan giá dầu WTI: **{tech['oil_correlation']:.2f}**")
 
-# ── Tab Dự Phóng ────────────────────────────────────────────────────────────
+# ── Dự Phóng ────────────────────────────────────────────────────────────────
 with tab_forecast:
     render_tab_forecast(df_5y_table, fundamentals, metrics, tech, valuation_pkg, period_col="Năm")
 
-# ── Tab Technical ───────────────────────────────────────────────────────────
+# ── Technical ───────────────────────────────────────────────────────────────
 with tab_technical:
     render_tab_technical(df_price_clean, tech, metrics)
 
-# ── Tab Tin Tức ─────────────────────────────────────────────────────────────
+# ── Tin Tức ─────────────────────────────────────────────────────────────────
 with tab_news:
     st.subheader("📰 Tin Tức & Sự Kiện Nổi Bật")
     if news_cards and len(news_cards) > 0:
@@ -462,11 +388,9 @@ with tab_news:
             link     = news.get('url', '#')
             source   = news.get('source', 'Hệ thống')
             pub_date = news.get('pub_date', '—')
-
             if "Không có sự kiện bất thường" in title:
                 st.info(title)
                 continue
-
             st.markdown(
                 f'<h5><a href="{link}" target="_blank" '
                 f'style="color:white;text-decoration:none;">{title}</a></h5>',
@@ -482,17 +406,17 @@ with tab_news:
     else:
         st.info("Không có tin tức nào trong 30 ngày qua.")
 
-# ── Tab Báo Cáo Phân Tích ───────────────────────────────────────────────────
+# ── Báo Cáo Phân Tích ───────────────────────────────────────────────────────
 with tab_report:
     st.markdown("### 📑 Báo Cáo Phân Tích & Khuyến Nghị")
     st.caption(f"Tổng hợp khuyến nghị mới nhất cho **{ticker_input.upper()}** từ CafeF.")
 
-    cafef_url    = f"https://s.cafef.vn/bao-cao-phan-tich/{ticker_input.lower()}.chn"
+    cafef_url     = f"https://s.cafef.vn/bao-cao-phan-tich/{ticker_input.lower()}.chn"
     vietstock_url = f"https://finance.vietstock.vn/{ticker_input.upper()}/bao-cao-phan-tich.htm"
 
     rep_col1, rep_col2 = st.columns(2)
     with rep_col1:
-        st.link_button("🔗 Xem tất cả trên CafeF", cafef_url, use_container_width=True)
+        st.link_button("🔗 Xem tất cả trên CafeF",     cafef_url,     use_container_width=True)
     with rep_col2:
         st.link_button("🔗 Xem tất cả trên Vietstock", vietstock_url, use_container_width=True)
 
@@ -506,21 +430,19 @@ with tab_report:
     if not reports_list:
         st.info(
             f"Chưa cào được báo cáo nào cho **{ticker_input.upper()}** từ CafeF. "
-            "Trang có thể đổi cấu trúc HTML hoặc chưa có báo cáo gần đây — "
-            "dùng nút phía trên để xem trực tiếp."
+            "Dùng nút phía trên để xem trực tiếp."
         )
     else:
         rows_html = ""
         for r in reports_list:
             tp = r["target_price"]
             if tp and current_price > 0:
-                upside_pct  = (tp - current_price) / current_price * 100
-                upside_str  = f"{upside_pct:+.0f}%"
+                upside_pct   = (tp - current_price) / current_price * 100
+                upside_str   = f"{upside_pct:+.0f}%"
                 upside_color = "#22C55E" if upside_pct >= 0 else "#EF4444"
             else:
                 upside_str   = "—"
                 upside_color = "#888"
-
             tp_str = f"{tp:,.0f}" if tp else "—"
             rows_html += f"""
 <tr style="border-bottom:1px solid rgba(255,255,255,0.08);">
@@ -535,7 +457,6 @@ with tab_report:
        style="color:#8B5CF6;font-weight:bold;text-decoration:none;">Xem BCPT →</a>
   </td>
 </tr>"""
-
         st.markdown(f"""
 <div style="overflow-x:auto;">
 <table style="width:100%;border-collapse:collapse;font-size:14px;">
