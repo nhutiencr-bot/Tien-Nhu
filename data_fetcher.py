@@ -12,11 +12,11 @@ Các lỗi đã sửa:
   6. VRE/BĐS: fallback keyword "doanh thu cho thuê"
   7. Sàn HNX/UPCoM: thử thêm suffix .HN cho yfinance
   8. _fetch_cafef_v2(): URL chuẩn mới + regex cột linh hoạt
-  9. FIX MỚI: _agg_quarterly_to_annual() — bỏ yêu cầu đủ 4 quý, chấp nhận >= 2 quý
-     và annualize (tổng * 4/n). Trước đây nếu chỉ có Q1-Q3 của 2025 thì bị bỏ qua.
- 10. FIX MỚI: Tăng limit quarterly lên 20 (từ 8) để bắt được data 2024-2025.
-     Với limit=8 từ Q2/2026 ngược lại chỉ đến Q3/2024 — đủ cho 2025 nhưng
-     VCI có thể trả theo batch cũ. Dùng 20 đảm bảo phủ từ 2021.
+  9. FIX: _agg_quarterly_to_annual() — chỉ annualize cho năm HIỆN TẠI đang diễn ra.
+     Năm đã kết thúc mà thiếu quý = dữ liệu xấu, bỏ qua để fallback CafeF/TCBS lấy đúng.
+ 10. FIX: Tăng limit quarterly lên 20 (từ 8) để bắt được data 2024-2025.
+ 11. FIX: Drop cột năm hiện tại (2026) khỏi inc_y/bal_y/rat_y ngay sau khi fetch annual,
+     tránh vnstock trả rolling 12 tháng gần nhất bị đưa vào bảng 2025.
 """
 
 import re
@@ -24,6 +24,7 @@ import time
 import requests
 import pandas as pd
 import streamlit as st
+from datetime import datetime
 
 # ─────────────────────────────────────────────────────────────
 # CONSTANTS — ngành đặc thù
@@ -42,6 +43,7 @@ BANK_TICKERS = {
 }
 
 TARGET_YEARS = list(range(2021, 2026))  # 2021–2025
+CURRENT_YEAR = datetime.today().year    # 2026
 
 # ─────────────────────────────────────────────────────────────
 # HELPER: parse số từ string bất kỳ
@@ -102,6 +104,20 @@ def _filter_years(series: pd.Series, years=None) -> pd.Series:
     return series.loc[keep].sort_index() if keep else pd.Series(dtype=float)
 
 
+def _drop_current_year_cols(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Xoá cột năm hiện tại (CURRENT_YEAR) khỏi DataFrame ngay sau khi fetch annual.
+    Tránh trường hợp vnstock trả rolling 12 tháng gần nhất (ví dụ Q2/2025–Q1/2026)
+    dưới nhãn cột '2026', rồi bị đưa nhầm vào bảng 2025.
+    """
+    if df is None or df.empty:
+        return df
+    drop_cols = [c for c in df.columns if str(c).strip() == str(CURRENT_YEAR)]
+    if drop_cols:
+        df = df.drop(columns=drop_cols)
+    return df
+
+
 # ─────────────────────────────────────────────────────────────
 # NGUỒN 1: vnstock (VCI / KBS / DNSE)
 # ─────────────────────────────────────────────────────────────
@@ -124,7 +140,7 @@ def _fetch_vnstock(ticker):
                     try:
                         df = f.income_statement(period='year', lang='vi')
                         if df is not None and not df.empty:
-                            inc_y = df
+                            inc_y = _drop_current_year_cols(df)
                     except Exception:
                         pass
 
@@ -132,7 +148,7 @@ def _fetch_vnstock(ticker):
                     try:
                         df = f.balance_sheet(period='year', lang='vi')
                         if df is not None and not df.empty:
-                            bal_y = df
+                            bal_y = _drop_current_year_cols(df)
                     except Exception:
                         pass
 
@@ -140,7 +156,7 @@ def _fetch_vnstock(ticker):
                     try:
                         df = f.ratio(period='year', lang='vi')
                         if df is not None and not df.empty:
-                            rat_y = df
+                            rat_y = _drop_current_year_cols(df)
                     except Exception:
                         pass
 
@@ -152,15 +168,14 @@ def _fetch_vnstock(ticker):
                 continue
 
         # ── Tầng 2: Quarterly fallback ──
-        # FIX: Chấp nhận >= 2 quý (không cần đủ 4) và annualize cho flow items.
-        # Trường hợp 2025 thường chỉ có Q1-Q3 (3 quý) → vẫn annualize được.
-        # Balance sheet dùng Q4 nếu có, nếu không thì lấy quý mới nhất.
         def _agg_quarterly_to_annual(df_q, needed_years, is_flow=True):
             """
             Cộng quý thành năm.
-            - is_flow=True (income/cashflow): cộng tất cả quý có, annualize nếu thiếu quý
-            - is_flow=False (balance sheet): lấy snapshot quý mới nhất của năm đó
-            FIX: Bỏ yêu cầu cần đủ 4 quý. >= 2 quý là đủ để annualize.
+            - is_flow=True (income/cashflow):
+                * Đủ 4 quý → cộng thẳng (chính xác 100%)
+                * Thiếu quý + năm ĐÃ KẾT THÚC → BỎ QUA, để fallback CafeF/TCBS lấy annual đúng
+                * Thiếu quý + năm HIỆN TẠI đang diễn ra → annualize (tổng * 4/n)
+            - is_flow=False (balance sheet): lấy snapshot Q4 nếu có, không thì quý mới nhất
             """
             if df_q is None or df_q.empty:
                 return pd.DataFrame()
@@ -176,24 +191,24 @@ def _fetch_vnstock(ticker):
                     continue
                 if is_flow:
                     n = len(yr_q_cols)
-                    if n >= 2:
-                        # Cộng tất cả quý có, annualize nếu chưa đủ 4
+                    if n >= 4:
+                        # Đủ 4 quý → cộng thẳng, không annualize
+                        result_cols[yr] = df_q[yr_q_cols].sum(axis=1, skipna=True)
+                    elif yr == CURRENT_YEAR:
+                        # Năm hiện tại đang diễn ra, chưa đủ quý → annualize
                         col_sum = df_q[yr_q_cols].sum(axis=1, skipna=True)
-                        if n < 4:
-                            # Annualize: tổng * 4/n
-                            result_cols[yr] = (col_sum * 4 / n).round(2)
-                        else:
-                            result_cols[yr] = col_sum
-                    elif n == 1:
-                        # 1 quý: annualize nhân 4 (rough estimate, đánh dấu để cảnh báo)
-                        result_cols[yr] = (df_q[yr_q_cols[0]] * 4).round(2)
+                        result_cols[yr] = (col_sum * 4 / n).round(2)
+                    else:
+                        # Năm đã kết thúc mà thiếu quý = dữ liệu xấu → bỏ qua
+                        # fallback CafeF/TCBS sẽ lấy đúng số annual
+                        continue
                 else:
                     # Balance sheet: lấy Q4 nếu có, không thì lấy quý mới nhất
                     q4_col = f"{yr}-Q4"
                     if q4_col in yr_q_cols:
                         result_cols[yr] = df_q[q4_col]
                     else:
-                        result_cols[yr] = df_q[yr_q_cols[-1]]  # quý mới nhất
+                        result_cols[yr] = df_q[yr_q_cols[-1]]
 
             if not result_cols:
                 return pd.DataFrame()
@@ -217,8 +232,6 @@ def _fetch_vnstock(ticker):
                     f = Finance(symbol=ticker, source=source)
                     if missing_inc:
                         try:
-                            # FIX: tăng limit lên 20 để bắt đủ 2021-2025
-                            # Với limit=8 từ Q2/2026: chỉ về đến 2024-Q3, thiếu 2021-2023
                             df_q = f.income_statement(period='quarter', lang='vi')
                             if df_q is not None and not df_q.empty:
                                 df_agg = _agg_quarterly_to_annual(df_q, missing_inc, is_flow=True)
