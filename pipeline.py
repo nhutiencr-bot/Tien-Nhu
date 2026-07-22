@@ -507,15 +507,15 @@ def execute_equity_research_pipeline(ticker):
                 except Exception:
                     results[key] = pd.DataFrame()
 
-        df_price      = results.get("price",      pd.DataFrame())
-        df_overview   = results.get("overview",   pd.DataFrame())
-        df_income     = results.get("income_y",   pd.DataFrame())
-        df_cashflow   = results.get("cashflow_y", pd.DataFrame())
-        df_ratio      = results.get("ratio_y",    pd.DataFrame())
-        df_income_q   = results.get("income_q",   pd.DataFrame())
-        df_ratio_q    = results.get("ratio_q",    pd.DataFrame())
-        df_balance    = results.get("balance_y",  pd.DataFrame())
-        df_balance_q  = results.get("balance_q",  pd.DataFrame())
+        df_price     = results.get("price",      pd.DataFrame())
+        df_overview  = results.get("overview",   pd.DataFrame())
+        df_income    = results.get("income_y",   pd.DataFrame())
+        df_cashflow  = results.get("cashflow_y", pd.DataFrame())
+        df_ratio     = results.get("ratio_y",    pd.DataFrame())
+        df_income_q  = results.get("income_q",   pd.DataFrame())
+        df_ratio_q   = results.get("ratio_q",    pd.DataFrame())
+        df_balance   = results.get("balance_y",  pd.DataFrame())
+        df_balance_q = results.get("balance_q",  pd.DataFrame())
         df_cashflow_q = results.get("cashflow_q", pd.DataFrame())
 
         if df_price is None or df_price.empty:
@@ -921,12 +921,15 @@ def execute_equity_research_pipeline(ticker):
 
         # ─────────────────────────────────────────────────────────────────
         # SANITY CHECK 1: Revenue bất thường (outlier so với median các năm khác)
+        # Nguyên nhân: income_q chỉ có Q3+Q4 → cộng 2 quý nhưng đơn vị sai
+        # → Xoá năm đó để trigger refetch từ annual/CafeF
         # ─────────────────────────────────────────────────────────────────
         if len(revenue_series.dropna()) >= 3:
             _rev_median = revenue_series.dropna().median()
             _rev_bad = [yr for yr in revenue_series.dropna().index
                         if revenue_series[yr] > _rev_median * 10]
             for _rbyr in _rev_bad:
+                # Thử lấy từ annual trước
                 _rv_annual = _raw_scan_annual(
                     df_income, _rbyr,
                     ['doanh thu thuần', 'net revenue', 'revenue', 'tổng doanh thu'],
@@ -937,7 +940,9 @@ def execute_equity_research_pipeline(ticker):
                     revenue_series[_rbyr] = np.nan
 
         # ─────────────────────────────────────────────────────────────────
-        # SANITY CHECK 2: equity không thể ≥ total_assets
+        # SANITY CHECK 2: equity không thể ≥ total_assets (VCSH < Tổng TS)
+        # Nếu equity[yr] ≥ total_assets[yr] * 0.99 → giá trị bị match sai
+        # → Tính lại bằng total_assets - total_liabilities, hoặc xoá để refetch
         # ─────────────────────────────────────────────────────────────────
         _common_eq_ta = equity_series.index.intersection(total_assets_series.index)
         _bad_eq_years = [
@@ -951,6 +956,7 @@ def execute_equity_research_pipeline(ticker):
                          'nợ phải trả', 'liabilities']
             for _byr in _bad_eq_years:
                 _fixed = False
+                # Thử tính lại từ quarterly balance: total_assets - total_liabilities
                 if df_balance_q is not None and not df_balance_q.empty:
                     import re as _re_eq
                     _bq_cols = [c for c in df_balance_q.columns
@@ -971,6 +977,7 @@ def execute_equity_research_pipeline(ticker):
                                 if 0 < _eq_calc < float(_ta_norm.iloc[-1]):
                                     equity_series[_byr] = round(_eq_calc, 2)
                                     _fixed = True
+                # Fallback từ df_balance annual
                 if not _fixed:
                     _ta_v = _raw_scan_annual(df_balance, _byr,
                                              ['tổng cộng tài sản', 'tổng tài sản', 'total assets'])
@@ -982,6 +989,7 @@ def execute_equity_research_pipeline(ticker):
                             equity_series[_byr] = round(_eq_calc, 2)
                             _fixed = True
                 if not _fixed:
+                    # Xoá giá trị sai để trigger refetch từ CafeF/DNSE
                     equity_series[_byr] = np.nan
 
         equity_series = equity_series.sort_index()
@@ -996,6 +1004,7 @@ def execute_equity_research_pipeline(ticker):
                 or yr not in equity_series.dropna().index
                 or yr not in total_assets_series.dropna().index)
         )
+        # Luôn retry năm hiện tại qua CafeF/DNSE
         _current_yr_miss = datetime.today().year
         if _current_yr_miss in allowed_years and _current_yr_miss not in _missing_any:
             _missing_any = sorted(set(_missing_any) | {_current_yr_miss})
@@ -1047,6 +1056,7 @@ def execute_equity_research_pipeline(ticker):
             try:
                 _cafef_full = fetch_cafef_yearly_full(ticker, years=list(allowed_years))
 
+                # Expose lỗi nội bộ từ cafef_fallback (nếu có)
                 _cafef_internal_err = _cafef_full.pop('__error__', None)
                 _cafef_trace        = _cafef_full.pop('__trace__', None)
 
@@ -1095,6 +1105,7 @@ def execute_equity_research_pipeline(ticker):
         if _missing_after_cafef:
             try:
                 import requests as _req_dnse
+                # Probe DNSE API trực tiếp để lấy raw response cho debug
                 _dnse_probe_url = (
                     f"https://api.dnse.com.vn/analysis-api/v1/analysis/financial-report"
                     f"?symbol={ticker}&type=IS&period=YEARLY"
@@ -1130,8 +1141,11 @@ def execute_equity_research_pipeline(ticker):
                 _dnse_debug["error"] = f"{type(_dnse_exc).__name__}: {_dnse_exc}"
                 _dnse_debug["trace"] = _tb_dn.format_exc(limit=5)
 
+        # (debug expander đã được gỡ bỏ)
+
         # ─────────────────────────────────────────────────────────────────
-        # TẦNG 2b — Yahoo Finance fallback
+        # TẦNG 2b — Yahoo Finance fallback (equity & total_assets chính yếu)
+        # Chạy khi DNSE vẫn thiếu ít nhất 1 năm cho equity hoặc total_assets
         # ─────────────────────────────────────────────────────────────────
         _missing_after_dnse = sorted(
             yr for yr in allowed_years
@@ -1145,11 +1159,15 @@ def execute_equity_research_pipeline(ticker):
         if _missing_after_dnse:
             try:
                 _yahoo_data = _fetch_yahoo_financials(ticker, set(_missing_after_dnse))
+                # Yahoo data đã được convert sang tỷ VNĐ trong _fetch_yahoo_financials
+                # KHÔNG gọi normalize_to_billion_vnd lần nữa
                 _rev_yh  = _filter_years(_yahoo_data.get("revenue",      pd.Series(dtype=float)))
                 _np_yh   = _filter_years(_yahoo_data.get("net_profit",   pd.Series(dtype=float)))
                 _eq_yh   = _filter_years(_yahoo_data.get("equity",       pd.Series(dtype=float)))
                 _ta_yh   = _filter_years(_yahoo_data.get("total_assets", pd.Series(dtype=float)))
 
+                # Yahoo báo đơn vị USD gốc đã convert trong hàm → KHÔNG normalize lại
+                # Nhưng cần kiểm tra đơn vị bằng sanity check: equity ngân hàng VN thường > 1,000 tỷ
                 _yahoo_debug = {
                     "revenue":      dict(_rev_yh)  if not _rev_yh.empty  else "⚠️ rỗng",
                     "net_profit":   dict(_np_yh)   if not _np_yh.empty   else "⚠️ rỗng",
@@ -1165,6 +1183,8 @@ def execute_equity_research_pipeline(ticker):
                 import traceback as _tb_yh
                 _yahoo_debug["error"] = f"{type(_yh_exc).__name__}: {_yh_exc}"
                 _yahoo_debug["trace"] = _tb_yh.format_exc(limit=5)
+
+
 
         # ─────────────────────────────────────────────────────────────────
         # TẦNG 3 — Website scraping
@@ -1382,8 +1402,7 @@ def execute_equity_research_pipeline(ticker):
              'cash flow from operating activities', 'cash flows from operating activities',
              'net cash generated from operating activities',
              'cash flow from operations', 'operating cash flow']))
-        cfo_series_for_multiples = _filter_years(cfo_series_for_multiples)
-
+        cfo_series_for_multiples = _filter_years(cfo_series_for_multiples) 
         # [FIX] CFO 2025 fallback — cộng quarterly khi annual chưa có
         if df_cashflow_q is not None and not df_cashflow_q.empty:
             from financial_normalizer import CFO_KEYWORDS, _find_cfo_with_quarterly_fallback
@@ -1395,6 +1414,7 @@ def execute_equity_research_pipeline(ticker):
                         or pd.isna(cfo_series_for_multiples.get(_yr_cfo))):
                     cfo_series_for_multiples[_yr_cfo] = _cfo_q_series[_yr_cfo]
             cfo_series_for_multiples = cfo_series_for_multiples.sort_index()
+        
 
         if not _cf_cf.empty:
             try:
@@ -1685,10 +1705,12 @@ def execute_equity_research_pipeline(ticker):
 
         _shares_map = {}
         if outstanding_shares_series is not None and not outstanding_shares_series.empty:
+            # outstanding_shares_series đã ở đơn vị cổ phiếu lẻ (do _build_shares_series)
             for _y, _v in (outstanding_shares_series / 1e9).items():
                 if pd.notna(_v) and _v > 0:
                     _shares_map[_y] = round(float(_v), 2)
         if issue_share > 0:
+            # issue_share từ overview → thường đơn vị lẻ, guard nếu < 1e7 → là triệu
             _iss_norm = issue_share if issue_share >= 1e7 else issue_share * 1e6
             for _y in years_available:
                 if _y not in _shares_map:
@@ -1717,6 +1739,7 @@ def execute_equity_research_pipeline(ticker):
                     _last = _grp.sort_values('time')['_val'].iloc[-1]
                     if pd.notna(_last) and _last > 0:
                         _price_eoy[int(_yr)] = float(_last)
+                # Năm hiện tại: nếu chưa có Dec → dùng giá mới nhất có sẵn
                 _cur_yr_price = datetime.today().year
                 if _cur_yr_price not in _price_eoy and _cur_yr_price in years_available:
                     _last_any = _dp.sort_values('time')['_val'].iloc[-1]
