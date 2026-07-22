@@ -527,6 +527,10 @@ def execute_equity_research_pipeline(ticker):
         is_bank = ticker in ['VCB', 'BID', 'CTG', 'TCB', 'MBB', 'ACB', 'STB',
                               'VPB', 'HDB', 'SHB', 'EIB', 'LPB', 'OCB', 'TPB',
                               'VIB', 'MSB', 'SSB', 'NAB', 'ABB', 'BVB']
+        # FIX 4: thêm is_securities để Tầng 0 dùng đúng keyword revenue
+        is_securities = ticker in ['SSI', 'VND', 'HCM', 'MBS', 'VCI', 'FTS',
+                                    'AGR', 'SBS', 'BSI', 'VPX', 'VCK', 'TCX',
+                                    'SHS', 'CTS', 'VDS', 'ORS', 'TVS']
         current_price = float(df_price['close_vnd'].iloc[-1])
 
         fin5 = build_5y_financial_table(df_income, df_balance, df_ratio, ticker=ticker)
@@ -648,6 +652,9 @@ def execute_equity_research_pipeline(ticker):
                     matched = df[mask]
                     if matched.empty:
                         continue
+                    # FIX 1: chỉ lấy dòng ĐẦU TIÊN để tránh cộng nhầm nhiều dòng
+                    # (vd: "Doanh thu thuần" xuất hiện ở cả dòng tổng + dòng chi tiết)
+                    matched = matched.iloc[[0]]
                     for col in cols:
                         if col not in matched.columns:
                             continue
@@ -671,11 +678,29 @@ def execute_equity_research_pipeline(ticker):
             out = {}
 
             # ── REVENUE: cộng tất cả quý ──
+            # FIX 2: keyword khác nhau theo ngành để tránh match sai
+            if is_bank:
+                # Ngân hàng: doanh thu = Thu nhập lãi thuần (NII), không phải doanh thu thuần
+                _rev_kw_q = ['thu nhập lãi thuần', 'net interest income',
+                             'tổng thu nhập hoạt động thuần', 'thu nhập hoạt động thuần',
+                             'tong thu nhap lai thuan', 'lai thuan tu hoat dong kinh doanh']
+                _rev_ex_q = ['chi phí', 'expense', 'trước dự phòng', 'before provision',
+                             'dự phòng', 'provision']
+            elif is_securities:
+                # Chứng khoán: doanh thu hoạt động
+                _rev_kw_q = ['doanh thu hoạt động', 'operating revenue',
+                             'tổng doanh thu hoạt động',
+                             'doanh thu thuần về hoạt động kinh doanh']
+                _rev_ex_q = ['chi phí', 'expense', 'phí hoa hồng']
+            else:
+                _rev_kw_q = ['doanh thu thuần', 'net revenue', 'doanh thu bán hàng',
+                             'revenue', 'tổng doanh thu']
+                _rev_ex_q = ['giá vốn', 'chi phí', 'cost']
+
             rev_vals = _extract_row_values(
                 df_income_q, inc_cols,
-                keywords=['doanh thu thuần', 'net revenue', 'doanh thu bán hàng',
-                          'revenue', 'tổng doanh thu'],
-                exclude=['giá vốn', 'chi phí', 'cost'])
+                keywords=_rev_kw_q,
+                exclude=_rev_ex_q)
             if rev_vals:
                 rev_norm = normalize_to_billion_vnd(pd.Series(rev_vals, dtype=float))
                 if rev_norm is not None and not rev_norm.empty:
@@ -1302,12 +1327,19 @@ def execute_equity_research_pipeline(ticker):
         if _cross_unit_recheck(net_profit_series, revenue_series, equity_series):
             net_profit_series = net_profit_series / 1000
 
-        if not revenue_series.empty and not net_profit_series.empty:
+        # FIX 3: threshold phải rất chặt (>20, không phải >2)
+        # Lý do: ROS = 65% → LNST/Revenue = 0.65 < 2 không trigger bình thường,
+        # nhưng nếu revenue bị sai (chỉ lấy 1 quý = 1/4 thực) thì ratio vọt lên cao.
+        # Chỉ nhân khi ratio > 20 — rõ ràng lỗi đơn vị, không phải ROS cao.
+        # Không áp dụng cho bank/securities vì ratio LNST/Revenue của họ không chuẩn.
+        if not is_bank and not is_securities and \
+                not revenue_series.empty and not net_profit_series.empty:
             common_ry = revenue_series.index.intersection(net_profit_series.index)
             if len(common_ry) >= 2:
                 rev_med = revenue_series.loc[common_ry].abs().median()
                 np_med  = net_profit_series.loc[common_ry].abs().median()
-                if rev_med > 0 and np_med / rev_med > 2:
+                # Chỉ nhân khi revenue nhỏ hơn LNST 20 lần — chắc chắn lỗi đơn vị
+                if rev_med > 0 and np_med / rev_med > 20:
                     revenue_series = revenue_series * 1000
 
         if not revenue_series.empty and not equity_series.empty:
