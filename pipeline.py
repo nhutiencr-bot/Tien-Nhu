@@ -607,16 +607,23 @@ def execute_equity_research_pipeline(ticker):
             current_year = datetime.today().year
 
             def _cols_for_year(df, yr):
-                """Trả về list tên cột thuộc năm yr."""
+                """Trả về list tên cột thuộc đúng năm yr, KHÔNG lấy quý của năm sau."""
                 if df is None or df.empty:
                     return []
                 out_cols = []
                 for col in df.columns:
                     col_s = str(col).strip()
                     found = _re2.findall(r'\b((?:19|20)\d{2})\b', col_s)
-                    if found and int(found[0]) == yr:
-                        out_cols.append(col)
-                return out_cols
+                if not found:
+                    continue
+                # Lấy TẤT CẢ năm tìm được, chỉ chấp nhận cột nếu:
+                # 1. Năm đầu tiên == yr (pattern "2025-Q1", "2025Q4")
+                # 2. HOẶC năm duy nhất == yr (pattern "Q4/2025")
+                # → KHÔNG chấp nhận nếu có bất kỳ năm nào != yr
+                years_in_col = [int(y) for y in found]
+                if all(y == yr for y in years_in_col):
+                    out_cols.append(col)
+            return out_cols
 
             def _extract_row_values(df, cols, keywords, exclude=None):
                 """
@@ -805,17 +812,16 @@ def execute_equity_research_pipeline(ticker):
                         _series[_yr0] = _agg[_field]
 
         def _raw_scan_annual(df, yr, keywords, exclude=None):
-            """Scan cột có năm == yr trong annual df, trả về giá trị float đầu tiên tìm được."""
             if df is None or df.empty:
                 return None
             import re as _re3
-            year_cols = [c for c in df.columns
-                         if _re3.search(r'\b' + str(yr) + r'\b', str(c))]
+            # Chỉ lấy cột đúng năm yr, KHÔNG lấy cột chứa năm khác
+            year_cols = []
+            for c in df.columns:
+                found_yrs = [int(y) for y in _re3.findall(r'\b((?:19|20)\d{2})\b', str(c))]
+                if found_yrs and all(y == yr for y in found_yrs):
+                    year_cols.append(c)
             if not year_cols:
-                return None
-            label_col = next(
-                (c for c in df.columns if df[c].dtype == object), None)
-            if label_col is None:
                 return None
             for kw in keywords:
                 mask = df[label_col].astype(str).str.lower().str.contains(
