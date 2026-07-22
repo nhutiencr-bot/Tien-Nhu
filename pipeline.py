@@ -493,7 +493,6 @@ def execute_equity_research_pipeline(ticker):
             "income_q":   lambda: _fetch_income_statement(ticker,  source_used, period='quarter', limit=20),
             "ratio_q":    lambda: _fetch_ratio(ticker,             source_used, period='quarter', limit=20),
             "balance_q":  lambda: _fetch_balance_sheet(ticker,     source_used, period='quarter', limit=40),
-            "cashflow_q": lambda: _fetch_cashflow(ticker,          source_used, period='quarter', limit=20),
             "news":       lambda: c_engine.news(),
         }
 
@@ -516,7 +515,6 @@ def execute_equity_research_pipeline(ticker):
         df_ratio_q   = results.get("ratio_q",    pd.DataFrame())
         df_balance   = results.get("balance_y",  pd.DataFrame())
         df_balance_q = results.get("balance_q",  pd.DataFrame())
-        df_cashflow_q = results.get("cashflow_q", pd.DataFrame())
 
         if df_price is None or df_price.empty:
             st.error(f"Không có dữ liệu giá lịch sử cho mã {ticker}.")
@@ -1402,19 +1400,7 @@ def execute_equity_research_pipeline(ticker):
              'cash flow from operating activities', 'cash flows from operating activities',
              'net cash generated from operating activities',
              'cash flow from operations', 'operating cash flow']))
-        cfo_series_for_multiples = _filter_years(cfo_series_for_multiples) 
-        # [FIX] CFO 2025 fallback — cộng quarterly khi annual chưa có
-        if df_cashflow_q is not None and not df_cashflow_q.empty:
-            from financial_normalizer import CFO_KEYWORDS, _find_cfo_with_quarterly_fallback
-            _cfo_q_series = _find_cfo_with_quarterly_fallback(df_cashflow, df_cashflow_q)
-            _cfo_q_series = normalize_to_billion_vnd(_cfo_q_series)
-            _cfo_q_series = _filter_years(_cfo_q_series)
-            for _yr_cfo in _cfo_q_series.index:
-                if (_yr_cfo not in cfo_series_for_multiples.index
-                        or pd.isna(cfo_series_for_multiples.get(_yr_cfo))):
-                    cfo_series_for_multiples[_yr_cfo] = _cfo_q_series[_yr_cfo]
-            cfo_series_for_multiples = cfo_series_for_multiples.sort_index()
-        
+        cfo_series_for_multiples = _filter_years(cfo_series_for_multiples)
 
         if not _cf_cf.empty:
             try:
