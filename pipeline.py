@@ -706,10 +706,17 @@ def execute_equity_research_pipeline(ticker):
                 if rev_norm is not None and not rev_norm.empty:
                     n = len(rev_norm)
                     total = float(rev_norm.sum())
-                    if target_year < current_year and n < 4:
+                    # FIX NỘI SUY: Chỉ dự phóng (nhân 4/n) cho đúng NĂM HIỆN TẠI.
+                    # Năm cũ nếu thiếu quý thì bỏ qua để kích hoạt cơ chế fallback lấy số chuẩn 1 năm.
+                    if target_year == current_year and n < 4:
                         if n >= 2:
                             out['revenue'] = round(total * 4 / n, 2)
                             out['_revenue_q'] = n
+                        else:
+                            out['revenue'] = round(total, 2)
+                            out['_revenue_q'] = n
+                    elif target_year < current_year and n < 4:
+                        pass
                     else:
                         out['revenue'] = round(total, 2)
                         out['_revenue_q'] = n
@@ -727,10 +734,15 @@ def execute_equity_research_pipeline(ticker):
                 if np_norm is not None and not np_norm.empty:
                     n = len(np_norm)
                     total = float(np_norm.sum())
-                    if target_year < current_year and n < 4:
+                    if target_year == current_year and n < 4:
                         if n >= 2:
                             out['net_profit'] = round(total * 4 / n, 2)
                             out['_net_profit_q'] = n
+                        else:
+                            out['net_profit'] = round(total, 2)
+                            out['_net_profit_q'] = n
+                    elif target_year < current_year and n < 4:
+                        pass
                     else:
                         out['net_profit'] = round(total, 2)
                         out['_net_profit_q'] = n
@@ -1301,7 +1313,7 @@ def execute_equity_research_pipeline(ticker):
 
         _expected_years = allowed_years
         _years_have = (set(revenue_series.index) | set(net_profit_series.index)
-                       | set(equity_series.index) | set(total_assets_series.index))
+                        | set(equity_series.index) | set(total_assets_series.index))
         _missing_years = sorted(_expected_years - _years_have)
 
         def _cross_unit_recheck(np_s, rev_s, eq_s):
