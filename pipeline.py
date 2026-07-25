@@ -1850,15 +1850,25 @@ def execute_equity_research_pipeline(ticker):
                                  else "RỦI RO (Downtrend)",
         }
 
+        # ── 11. Tin tức ────────────────────────────────────────────────────
         vnstock_news = []
+        news_raw = df_news_raw  # đã fetch sẵn trong thread pool ở bước 2
         if news_raw is not None and not news_raw.empty:
             for _, row in news_raw.head(10).iterrows():
-                vnstock_news.append({...})
-                
-        news_list = fetch_news_with_fallback(ticker, vnstock_news)   # ← only assigned in if-branch
-        else:
-            news_list.append({...})   # ← used in else before assigned!
+                vnstock_news.append({
+                    "title": row.get('news_title', ''),
+                    "source": row.get('news_source', 'vnstock'),
+                    "url": row.get('news_url', '#'),
+                    "pub_date": "—",
+                })
 
+        news_list = fetch_news_with_fallback(ticker, vnstock_news)
+
+        if not news_list:
+            news_list = [{
+                "title": "Không có sự kiện bất thường trong 30 ngày.",
+                "source": "Hệ thống tự động", "url": "#", "pub_date": "—"
+            }]
         reports_pkg = None
 
         return (
