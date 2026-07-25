@@ -606,24 +606,19 @@ def execute_equity_research_pipeline(ticker):
 
             current_year = datetime.today().year
 
-            def _cols_for_year(df, yr):
-                """Trả về list tên cột thuộc đúng năm yr, KHÔNG lấy quý của năm sau."""
-                if df is None or df.empty:
-                    return []
-                out_cols = []
-                for col in df.columns:
+            for col in df.columns:
                     col_s = str(col).strip()
                     found = _re2.findall(r'\b((?:19|20)\d{2})\b', col_s)
-                if not found:
-                    continue
-                # Lấy TẤT CẢ năm tìm được, chỉ chấp nhận cột nếu:
-                # 1. Năm đầu tiên == yr (pattern "2025-Q1", "2025Q4")
-                # 2. HOẶC năm duy nhất == yr (pattern "Q4/2025")
-                # → KHÔNG chấp nhận nếu có bất kỳ năm nào != yr
-                years_in_col = [int(y) for y in found]
-                if all(y == yr for y in years_in_col):
-                    out_cols.append(col)
-            return out_cols
+                    if not found:
+                        continue
+                    # Lấy TẤT CẢ năm tìm được, chỉ chấp nhận cột nếu:
+                    # 1. Năm đầu tiên == yr (pattern "2025-Q1", "2025Q4")
+                    # 2. HOẶC năm duy nhất == yr (pattern "Q4/2025")
+                    # → KHÔNG chấp nhận nếu có bất kỳ năm nào != yr
+                    years_in_col = [int(y) for y in found]
+                    if all(y == yr for y in years_in_col):
+                        out_cols.append(col)
+                return out_cols
 
             def _extract_row_values(df, cols, keywords, exclude=None):
                 """
