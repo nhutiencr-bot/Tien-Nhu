@@ -535,6 +535,9 @@ def execute_equity_research_pipeline(ticker):
         current_price = float(df_price['close_vnd'].iloc[-1])
 
         fin5 = build_5y_financial_table(df_income, df_balance, df_ratio, ticker=ticker)
+        import logging as _dbg3
+        _dbg3.warning(f"[DEBUG fin5 revenue] ticker={ticker} | {dict(fin5['revenue'].dropna())}")
+        _dbg3.warning(f"[DEBUG df_income cols] {list(df_income.columns) if df_income is not None and not df_income.empty else 'EMPTY'}")
 
         revenue_series            = normalize_to_billion_vnd(fin5['revenue'])
         if not revenue_series.empty:
