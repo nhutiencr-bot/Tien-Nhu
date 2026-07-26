@@ -608,16 +608,31 @@ def execute_equity_research_pipeline(ticker):
             current_year = datetime.today().year
 
             def _cols_for_year(df, yr):
-                out_cols = []
+                """Trả về (quarterly_cols, annual_cols) cho năm yr."""
+                q_cols, a_cols = [], []
                 for col in df.columns:
                     col_s = str(col).strip()
                     found = _re2.findall(r'\b((?:19|20)\d{2})\b', col_s)
                     if not found:
                         continue
                     years_in_col = [int(y) for y in found]
-                    if all(y == yr for y in years_in_col):
-                        out_cols.append(col)
-                return out_cols
+                    if not all(y == yr for y in years_in_col):
+                        continue
+                    # Phân biệt quarterly vs annual bằng ký hiệu Q/quý
+                    if _re2.search(r'(?i)\bQ[1-4]\b|quý\s*[1-4]|[1-4]\s*/\s*\d{4}|\d{4}\s*/\s*[1-4]', col_s):
+                        q_cols.append(col)
+                    else:
+                        a_cols.append(col)
+                return q_cols, a_cols
+
+            def _latest_quarter_col(q_cols):
+                """Lấy cột quý LỚN NHẤT (Q4 > Q3 > Q2 > Q1) từ danh sách quarterly cols."""
+                if not q_cols:
+                    return None
+                def _q_order(col):
+                    m = _re2.search(r'Q([1-4])', str(col), _re2.IGNORECASE)
+                    return int(m.group(1)) if m else 0
+                return max(q_cols, key=_q_order)
 
             def _extract_row_values(df, cols, keywords, exclude=None):
                 """
@@ -670,8 +685,15 @@ def execute_equity_research_pipeline(ticker):
                         break  # keyword đầu tiên match là đủ
                 return vals
 
-            inc_cols = _cols_for_year(df_income_q,  target_year)
-            bs_cols  = _cols_for_year(df_balance_q, target_year)
+            inc_q_cols, inc_a_cols = _cols_for_year(df_income_q,  target_year)
+            bs_q_cols,  bs_a_cols  = _cols_for_year(df_balance_q, target_year)
+            inc_cols = inc_q_cols  # quarterly cols only
+            bs_cols  = bs_q_cols
+            _inc_latest = _latest_quarter_col(inc_q_cols)
+            _bs_latest  = _latest_quarter_col(bs_q_cols)
+            # DEBUG: log cột để xác nhận không bị lọt Q1/2026
+            import logging as _log
+            _log.warning(f"[DEBUG _cols_for_year] target={target_year} | inc_q={inc_q_cols} | inc_a={inc_a_cols} | latest={_inc_latest}")
 
             if not inc_cols and not bs_cols:
                 return {}
@@ -701,35 +723,31 @@ def execute_equity_research_pipeline(ticker):
             # vnstock quarterly income = LŨY KẾ (cumulative YTD)
             # → lấy cột quý MỚI NHẤT (= lũy kế cao nhất) thay vì sum tất cả
             # inc_cols đã được sắp theo thứ tự cột của df → dùng cột cuối cùng
-            _rev_last_col = inc_cols[-1] if inc_cols else None
-            rev_vals_last = _extract_row_values(
-                df_income_q, [_rev_last_col] if _rev_last_col else [],
-                keywords=_rev_kw_q,
-                exclude=_rev_ex_q) if _rev_last_col else []
-            if rev_vals_last:
-                rev_norm = normalize_to_billion_vnd(pd.Series(rev_vals_last, dtype=float))
-                if rev_norm is not None and not rev_norm.empty:
-                    ytd_val = float(rev_norm.iloc[-1])
-                    n_quarter = len(inc_cols)  # số quý có trong năm này
-                    out['_revenue_q'] = n_quarter
-                    # Năm hiện tại: chỉ có dữ liệu YTD, lưu thẳng (không extrapolate)
-                    out['revenue'] = round(ytd_val, 2)
+            # Dùng cột quý MỚI NHẤT (Q4 > Q3 > Q2 > Q1) = lũy kế YTD cao nhất
+            if _inc_latest:
+                rev_vals_last = _extract_row_values(
+                    df_income_q, [_inc_latest],
+                    keywords=_rev_kw_q, exclude=_rev_ex_q)
+                if rev_vals_last:
+                    rev_norm = normalize_to_billion_vnd(pd.Series(rev_vals_last, dtype=float))
+                    if rev_norm is not None and not rev_norm.empty:
+                        out['revenue'] = round(float(rev_norm.iloc[-1]), 2)
+                        out['_revenue_q'] = len(inc_cols)
 
             # ── NET PROFIT: lấy cột quý mới nhất (lũy kế YTD) ──
-            _np_last_col = inc_cols[-1] if inc_cols else None
-            np_vals_last = _extract_row_values(
-                df_income_q, [_np_last_col] if _np_last_col else [],
-                keywords=['lợi nhuận sau thuế của cổ đông của công ty mẹ',
-                          'lợi nhuận sau thuế', 'lãi sau thuế',
-                          'net profit after tax', 'profit after tax',
-                          'net income', 'net profit'],
-                exclude=['trước thuế', 'before tax', 'thiểu số', 'minority']) if _np_last_col else []
-            if np_vals_last:
-                np_norm = normalize_to_billion_vnd(pd.Series(np_vals_last, dtype=float))
-                if np_norm is not None and not np_norm.empty:
-                    n_quarter = len(inc_cols)
-                    out['net_profit'] = round(float(np_norm.iloc[-1]), 2)
-                    out['_net_profit_q'] = n_quarter
+            if _inc_latest:
+                np_vals_last = _extract_row_values(
+                    df_income_q, [_inc_latest],
+                    keywords=['lợi nhuận sau thuế của cổ đông của công ty mẹ',
+                              'lợi nhuận sau thuế', 'lãi sau thuế',
+                              'net profit after tax', 'profit after tax',
+                              'net income', 'net profit'],
+                    exclude=['trước thuế', 'before tax', 'thiểu số', 'minority'])
+                if np_vals_last:
+                    np_norm = normalize_to_billion_vnd(pd.Series(np_vals_last, dtype=float))
+                    if np_norm is not None and not np_norm.empty:
+                        out['net_profit'] = round(float(np_norm.iloc[-1]), 2)
+                        out['_net_profit_q'] = len(inc_cols)
 
             # ── EQUITY: lấy giá trị quý mới nhất (stock variable) ──
             eq_vals = _extract_row_values(
