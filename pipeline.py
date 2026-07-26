@@ -837,6 +837,10 @@ def execute_equity_research_pipeline(ticker):
                             pass
             return None
 
+        import logging as _dbg2
+        _dbg2.warning(f"[DEBUG T0] revenue_series index={list(revenue_series.dropna().index)} values={list(revenue_series.dropna().values.round(0))}")
+        _dbg2.warning(f"[DEBUG T0] _years_q0_check={_years_q0_check}")
+        _dbg2.warning(f"[DEBUG df_income cols]={list(df_income.columns) if df_income is not None and not df_income.empty else 'EMPTY'}")
         for _yr0 in _years_q0_check:
             # Ưu tiên lấy từ df_income annual (cứng) trước — tránh lỗi cộng quý
             _filled_from_annual = {}
