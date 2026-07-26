@@ -816,6 +816,19 @@ def execute_equity_research_pipeline(ticker):
                     year_cols.append(c)
             if not year_cols:
                 return None
+            # Tìm label_col (cột tên chỉ tiêu)
+            label_col = None
+            for _c in df.columns:
+                if str(_c).lower() in ('item', 'chỉ tiêu', 'indicator', 'name', 'metric', 'description'):
+                    label_col = _c
+                    break
+            if label_col is None:
+                for _c in df.columns:
+                    if df[_c].dtype == object:
+                        label_col = _c
+                        break
+            if label_col is None:
+                return None
             for kw in keywords:
                 mask = df[label_col].astype(str).str.lower().str.contains(
                     kw.lower(), na=False, regex=False)
