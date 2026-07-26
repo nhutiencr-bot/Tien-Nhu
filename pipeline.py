@@ -698,55 +698,38 @@ def execute_equity_research_pipeline(ticker):
                              'revenue', 'tổng doanh thu']
                 _rev_ex_q = ['giá vốn', 'chi phí', 'cost']
 
-            rev_vals = _extract_row_values(
-                df_income_q, inc_cols,
+            # vnstock quarterly income = LŨY KẾ (cumulative YTD)
+            # → lấy cột quý MỚI NHẤT (= lũy kế cao nhất) thay vì sum tất cả
+            # inc_cols đã được sắp theo thứ tự cột của df → dùng cột cuối cùng
+            _rev_last_col = inc_cols[-1] if inc_cols else None
+            rev_vals_last = _extract_row_values(
+                df_income_q, [_rev_last_col] if _rev_last_col else [],
                 keywords=_rev_kw_q,
-                exclude=_rev_ex_q)
-            if rev_vals:
-                rev_norm = normalize_to_billion_vnd(pd.Series(rev_vals, dtype=float))
+                exclude=_rev_ex_q) if _rev_last_col else []
+            if rev_vals_last:
+                rev_norm = normalize_to_billion_vnd(pd.Series(rev_vals_last, dtype=float))
                 if rev_norm is not None and not rev_norm.empty:
-                    n = len(rev_norm)
-                    total = float(rev_norm.sum())
-                    # FIX NỘI SUY: Chỉ dự phóng (nhân 4/n) cho đúng NĂM HIỆN TẠI.
-                    # Năm cũ nếu thiếu quý thì bỏ qua để kích hoạt cơ chế fallback lấy số chuẩn 1 năm.
-                    if target_year == current_year and n < 4:
-                        if n >= 2:
-                            out['revenue'] = round(total * 4 / n, 2)
-                            out['_revenue_q'] = n
-                        else:
-                            out['revenue'] = round(total, 2)
-                            out['_revenue_q'] = n
-                    elif target_year < current_year and n < 4:
-                        pass
-                    else:
-                        out['revenue'] = round(total, 2)
-                        out['_revenue_q'] = n
+                    ytd_val = float(rev_norm.iloc[-1])
+                    n_quarter = len(inc_cols)  # số quý có trong năm này
+                    out['_revenue_q'] = n_quarter
+                    # Năm hiện tại: chỉ có dữ liệu YTD, lưu thẳng (không extrapolate)
+                    out['revenue'] = round(ytd_val, 2)
 
-            # ── NET PROFIT: cộng tất cả quý ──
-            np_vals = _extract_row_values(
-                df_income_q, inc_cols,
+            # ── NET PROFIT: lấy cột quý mới nhất (lũy kế YTD) ──
+            _np_last_col = inc_cols[-1] if inc_cols else None
+            np_vals_last = _extract_row_values(
+                df_income_q, [_np_last_col] if _np_last_col else [],
                 keywords=['lợi nhuận sau thuế của cổ đông của công ty mẹ',
                           'lợi nhuận sau thuế', 'lãi sau thuế',
                           'net profit after tax', 'profit after tax',
                           'net income', 'net profit'],
-                exclude=['trước thuế', 'before tax', 'thiểu số', 'minority'])
-            if np_vals:
-                np_norm = normalize_to_billion_vnd(pd.Series(np_vals, dtype=float))
+                exclude=['trước thuế', 'before tax', 'thiểu số', 'minority']) if _np_last_col else []
+            if np_vals_last:
+                np_norm = normalize_to_billion_vnd(pd.Series(np_vals_last, dtype=float))
                 if np_norm is not None and not np_norm.empty:
-                    n = len(np_norm)
-                    total = float(np_norm.sum())
-                    if target_year == current_year and n < 4:
-                        if n >= 2:
-                            out['net_profit'] = round(total * 4 / n, 2)
-                            out['_net_profit_q'] = n
-                        else:
-                            out['net_profit'] = round(total, 2)
-                            out['_net_profit_q'] = n
-                    elif target_year < current_year and n < 4:
-                        pass
-                    else:
-                        out['net_profit'] = round(total, 2)
-                        out['_net_profit_q'] = n
+                    n_quarter = len(inc_cols)
+                    out['net_profit'] = round(float(np_norm.iloc[-1]), 2)
+                    out['_net_profit_q'] = n_quarter
 
             # ── EQUITY: lấy giá trị quý mới nhất (stock variable) ──
             eq_vals = _extract_row_values(
