@@ -606,7 +606,9 @@ def execute_equity_research_pipeline(ticker):
 
             current_year = datetime.today().year
 
-           for col in df.columns:
+            def _cols_for_year(df, yr):
+                out_cols = []
+                for col in df.columns:
                     col_s = str(col).strip()
                     found = _re2.findall(r'\b((?:19|20)\d{2})\b', col_s)
                     if not found:
