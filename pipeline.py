@@ -619,7 +619,7 @@ def execute_equity_research_pipeline(ticker):
                     if not all(y == yr for y in years_in_col):
                         continue
                     # Phân biệt quarterly vs annual bằng ký hiệu Q/quý
-                    if _re2.search(r'(?i)\bQ[1-4]\b|quý\s*[1-4]|[1-4]\s*/\s*\d{4}|\d{4}\s*/\s*[1-4]', col_s):
+                    if _re2.search(r'(?i)(^|[^a-zA-Z])Q[1-4]($|[^a-zA-Z0-9])|quý\s*[1-4]|[1-4]\s*/\s*\d{4}|\d{4}\s*/\s*[1-4]|\d{4}[-_]Q[1-4]|Q[1-4][-_]\d{4}', col_s):
                         q_cols.append(col)
                     else:
                         a_cols.append(col)
@@ -691,9 +691,7 @@ def execute_equity_research_pipeline(ticker):
             bs_cols  = bs_q_cols
             _inc_latest = _latest_quarter_col(inc_q_cols)
             _bs_latest  = _latest_quarter_col(bs_q_cols)
-            # DEBUG: log cột để xác nhận không bị lọt Q1/2026
-            import logging as _log
-            _log.warning(f"[DEBUG _cols_for_year] target={target_year} | inc_q={inc_q_cols} | inc_a={inc_a_cols} | latest={_inc_latest}")
+
 
             if not inc_cols and not bs_cols:
                 return {}
@@ -792,19 +790,62 @@ def execute_equity_research_pipeline(ticker):
             if _inc_q_cols_check:
                 _years_q0_check = sorted(set(_years_q0_check) | {_current_yr_q0})
         for _yr0 in _years_q0_check:
-            _agg = _aggregate_year_from_quarters(_yr0)
-            if not _agg:
-                continue
-            for _field, _series in [
-                ('revenue',      revenue_series),
-                ('net_profit',   net_profit_series),
-                ('equity',       equity_series),
-                ('total_assets', total_assets_series),
-                ('eps',          eps_series),
-            ]:
-                if _field in _agg and _agg[_field] is not None:
-                    if _yr0 not in _series.index or pd.isna(_series.get(_yr0)):
-                        _series[_yr0] = _agg[_field]
+            # Ưu tiên lấy từ df_income annual (cứng) trước — tránh lỗi cộng quý
+            _filled_from_annual = {}
+            if df_income is not None and not df_income.empty:
+                _yr0_str = str(_yr0)
+                _annual_col = next((c for c in df_income.columns if str(c).strip() == _yr0_str), None)
+                if _annual_col is not None:
+                    _rev_v  = _raw_scan_annual(df_income, _yr0,
+                                  ['doanh thu thuần','net revenue','doanh thu bán hàng',
+                                   'thu nhập lãi thuần','net interest income',
+                                   'doanh thu hoạt động','revenue','tổng doanh thu'],
+                                  exclude=['giá vốn','chi phí','cost'])
+                    _np_v   = _raw_scan_annual(df_income, _yr0,
+                                  ['lợi nhuận sau thuế của cổ đông của công ty mẹ',
+                                   'lợi nhuận sau thuế','lãi sau thuế',
+                                   'net profit after tax','profit after tax','net income'],
+                                  exclude=['trước thuế','before tax','thiểu số','minority'])
+                    if _rev_v is not None:
+                        _filled_from_annual['revenue'] = _rev_v
+                    if _np_v is not None:
+                        _filled_from_annual['net_profit'] = _np_v
+
+            # Nếu annual đã có đủ revenue + net_profit → dùng luôn, bỏ qua quarterly
+            if 'revenue' in _filled_from_annual or 'net_profit' in _filled_from_annual:
+                for _field, _series in [
+                    ('revenue',    revenue_series),
+                    ('net_profit', net_profit_series),
+                ]:
+                    if _field in _filled_from_annual:
+                        if _yr0 not in _series.index or pd.isna(_series.get(_yr0)):
+                            _series[_yr0] = _filled_from_annual[_field]
+                # Vẫn dùng quarterly cho equity/total_assets (balance sheet)
+                _agg = _aggregate_year_from_quarters(_yr0)
+                if _agg:
+                    for _field, _series in [
+                        ('equity',       equity_series),
+                        ('total_assets', total_assets_series),
+                        ('eps',          eps_series),
+                    ]:
+                        if _field in _agg and _agg[_field] is not None:
+                            if _yr0 not in _series.index or pd.isna(_series.get(_yr0)):
+                                _series[_yr0] = _agg[_field]
+            else:
+                # Không có annual → fallback quarterly như cũ
+                _agg = _aggregate_year_from_quarters(_yr0)
+                if not _agg:
+                    continue
+                for _field, _series in [
+                    ('revenue',      revenue_series),
+                    ('net_profit',   net_profit_series),
+                    ('equity',       equity_series),
+                    ('total_assets', total_assets_series),
+                    ('eps',          eps_series),
+                ]:
+                    if _field in _agg and _agg[_field] is not None:
+                        if _yr0 not in _series.index or pd.isna(_series.get(_yr0)):
+                            _series[_yr0] = _agg[_field]
 
         def _raw_scan_annual(df, yr, keywords, exclude=None):
             if df is None or df.empty:
