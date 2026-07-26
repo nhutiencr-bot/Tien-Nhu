@@ -515,6 +515,7 @@ def execute_equity_research_pipeline(ticker):
         df_ratio_q   = results.get("ratio_q",    pd.DataFrame())
         df_balance   = results.get("balance_y",  pd.DataFrame())
         df_balance_q = results.get("balance_q",  pd.DataFrame())
+        df_news_raw  = results.get("news",        pd.DataFrame())
 
         if df_price is None or df_price.empty:
             st.error(f"Không có dữ liệu giá lịch sử cho mã {ticker}.")
@@ -1858,7 +1859,7 @@ def execute_equity_research_pipeline(ticker):
 
         # ── 11. Tin tức ────────────────────────────────────────────────────
         vnstock_news = []
-        news_raw = df_news_raw  # đã fetch sẵn trong thread pool ở bước 2
+        news_raw = results.get("news", pd.DataFrame())  # fix: inline thay vì qua df_news_raw
         if news_raw is not None and not news_raw.empty:
             for _, row in news_raw.head(10).iterrows():
                 vnstock_news.append({
