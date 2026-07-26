@@ -789,6 +789,54 @@ def execute_equity_research_pipeline(ticker):
                 _inc_q_cols_check = []
             if _inc_q_cols_check:
                 _years_q0_check = sorted(set(_years_q0_check) | {_current_yr_q0})
+        def _raw_scan_annual(df, yr, keywords, exclude=None):
+            if df is None or df.empty:
+                return None
+            import re as _re3
+            # Chỉ lấy cột đúng năm yr, KHÔNG lấy cột chứa năm khác
+            year_cols = []
+            for c in df.columns:
+                found_yrs = [int(y) for y in _re3.findall(r'\b((?:19|20)\d{2})\b', str(c))]
+                if found_yrs and all(y == yr for y in found_yrs):
+                    year_cols.append(c)
+            if not year_cols:
+                return None
+            # Tìm label_col (cột tên chỉ tiêu)
+            label_col = None
+            for _c in df.columns:
+                if str(_c).lower() in ('item', 'chỉ tiêu', 'indicator', 'name', 'metric', 'description'):
+                    label_col = _c
+                    break
+            if label_col is None:
+                for _c in df.columns:
+                    if df[_c].dtype == object:
+                        label_col = _c
+                        break
+            if label_col is None:
+                return None
+            for kw in keywords:
+                mask = df[label_col].astype(str).str.lower().str.contains(
+                    kw.lower(), na=False, regex=False)
+                if exclude:
+                    for ex in exclude:
+                        mask &= ~df[label_col].astype(str).str.lower().str.contains(
+                            ex.lower(), na=False, regex=False)
+                rows = df[mask]
+                if rows.empty:
+                    continue
+                for yc in year_cols:
+                    for v in rows[yc].values:
+                        try:
+                            fv = float(str(v).replace(',', ''))
+                            if not np.isnan(fv):
+                                s_tmp = normalize_to_billion_vnd(
+                                    pd.Series([fv], dtype=float))
+                                if s_tmp is not None and not s_tmp.empty:
+                                    return round(float(s_tmp.iloc[0]), 2)
+                        except Exception:
+                            pass
+            return None
+
         for _yr0 in _years_q0_check:
             # Ưu tiên lấy từ df_income annual (cứng) trước — tránh lỗi cộng quý
             _filled_from_annual = {}
@@ -847,53 +895,6 @@ def execute_equity_research_pipeline(ticker):
                         if _yr0 not in _series.index or pd.isna(_series.get(_yr0)):
                             _series[_yr0] = _agg[_field]
 
-        def _raw_scan_annual(df, yr, keywords, exclude=None):
-            if df is None or df.empty:
-                return None
-            import re as _re3
-            # Chỉ lấy cột đúng năm yr, KHÔNG lấy cột chứa năm khác
-            year_cols = []
-            for c in df.columns:
-                found_yrs = [int(y) for y in _re3.findall(r'\b((?:19|20)\d{2})\b', str(c))]
-                if found_yrs and all(y == yr for y in found_yrs):
-                    year_cols.append(c)
-            if not year_cols:
-                return None
-            # Tìm label_col (cột tên chỉ tiêu)
-            label_col = None
-            for _c in df.columns:
-                if str(_c).lower() in ('item', 'chỉ tiêu', 'indicator', 'name', 'metric', 'description'):
-                    label_col = _c
-                    break
-            if label_col is None:
-                for _c in df.columns:
-                    if df[_c].dtype == object:
-                        label_col = _c
-                        break
-            if label_col is None:
-                return None
-            for kw in keywords:
-                mask = df[label_col].astype(str).str.lower().str.contains(
-                    kw.lower(), na=False, regex=False)
-                if exclude:
-                    for ex in exclude:
-                        mask &= ~df[label_col].astype(str).str.lower().str.contains(
-                            ex.lower(), na=False, regex=False)
-                rows = df[mask]
-                if rows.empty:
-                    continue
-                for yc in year_cols:
-                    for v in rows[yc].values:
-                        try:
-                            fv = float(str(v).replace(',', ''))
-                            if not np.isnan(fv):
-                                s_tmp = normalize_to_billion_vnd(
-                                    pd.Series([fv], dtype=float))
-                                if s_tmp is not None and not s_tmp.empty:
-                                    return round(float(s_tmp.iloc[0]), 2)
-                        except Exception:
-                            pass
-            return None
 
         # ── Tầng 0c: Balance sheet năm hiện tại từ annual nếu balance_q không có ──
         _current_yr = datetime.today().year
