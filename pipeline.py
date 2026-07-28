@@ -547,12 +547,12 @@ def execute_equity_research_pipeline(ticker):
         net_profit_series         = normalize_net_profit_with_anchor(
             fin5['net_profit'], equity_series, fin5['roe'])
         eps_series                = fin5['eps']
-        bvps_series               = fin5['bvps']
-        roe_series                = fin5['roe']
-        roa_series                = fin5['roa']
-        pe_series                 = fin5['pe']
-        pb_series                 = fin5['pb']
-        outstanding_shares_series = fin5['outstanding_shares']
+        bvps_series                = fin5['bvps']
+        roe_series                 = fin5['roe']
+        roa_series                 = fin5['roa']
+        pe_series                  = fin5['pe']
+        pb_series                  = fin5['pb']
+        outstanding_shares_series  = fin5['outstanding_shares']
 
         def _filter_years(s):
             """Giữ lại chỉ các năm trong ALLOWED_YEARS (2021–2025), chuẩn hoá index về int."""
@@ -570,12 +570,12 @@ def execute_equity_research_pipeline(ticker):
         total_assets_series       = _filter_years(total_assets_series)
         net_profit_series         = _filter_years(net_profit_series)
         eps_series                = _filter_years(eps_series)
-        bvps_series               = _filter_years(bvps_series)
-        roe_series                = _filter_years(roe_series)
-        roa_series                = _filter_years(roa_series)
-        pe_series                 = _filter_years(pe_series)
-        pb_series                 = _filter_years(pb_series)
-        outstanding_shares_series = _filter_years(outstanding_shares_series)
+        bvps_series                = _filter_years(bvps_series)
+        roe_series                 = _filter_years(roe_series)
+        roa_series                 = _filter_years(roa_series)
+        pe_series                  = _filter_years(pe_series)
+        pb_series                  = _filter_years(pb_series)
+        outstanding_shares_series  = _filter_years(outstanding_shares_series)
 
         outstanding_shares_series = _build_shares_series(
             outstanding_shares_series, net_profit_series, eps_series)
@@ -637,6 +637,22 @@ def execute_equity_research_pipeline(ticker):
                     return int(m.group(1)) if m else 0
                 return max(q_cols, key=_q_order)
 
+            def _pick_best_row(matched_df, label_col):
+                """
+                FIX (root cause cộng sai doanh thu năm):
+                Khi nhiều dòng cùng match keyword (vd: "Doanh thu thuần" là dòng
+                tổng, nhưng "Doanh thu thuần hoạt động tài chính", "Trong đó:
+                Doanh thu thuần xuất khẩu"... cũng match), ta không được lấy dòng
+                ĐẦU TIÊN theo thứ tự xuất hiện trong DataFrame một cách mù quáng
+                — thứ tự này không đảm bảo là dòng tổng.
+                Heuristic: dòng tổng luôn có label NGẮN NHẤT trong các dòng match
+                (các dòng con luôn có thêm mô tả/hậu tố dài hơn).
+                """
+                if matched_df.empty:
+                    return matched_df
+                best_idx = matched_df[label_col].astype(str).str.len().idxmin()
+                return matched_df.loc[[best_idx]]
+
             def _extract_row_values(df, cols, keywords, exclude=None):
                 """
                 Tìm dòng theo keywords trong df, lấy giá trị các cột cols.
@@ -671,9 +687,11 @@ def execute_equity_research_pipeline(ticker):
                     matched = df[mask]
                     if matched.empty:
                         continue
-                    # FIX 1: chỉ lấy dòng ĐẦU TIÊN để tránh cộng nhầm nhiều dòng
-                    # (vd: "Doanh thu thuần" xuất hiện ở cả dòng tổng + dòng chi tiết)
-                    matched = matched.iloc[[0]]
+                    # FIX 1 (đã có sẵn): chỉ lấy 1 dòng để tránh cộng nhầm nhiều dòng.
+                    # NÂNG CẤP: thay vì luôn lấy dòng đầu tiên theo thứ tự xuất hiện
+                    # (không đảm bảo là dòng tổng), chọn dòng có label ngắn nhất —
+                    # đại diện cho dòng tổng/cha, không phải dòng con chi tiết.
+                    matched = _pick_best_row(matched, label_col)
                     for col in cols:
                         if col not in matched.columns:
                             continue
@@ -827,8 +845,27 @@ def execute_equity_research_pipeline(ticker):
                 rows = df[mask]
                 if rows.empty:
                     continue
+                # ══════════════════════════════════════════════════════════
+                # FIX (ROOT CAUSE — cộng sai doanh thu năm cho tất cả các mã):
+                # TRƯỚC ĐÂY: lặp qua TẤT CẢ các dòng match (rows[yc].values) và
+                # trả về giá trị KHÔNG-NaN ĐẦU TIÊN gặp được theo thứ tự xuất
+                # hiện gốc trong DataFrame. Nếu có nhiều dòng cùng chứa keyword
+                # (vd: "Doanh thu thuần" là dòng tổng, nhưng "Doanh thu thuần
+                # hoạt động tài chính", "Trong đó: Doanh thu thuần xuất khẩu"...
+                # cũng match), dòng ĐẦU TIÊN không đảm bảo là dòng tổng đúng —
+                # thứ tự dòng khác nhau tuỳ mã/tuỳ nguồn dữ liệu. Đây chính là
+                # lý do doanh thu bị sai theo cả 2 chiều (thiếu hoặc thừa) tuỳ
+                # mã cổ phiếu, trong khi LNST luôn đúng (keyword LNST đặc thù,
+                # hiếm khi đụng hàng dòng con khác).
+                #
+                # SỬA: chọn dòng có LABEL NGẮN NHẤT trong các dòng match được —
+                # dòng tổng/cha luôn có tên gọn ("Doanh thu thuần"), còn các
+                # dòng con/chi tiết luôn có hậu tố hoặc mô tả dài hơn.
+                # ══════════════════════════════════════════════════════════
+                best_idx = rows[label_col].astype(str).str.len().idxmin()
+                best_row = rows.loc[[best_idx]]
                 for yc in year_cols:
-                    for v in rows[yc].values:
+                    for v in best_row[yc].values:
                         try:
                             fv = float(str(v).replace(',', ''))
                             if not np.isnan(fv):
