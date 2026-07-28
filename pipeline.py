@@ -851,11 +851,25 @@ def execute_equity_research_pipeline(ticker):
                 _yr0_str = str(_yr0)
                 _annual_col = next((c for c in df_income.columns if str(c).strip() == _yr0_str), None)
                 if _annual_col is not None:
+                    # FIX: keyword revenue phân biệt ngành — tránh match sai dòng
+                    if is_bank:
+                        _rev_kw_annual = ['thu nhập lãi thuần', 'net interest income',
+                                          'tổng thu nhập hoạt động thuần',
+                                          'thu nhập hoạt động thuần']
+                        _rev_ex_annual = ['chi phí', 'expense', 'dự phòng', 'provision']
+                    elif is_securities:
+                        _rev_kw_annual = ['doanh thu hoạt động', 'operating revenue',
+                                          'tổng doanh thu hoạt động',
+                                          'doanh thu thuần về hoạt động kinh doanh',
+                                          'doanh thu thuần']
+                        _rev_ex_annual = ['chi phí', 'expense', 'phí hoa hồng']
+                    else:
+                        _rev_kw_annual = ['doanh thu thuần', 'net revenue',
+                                          'doanh thu bán hàng', 'revenue', 'tổng doanh thu']
+                        _rev_ex_annual = ['giá vốn', 'chi phí', 'cost']
                     _rev_v  = _raw_scan_annual(df_income, _yr0,
-                                  ['doanh thu thuần','net revenue','doanh thu bán hàng',
-                                   'thu nhập lãi thuần','net interest income',
-                                   'doanh thu hoạt động','revenue','tổng doanh thu'],
-                                  exclude=['giá vốn','chi phí','cost'])
+                                  _rev_kw_annual,
+                                  exclude=_rev_ex_annual)
                     _np_v   = _raw_scan_annual(df_income, _yr0,
                                   ['lợi nhuận sau thuế của cổ đông của công ty mẹ',
                                    'lợi nhuận sau thuế','lãi sau thuế',
