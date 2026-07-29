@@ -22,7 +22,10 @@ Các sửa đổi so với bản trước (399 dòng):
   [FIX 6] build_financial_table(): thêm field 'cfo' — lấy CFO từ cashflow năm,
           fallback tự cộng 4 quý gần nhất khi cashflow năm 2025 chưa có.
 
-  [KEPT]  _get_year_columns() dead-code fix (từ bản 399 dòng) — giữ nguyên.
+  [FIX 7] _get_year_columns(): bổ sung match r'\d{4}-Q4' — vnstock đổi format
+          annual column từ '2025' → '2025-Q4'. Không match → revenue/net_profit
+          trống từ build_5y_financial_table → Tầng 0 pick sai dòng từ quarterly.
+          yr key vẫn là int năm vì str(col)[:4] đã đúng.
   [KEPT]  build_5y_financial_table() truyền ticker xuống — giữ nguyên.
   [KEPT]  find_row_series() chọn dòng nhiều data nhất — giữ nguyên.
 """
@@ -103,10 +106,14 @@ def _norm_label(text: str) -> str:
 # ---------------------------------------------------------------------------
 
 def _get_year_columns(df: pd.DataFrame):
+    """Return annual columns — matches both '2024' and '2025-Q4' (vnstock annual format)."""
     meta_cols = {'item', 'item_en', 'item_id'}
     year_cols = [
         c for c in df.columns
-        if c not in meta_cols and re.fullmatch(r'\d{4}', str(c).strip())
+        if c not in meta_cols and (
+            re.fullmatch(r'\d{4}', str(c).strip())
+            or re.fullmatch(r'\d{4}-Q4', str(c).strip())   # vnstock annual: 2025-Q4
+        )
     ]
     return sorted(year_cols, key=lambda col: int(str(col).strip()[:4]))
 
