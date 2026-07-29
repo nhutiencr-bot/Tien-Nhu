@@ -22,6 +22,11 @@ Các sửa đổi so với bản trước (399 dòng):
   [FIX 6] build_financial_table(): thêm field 'cfo' — lấy CFO từ cashflow năm,
           fallback tự cộng 4 quý gần nhất khi cashflow năm 2025 chưa có.
 
+  [FIX 8] find_row_series(): khi nhiều dòng match, ưu tiên dòng có data ở
+          năm MỚI NHẤT (latest_col) trước khi tiebreak bằng non_na_counts.
+          Bản cũ: idxmax(non_na_counts) → chọn dòng nhiều năm lịch sử nhất
+          nhưng thiếu 2025 (vd TCB: 'Thu nhập lãi thuần' cũ vs dòng 2025 mới).
+
   [FIX 7] _get_year_columns(): bổ sung match r'\d{4}-Q4' — vnstock đổi format
           annual column từ '2025' → '2025-Q4'. Không match → revenue/net_profit
           trống từ build_5y_financial_table → Tầng 0 pick sai dòng từ quarterly.
@@ -180,8 +185,14 @@ def find_row_series(df: pd.DataFrame, keywords, exclude_keywords=None,
         return pd.Series(dtype=float)
 
     if len(matched) > 1:
-        non_na_counts = matched[year_cols].notna().sum(axis=1)
-        row = matched.loc[non_na_counts.idxmax()]
+        # FIX 8: ưu tiên dòng có data ở năm MỚI NHẤT trước (tránh pick dòng
+        # có nhiều năm lịch sử nhưng thiếu năm hiện tại).
+        # Tiebreak: số cột non-NaN nhiều hơn.
+        latest_col = year_cols[-1]  # cột năm lớn nhất (vd 2025)
+        has_latest = matched[latest_col].notna()
+        candidates = matched[has_latest] if has_latest.any() else matched
+        non_na_counts = candidates[year_cols].notna().sum(axis=1)
+        row = candidates.loc[non_na_counts.idxmax()]
     else:
         row = matched.iloc[0]
 
