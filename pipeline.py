@@ -835,6 +835,11 @@ def execute_equity_research_pipeline(ticker):
                         break
             if label_col is None:
                 return None
+            import logging as _rsa_log
+            _rsa_log.warning(
+                f"[RSA] yr={yr} label_col={label_col!r} year_cols={year_cols} kws={keywords}\n"
+                f"  ALL labels: {df[label_col].tolist()}"
+            )
             for kw in keywords:
                 mask = df[label_col].astype(str).str.lower().str.contains(
                     kw.lower(), na=False, regex=False)
@@ -843,6 +848,7 @@ def execute_equity_research_pipeline(ticker):
                         mask &= ~df[label_col].astype(str).str.lower().str.contains(
                             ex.lower(), na=False, regex=False)
                 rows = df[mask]
+                _rsa_log.warning(f"[RSA]   kw={kw!r} → {len(rows)} match(es): {rows[label_col].tolist() if not rows.empty else '[]'} | vals={rows[year_cols].values.tolist() if not rows.empty else []}")
                 if rows.empty:
                     continue
                 # ══════════════════════════════════════════════════════════
