@@ -184,6 +184,15 @@ def find_row_series(df: pd.DataFrame, keywords, exclude_keywords=None,
     if matched.empty:
         return pd.Series(dtype=float)
 
+    # ── DEBUG: dump every matched row so we can see what 2025 holds ──
+    import logging as _log_frs
+    _item_col = 'item' if 'item' in matched.columns else (search_cols[0] if search_cols else None)
+    _show_cols = ([_item_col] if _item_col else []) + year_cols
+    _log_frs.warning(
+        f"[FRS] kw={keywords[0]!r} period={period} | {len(matched)} match(es) | "
+        f"year_cols={year_cols}\n{matched[[c for c in _show_cols if c in matched.columns]].to_string()}"
+    )
+
     if len(matched) > 1:
         # FIX 8: ưu tiên dòng có data ở năm MỚI NHẤT trước (tránh pick dòng
         # có nhiều năm lịch sử nhưng thiếu năm hiện tại).
@@ -195,6 +204,11 @@ def find_row_series(df: pd.DataFrame, keywords, exclude_keywords=None,
         row = candidates.loc[non_na_counts.idxmax()]
     else:
         row = matched.iloc[0]
+
+    _log_frs.warning(
+        f"[FRS] → picked: item={row.get(_item_col, '?') if _item_col else '?'!r} | "
+        f"val_2025={row.get('2025', 'NO_COL')}"
+    )
 
     result = {}
     for yc in year_cols:
