@@ -22,10 +22,14 @@ Các sửa đổi so với bản trước (399 dòng):
   [FIX 6] build_financial_table(): thêm field 'cfo' — lấy CFO từ cashflow năm,
           fallback tự cộng 4 quý gần nhất khi cashflow năm 2025 chưa có.
 
-  [FIX 8] find_row_series(): khi nhiều dòng match, ưu tiên dòng có data ở
-          năm MỚI NHẤT (latest_col) trước khi tiebreak bằng non_na_counts.
-          Bản cũ: idxmax(non_na_counts) → chọn dòng nhiều năm lịch sử nhất
-          nhưng thiếu 2025 (vd TCB: 'Thu nhập lãi thuần' cũ vs dòng 2025 mới).
+  [FIX 9] _search_with_priority(): không return ngay khi s not empty — nếu
+          dòng match nhưng cell 2025 = NaN (vd bank: 'thu nhap lai thuan' có
+          2018-2024 nhưng 2025 NaN), thử priority tiếp theo. Ưu tiên series
+          có data ở latest year; chỉ fallback về series thiếu năm nếu không
+          có lựa chọn nào tốt hơn. Đây là root cause thực sự của bug revenue
+          2025 bị sai/thiếu cho bank (TCB, VCB, MBB...).
+
+  [FIX 8] find_row_series(): khi nhiều dòng match, ưu tiên dòng có data ở năm MỚI NHẤT.
 
   [FIX 7] _get_year_columns(): bổ sung match r'\d{4}-Q4' — vnstock đổi format
           annual column từ '2025' → '2025-Q4'. Không match → revenue/net_profit
@@ -354,6 +358,12 @@ def _find_revenue_general(df_income, period='year'):
 
 
 def _search_with_priority(df_income, priority: list, period: str):
+    """
+    FIX 9: Không return ngay khi s not empty — nếu series không có năm mới nhất
+    (dòng match nhưng cell 2025 = NaN), thử priority tiếp theo.
+    Ưu tiên: (1) series có data ở latest year, (2) fallback series không empty.
+    """
+    best_fallback = None
     for includes, excludes in priority:
         s = find_row_series(
             df_income,
@@ -361,9 +371,18 @@ def _search_with_priority(df_income, priority: list, period: str):
             exclude_keywords=excludes if excludes else None,
             period=period,
         )
-        if not s.empty:
+        if s.empty:
+            continue
+        s_notna = s.dropna()
+        if s_notna.empty:
+            continue
+        # Nếu series có data ở năm lớn nhất trong index → dùng luôn
+        if s_notna.index[-1] == s.index[-1]:
             return s
-    return pd.Series(dtype=float)
+        # Có data nhưng thiếu năm cuối → giữ fallback
+        if best_fallback is None:
+            best_fallback = s
+    return best_fallback if best_fallback is not None else pd.Series(dtype=float)
 
 
 # ---------------------------------------------------------------------------
