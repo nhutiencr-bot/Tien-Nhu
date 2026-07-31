@@ -127,6 +127,8 @@ def render_tab_kqkd(df_5y_table, fundamentals, period_col='Năm'):
     # Giống hệt ảnh mẫu: highlight Số CP / EPS / BVPS
     # ══════════════════════════════════════════════════════════════════
     st.markdown(f"### Bảng tổng hợp tài chính {label}")
+    if period_col == 'Năm':
+        st.caption(f"{df_5y_table[period_col].min()}–{df_5y_table[period_col].max()} · Cột {df_5y_table[period_col].max()} highlight xanh = dữ liệu mới cập nhật")
 
     periods = df_5y_table[period_col].tolist()
 
