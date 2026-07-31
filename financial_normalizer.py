@@ -580,8 +580,8 @@ def build_5y_financial_table(df_income, df_balance, df_ratio=None, ticker=None,
 # ---------------------------------------------------------------------------
 
 def normalize_to_billion_vnd(series: pd.Series, label=''):
-    if series is None or series.empty:
-        return series
+    if series is None or (hasattr(series, 'empty') and series.empty):
+        return pd.Series(dtype=float)
     median_abs = series.abs().median()
     if median_abs > 10_000_000:
         return series / 1e9
