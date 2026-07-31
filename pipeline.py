@@ -1012,10 +1012,23 @@ def execute_equity_research_pipeline(ticker):
 
         for _yr0b in _still_missing_0b:
             if _yr0b not in revenue_series.index or pd.isna(revenue_series.get(_yr0b)):
-                _v = _raw_scan_annual(
-                    df_income, _yr0b,
-                    ['doanh thu thuần', 'net revenue', 'revenue', 'tổng doanh thu'],
-                    exclude=['giá vốn', 'chi phí'])
+                # FIX T0b: keyword revenue đúng theo ngành — tránh lấy doanh thu thuần cho ngân hàng
+                if is_bank:
+                    _0b_kw  = ['thu nhập lãi thuần', 'net interest income',
+                               'tổng thu nhập hoạt động thuần', 'thu nhập hoạt động thuần']
+                    _0b_ex  = ['chi phí', 'expense', 'dự phòng', 'provision']
+                elif is_securities:
+                    _0b_kw  = ['doanh thu hoạt động', 'operating revenue',
+                               'tổng doanh thu hoạt động', 'tổng thu nhập hoạt động']
+                    _0b_ex  = ['chi phí', 'expense']
+                elif locals().get('is_insurance', False):
+                    _0b_kw  = ['doanh thu phí bảo hiểm thuần', 'doanh thu thuần hoạt động kinh doanh bảo hiểm',
+                               'doanh thu phí bảo hiểm', 'tổng doanh thu hoạt động bảo hiểm']
+                    _0b_ex  = ['chi phí', 'bồi thường', 'dự phòng']
+                else:
+                    _0b_kw  = ['doanh thu thuần', 'net revenue', 'revenue', 'tổng doanh thu']
+                    _0b_ex  = ['giá vốn', 'chi phí']
+                _v = _raw_scan_annual(df_income, _yr0b, _0b_kw, exclude=_0b_ex)
                 if _v is not None:
                     revenue_series[_yr0b] = _v
 
@@ -1097,11 +1110,19 @@ def execute_equity_research_pipeline(ticker):
             _rev_bad = [yr for yr in revenue_series.dropna().index
                         if revenue_series[yr] > _rev_median * 10]
             for _rbyr in _rev_bad:
-                # Thử lấy từ annual trước
-                _rv_annual = _raw_scan_annual(
-                    df_income, _rbyr,
-                    ['doanh thu thuần', 'net revenue', 'revenue', 'tổng doanh thu'],
-                    exclude=['giá vốn', 'chi phí'])
+                # FIX Sanity1: recovery keyword đúng theo ngành
+                if is_bank:
+                    _sc1_kw = ['thu nhập lãi thuần', 'net interest income',
+                               'tổng thu nhập hoạt động thuần', 'thu nhập hoạt động thuần']
+                    _sc1_ex = ['chi phí', 'expense', 'dự phòng', 'provision']
+                elif is_securities:
+                    _sc1_kw = ['doanh thu hoạt động', 'operating revenue',
+                               'tổng doanh thu hoạt động']
+                    _sc1_ex = ['chi phí', 'expense']
+                else:
+                    _sc1_kw = ['doanh thu thuần', 'net revenue', 'revenue', 'tổng doanh thu']
+                    _sc1_ex = ['giá vốn', 'chi phí']
+                _rv_annual = _raw_scan_annual(df_income, _rbyr, _sc1_kw, exclude=_sc1_ex)
                 if _rv_annual is not None and _rv_annual < _rev_median * 10:
                     revenue_series[_rbyr] = _rv_annual
                 else:
