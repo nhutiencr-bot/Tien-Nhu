@@ -23,11 +23,14 @@ Các sửa đổi so với bản trước (399 dòng):
           fallback tự cộng 4 quý gần nhất khi cashflow năm 2025 chưa có.
 
   [FIX 9] _search_with_priority(): không return ngay khi s not empty — nếu
-          dòng match nhưng cell 2025 = NaN (vd bank: 'thu nhap lai thuan' có
-          2018-2024 nhưng 2025 NaN), thử priority tiếp theo. Ưu tiên series
-          có data ở latest year; chỉ fallback về series thiếu năm nếu không
-          có lựa chọn nào tốt hơn. Đây là root cause thực sự của bug revenue
-          2025 bị sai/thiếu cho bank (TCB, VCB, MBB...).
+        dòng match nhưng thiếu data ở năm mới nhất (vd bank: 'thu nhap lai
+        thuan' có 2018-2024 nhưng 2025 NaN), thử priority tiếp theo.
+        Ưu tiên series có data ở latest year (kiểm tra bằng
+        `s.index[-1] in s_notna.index`, KHÔNG dùng `s_notna.index[-1] ==
+        s.index[-1]` vì so sánh index cuối luôn sai khi series có NaN ở
+        cuối); chỉ fallback về series thiếu năm nếu không có lựa chọn nào
+        tốt hơn. Đây là root cause thực sự của bug revenue 2025 bị
+        sai/thiếu cho bank (TCB, VCB, MBB...).
 
   [FIX 8] find_row_series(): khi nhiều dòng match, ưu tiên dòng có data ở năm MỚI NHẤT.
 
@@ -115,16 +118,22 @@ def _norm_label(text: str) -> str:
 # ---------------------------------------------------------------------------
 
 def _get_year_columns(df: pd.DataFrame):
-    """Return annual columns — matches both '2024' and '2025-Q4' (vnstock annual format)."""
     meta_cols = {'item', 'item_en', 'item_id'}
-    year_cols = [
-        c for c in df.columns
-        if c not in meta_cols and (
-            re.fullmatch(r'\d{4}', str(c).strip())
-            or re.fullmatch(r'\d{4}-Q4', str(c).strip())   # vnstock annual: 2025-Q4
-        )
-    ]
-    return sorted(year_cols, key=lambda col: int(str(col).strip()[:4]))
+    seen_years = {}
+    for c in df.columns:
+        if c in meta_cols:
+            continue
+        c_str = str(c).strip()
+        if re.fullmatch(r'\d{4}', c_str):
+            yr = int(c_str)
+            # Ưu tiên cột '2025' over '2025-Q4' nếu cả hai tồn tại
+            if yr not in seen_years:
+                seen_years[yr] = c
+        elif re.fullmatch(r'\d{4}-Q4', c_str):
+            yr = int(c_str[:4])
+            if yr not in seen_years:   # chỉ thêm nếu chưa có cột plain '2025'
+                seen_years[yr] = c
+    return [seen_years[yr] for yr in sorted(seen_years)]
 
 
 def _quarter_sort_key(c):
@@ -208,10 +217,9 @@ def find_row_series(df: pd.DataFrame, keywords, exclude_keywords=None,
         row = candidates.loc[non_na_counts.idxmax()]
     else:
         row = matched.iloc[0]
-
     _log_frs.warning(
-        f"[FRS] → picked: item={row.get(_item_col, '?') if _item_col else '?'!r} | "
-        f"val_2025={row.get('2025', 'NO_COL')}"
+        f"[FRS] → picked: item={row.get(_item_col, '?') if _item_col else '?'} | "
+        f"val_2025={row.get('2025-Q4', row.get('2025', 'NO_COL'))}"
     )
 
     result = {}
@@ -358,11 +366,6 @@ def _find_revenue_general(df_income, period='year'):
 
 
 def _search_with_priority(df_income, priority: list, period: str):
-    """
-    FIX 9: Không return ngay khi s not empty — nếu series không có năm mới nhất
-    (dòng match nhưng cell 2025 = NaN), thử priority tiếp theo.
-    Ưu tiên: (1) series có data ở latest year, (2) fallback series không empty.
-    """
     best_fallback = None
     for includes, excludes in priority:
         s = find_row_series(
@@ -376,14 +379,12 @@ def _search_with_priority(df_income, priority: list, period: str):
         s_notna = s.dropna()
         if s_notna.empty:
             continue
-        # Nếu series có data ở năm lớn nhất trong index → dùng luôn
-        if s_notna.index[-1] == s.index[-1]:
+        latest_year = s.index[-1]          # FIX: dùng index[-1] của series gốc
+        if latest_year in s_notna.index:   # FIX: check membership, không so sánh index
             return s
-        # Có data nhưng thiếu năm cuối → giữ fallback
         if best_fallback is None:
             best_fallback = s
     return best_fallback if best_fallback is not None else pd.Series(dtype=float)
-
 
 # ---------------------------------------------------------------------------
 # CFO helper — fallback cộng 4 quý gần nhất
