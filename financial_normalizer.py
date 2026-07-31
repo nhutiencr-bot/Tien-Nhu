@@ -237,23 +237,18 @@ def find_row_series(df: pd.DataFrame, keywords, exclude_keywords=None,
         return pd.Series({k: result[k] for k in ordered_keys})
     return pd.Series(result).sort_index()
 
-
-# ---------------------------------------------------------------------------
-# Revenue finders theo ngành
-# ---------------------------------------------------------------------------
-
 def _find_revenue_for_bank(df_income, period='year'):
-    """Ngân hàng: dùng Thu nhập lãi thuần làm 'doanh thu' (định nghĩa chuẩn ngành)."""
+    """Ngân hàng: Thu nhập lãi thuần."""
     return find_row_series(
         df_income,
         ['thu nhập lãi thuần', 'net interest income'],
-        exclude_keywords=['chi phí lãi', 'thu nhập lãi và các khoản'],
+        exclude_keywords=['chi phí lãi'],
         period=period
     )
 
 
 def _find_revenue_for_securities(df_income, period='year'):
-    """Chứng khoán: Doanh thu thuần về hoạt động kinh doanh (hoặc Doanh thu thuần)."""
+    """Chứng khoán: Doanh thu thuần về hoạt động kinh doanh."""
     return find_row_series(
         df_income,
         ['doanh thu thuần về hoạt động kinh doanh', 'doanh thu thuần hoạt động kinh doanh',
@@ -262,6 +257,7 @@ def _find_revenue_for_securities(df_income, period='year'):
         period=period
     )
 
+
 def _find_revenue_for_insurance(df_income, period='year'):
     """Bảo hiểm: Doanh thu thuần hoạt động kinh doanh bảo hiểm."""
     return find_row_series(
@@ -269,10 +265,42 @@ def _find_revenue_for_insurance(df_income, period='year'):
         ['doanh thu thuần hoạt động kinh doanh bảo hiểm',
          'doanh thu thuần hđkd bảo hiểm',
          'net insurance business revenue'],
-        exclude_keywords=['chi phí', 'tổng doanh thu'],  # tránh khớp nhầm dòng tổng hợp cao hơn
+        exclude_keywords=['chi phí', 'tổng doanh thu'],
         period=period
     )
 
+
+def build_financial_table(df_income, df_balance, df_ratio=None, ticker=None, period='year'):
+    """
+    Tổng hợp các chỉ tiêu BCTC.
+    ticker: dùng để detect ngân hàng/chứng khoán/bảo hiểm và chọn logic revenue phù hợp.
+    period: 'year' hoặc 'quarter'.
+    """
+    data = {}
+
+    is_bank = ticker in BANK_TICKERS if ticker else False
+    is_securities = ticker in SECURITIES_TICKERS if ticker else False
+    is_insurance = ticker in INSURANCE_TICKERS if ticker else False
+
+    # --- Revenue: mỗi nhóm ngành 1 chỉ tiêu cố định, không cascade nhiều lựa chọn ---
+    if is_bank:
+        data['revenue'] = _find_revenue_for_bank(df_income, period=period)
+    elif is_securities:
+        data['revenue'] = _find_revenue_for_securities(df_income, period=period)
+    elif is_insurance:
+        data['revenue'] = _find_revenue_for_insurance(df_income, period=period)
+    else:
+        # Doanh nghiệp thông thường
+        data['revenue'] = find_row_series(
+            df_income,
+            [
+                'doanh thu thuần', 'net revenue', 'net sales', 'revenue',
+                'doanh thu bán hàng', 'tổng doanh thu', 'total revenue',
+            ],
+            exclude_keywords=['giá vốn', 'cost of', 'chi phí lãi'],
+            item_ids=['revenue', 'net_revenue', 'net_sales'], period=period)
+
+    # ... (phần net_profit, eps, equity, total_assets... giữ nguyên như cũ)
 
 def _find_revenue_for_realestate(df_income, period='year'):
     priority = [
