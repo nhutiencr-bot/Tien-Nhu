@@ -243,64 +243,35 @@ def find_row_series(df: pd.DataFrame, keywords, exclude_keywords=None,
 # ---------------------------------------------------------------------------
 
 def _find_revenue_for_bank(df_income, period='year'):
-    priority = [
-        (
-            ['thu nhap lai thuan', 'net interest income', 'lai thuan', 'nii'],
-            ['chi phi lai', 'interest expense', 'tuong tu', 'cac khoan thu nhap',
-             'hoat dong khac', 'dich vu'],
-        ),
-        (
-            ['tong thu nhap hoat dong thuan', 'thu nhap hoat dong thuan',
-             'net operating income', 'total operating income'],
-            ['chi phi', 'expense', 'truoc du phong'],
-        ),
-        (
-            ['tong thu nhap hoat dong', 'thu nhap hoat dong'],
-            ['chi phi', 'expense'],
-        ),
-        (
-            ['thu nhap thuan', 'net income from', 'total net income'],
-            ['loi nhuan', 'profit', 'sau thue'],
-        ),
-    ]
-    return _search_with_priority(df_income, priority, period)
+    """Ngân hàng: dùng Thu nhập lãi thuần làm 'doanh thu' (định nghĩa chuẩn ngành)."""
+    return find_row_series(
+        df_income,
+        ['thu nhập lãi thuần', 'net interest income'],
+        exclude_keywords=['chi phí lãi', 'thu nhập lãi và các khoản'],
+        period=period
+    )
 
 
 def _find_revenue_for_securities(df_income, period='year'):
-    priority = [
-        (
-            ['doanh thu hoat dong', 'operating revenue', 'tong doanh thu hoat dong'],
-            ['chi phi', 'expense', 'phi hoa hong'],
-        ),
-        (
-            ['doanh thu thuan ve hoat dong kinh doanh', 'doanh thu thuan hoat dong'],
-            ['chi phi'],
-        ),
-        (
-            ['doanh thu thuan', 'net revenue'],
-            ['chi phi', 'gia von', 'cost'],
-        ),
-    ]
-    return _search_with_priority(df_income, priority, period)
-
+    """Chứng khoán: Doanh thu thuần về hoạt động kinh doanh (hoặc Doanh thu thuần)."""
+    return find_row_series(
+        df_income,
+        ['doanh thu thuần về hoạt động kinh doanh', 'doanh thu thuần hoạt động kinh doanh',
+         'doanh thu thuần', 'net operating revenue'],
+        exclude_keywords=['giá vốn', 'cost of'],
+        period=period
+    )
 
 def _find_revenue_for_insurance(df_income, period='year'):
-    priority = [
-        (
-            ['phi bao hiem thuan', 'doanh thu phi bao hiem', 'net premium',
-             'doanh thu hoat dong bao hiem'],
-            ['chi phi', 'expense'],
-        ),
-        (
-            ['tong doanh thu hoat dong', 'tong thu nhap hoat dong'],
-            ['chi phi'],
-        ),
-        (
-            ['doanh thu thuan', 'net revenue'],
-            ['chi phi', 'gia von'],
-        ),
-    ]
-    return _search_with_priority(df_income, priority, period)
+    """Bảo hiểm: Doanh thu thuần hoạt động kinh doanh bảo hiểm."""
+    return find_row_series(
+        df_income,
+        ['doanh thu thuần hoạt động kinh doanh bảo hiểm',
+         'doanh thu thuần hđkd bảo hiểm',
+         'net insurance business revenue'],
+        exclude_keywords=['chi phí', 'tổng doanh thu'],  # tránh khớp nhầm dòng tổng hợp cao hơn
+        period=period
+    )
 
 
 def _find_revenue_for_realestate(df_income, period='year'):
