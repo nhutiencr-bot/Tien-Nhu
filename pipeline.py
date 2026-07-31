@@ -536,8 +536,8 @@ def execute_equity_research_pipeline(ticker):
 
         fin5 = build_5y_financial_table(df_income, df_balance, df_ratio, ticker=ticker)
         import logging as _dbg3
-        _dbg3.warning(f"[DEBUG fin5 revenue] ticker={ticker} | {dict(fin5['revenue'].dropna())}")
-        _dbg3.warning(f"[DEBUG df_income cols] {list(df_income.columns) if df_income is not None and not df_income.empty else 'EMPTY'}")
+        rev = fin5.get('revenue') if fin5 else None
+        _dbg3.warning(f"[DEBUG fin5 revenue] ticker={ticker} | {dict(rev.dropna()) if isinstance(rev, pd.Series) else rev}")
 
         revenue_series            = normalize_to_billion_vnd(fin5['revenue'])
         if not revenue_series.empty:
@@ -887,14 +887,20 @@ def execute_equity_research_pipeline(ticker):
         _dbg2.warning(f"[DEBUG T0] revenue_series index={list(revenue_series.dropna().index)} values={list(revenue_series.dropna().values.round(0))}")
         _dbg2.warning(f"[DEBUG T0] _years_q0_check={_years_q0_check}")
         _dbg2.warning(f"[DEBUG df_income cols]={list(df_income.columns) if df_income is not None and not df_income.empty else 'EMPTY'}")
+
         for _yr0 in _years_q0_check:
             # Ưu tiên lấy từ df_income annual (cứng) trước — tránh lỗi cộng quý
             _filled_from_annual = {}
             if df_income is not None and not df_income.empty:
                 _yr0_str = str(_yr0)
-                _annual_col = next((c for c in df_income.columns if str(c).strip() == _yr0_str), None)
+                
+                # FIX 1: So khớp linh hoạt (chứa năm) để bắt được cả "2025 Đã kiểm toán" hoặc "Năm 2025"
+                _annual_col = next((c for c in df_income.columns if _yr0_str in str(c)), None)
+                
                 if _annual_col is not None:
-                    # FIX: keyword revenue phân biệt ngành — tránh match sai dòng
+                    # FIX 2: Bổ sung xử lý biến cho ngành bảo hiểm (nếu hệ thống của bạn có biến is_insurance)
+                    is_ins = locals().get('is_insurance', globals().get('is_insurance', False))
+                    
                     if is_bank:
                         _rev_kw_annual = ['thu nhập lãi thuần', 'net interest income',
                                           'tổng thu nhập hoạt động thuần',
@@ -906,18 +912,25 @@ def execute_equity_research_pipeline(ticker):
                                           'doanh thu thuần về hoạt động kinh doanh',
                                           'doanh thu thuần']
                         _rev_ex_annual = ['chi phí', 'expense', 'phí hoa hồng']
+                    elif is_ins:
+                        _rev_kw_annual = ['doanh thu phí bảo hiểm thuần', 'doanh thu thuần hoạt động kinh doanh bảo hiểm',
+                                          'doanh thu phí bảo hiểm', 'tổng doanh thu hoạt động bảo hiểm']
+                        _rev_ex_annual = ['chi phí', 'expense', 'bồi thường', 'dự phòng']
                     else:
                         _rev_kw_annual = ['doanh thu thuần', 'net revenue',
                                           'doanh thu bán hàng', 'revenue', 'tổng doanh thu']
                         _rev_ex_annual = ['giá vốn', 'chi phí', 'cost']
-                    _rev_v  = _raw_scan_annual(df_income, _yr0,
-                                  _rev_kw_annual,
-                                  exclude=_rev_ex_annual)
-                    _np_v   = _raw_scan_annual(df_income, _yr0,
-                                  ['lợi nhuận sau thuế của cổ đông của công ty mẹ',
-                                   'lợi nhuận sau thuế','lãi sau thuế',
-                                   'net profit after tax','profit after tax','net income'],
-                                  exclude=['trước thuế','before tax','thiểu số','minority'])
+                    
+                    # FIX 3: Truyền trực tiếp _annual_col (VD: '2025 Đã kiểm toán') thay vì _yr0 vào hàm scan
+                    _rev_v  = _raw_scan_annual(df_income, _annual_col,
+                                               _rev_kw_annual,
+                                               exclude=_rev_ex_annual)
+                    
+                    _np_v   = _raw_scan_annual(df_income, _annual_col,
+                                               ['lợi nhuận sau thuế của cổ đông của công ty mẹ',
+                                                'lợi nhuận sau thuế','lãi sau thuế',
+                                                'net profit after tax','profit after tax','net income'],
+                                               exclude=['trước thuế','before tax','thiểu số','minority'])
                     if _rev_v is not None:
                         _filled_from_annual['revenue'] = _rev_v
                     if _np_v is not None:
@@ -932,6 +945,7 @@ def execute_equity_research_pipeline(ticker):
                     if _field in _filled_from_annual:
                         if _yr0 not in _series.index or pd.isna(_series.get(_yr0)):
                             _series[_yr0] = _filled_from_annual[_field]
+                
                 # Vẫn dùng quarterly cho equity/total_assets (balance sheet)
                 _agg = _aggregate_year_from_quarters(_yr0)
                 if _agg:
@@ -958,7 +972,6 @@ def execute_equity_research_pipeline(ticker):
                     if _field in _agg and _agg[_field] is not None:
                         if _yr0 not in _series.index or pd.isna(_series.get(_yr0)):
                             _series[_yr0] = _agg[_field]
-
 
         # ── Tầng 0c: Balance sheet năm hiện tại từ annual nếu balance_q không có ──
         _current_yr = datetime.today().year
