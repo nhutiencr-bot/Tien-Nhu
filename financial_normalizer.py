@@ -237,37 +237,88 @@ def find_row_series(df: pd.DataFrame, keywords, exclude_keywords=None,
         return pd.Series({k: result[k] for k in ordered_keys})
     return pd.Series(result).sort_index()
 
+# financial_normalizer.py
+# Thay toàn bộ hàm _find_revenue_for_bank() hiện tại bằng version này:
+
 def _find_revenue_for_bank(df_income, period='year'):
-    """Ngân hàng: Thu nhập lãi thuần."""
-    return find_row_series(
+    """
+    Ngân hàng/bảo hiểm/chứng khoán: tìm TOI (Tổng thu nhập hoạt động)
+    làm proxy doanh thu. Ưu tiên TOI tuyệt đối, NII chỉ là fallback xa.
+    
+    Root cause đã xác định (07/2026):
+    - vnstock VCI trả tên dòng TOI là 'Thu nhập hoạt động thuần' hoặc
+      'Tổng thu nhập từ hoạt động kinh doanh' — KHÔNG phải 
+      'Tổng thu nhập hoạt động' như keyword cũ → miss → fallback sang NII
+    - NII/TOI ≈ 84-86% → undercount ~14-16% doanh thu
+    """
+    
+    # === TẦNG 1: item_id chính xác (vnstock VCI thường có) ===
+    toi_by_id = find_row_series(
         df_income,
-        ['thu nhập lãi thuần', 'net interest income'],
-        exclude_keywords=['chi phí lãi'],
+        keywords=['thu nhập hoạt động', 'operating income', 'net operating'],
+        item_ids=[
+            'net_operating_income',      # VCI phổ biến
+            'total_operating_income',
+            'operating_revenue',
+            'net_revenue_banking',
+            'total_net_income',
+            'net_interest_and_fee_income',
+        ],
         period=period
     )
+    if not toi_by_id.empty:
+        return toi_by_id
 
+    # === TẦNG 2: keyword TOI – mở rộng tối đa ===
+    toi_keywords_groups = [
+        # Nhóm 1: "Tổng thu nhập" variant
+        (['tổng thu nhập hoạt động', 'total operating income',
+          'thu nhập hoạt động thuần', 'thu nhập thuần từ hoạt động',
+          'tổng thu nhập từ hoạt động', 'net operating income',
+          'thu nhập hoạt động ròng'], ['chi phí', 'expense', 'lợi nhuận']),
+        
+        # Nhóm 2: "Doanh thu hoạt động"
+        (['doanh thu hoạt động', 'operating revenue',
+          'tổng doanh thu hoạt động', 'net revenue from operations'], []),
+        
+        # Nhóm 3: "Thu nhập thuần" – cẩn thận exclude profit lines
+        (['thu nhập thuần', 'total net income', 'net income from activities'],
+         ['lợi nhuận trước thuế', 'lợi nhuận sau thuế', 'profit before',
+          'profit after', 'before tax', 'after tax']),
+        
+        # Nhóm 4: "Tổng doanh thu" generic
+        (['tổng doanh thu', 'total revenue', 'gross revenue',
+          'total income'], ['chi phí hoạt động', 'operating expense']),
+    ]
+    
+    for keywords, excludes in toi_keywords_groups:
+        s = find_row_series(df_income, keywords,
+                            exclude_keywords=excludes if excludes else None,
+                            period=period)
+        if not s.empty:
+            return s
 
-def _find_revenue_for_securities(df_income, period='year'):
-    """Chứng khoán: Doanh thu thuần về hoạt động kinh doanh."""
-    return find_row_series(
+    # === TẦNG 3: NII – chỉ dùng khi không tìm được TOI nào ===
+    # (NII ≈ 84-86% TOI, sẽ undercount nhưng tốt hơn không có gì)
+    nii = find_row_series(
         df_income,
-        ['doanh thu thuần về hoạt động kinh doanh', 'doanh thu thuần hoạt động kinh doanh',
-         'doanh thu thuần', 'net operating revenue'],
-        exclude_keywords=['giá vốn', 'cost of'],
+        ['thu nhập lãi thuần', 'net interest income', 'lãi thuần',
+         'net interest margin income'],
+        exclude_keywords=['chi phí lãi', 'interest expense'],
+        item_ids=['net_interest_income', 'net_interest_and_similar_income'],
         period=period
     )
+    if not nii.empty:
+        return nii
 
+    # === TẦNG 4: last resort ===
+    for kw in [['thu nhập từ lãi', 'interest income'],
+                ['tổng thu nhập', 'total income']]:
+        s = find_row_series(df_income, kw, period=period)
+        if not s.empty:
+            return s
 
-def _find_revenue_for_insurance(df_income, period='year'):
-    """Bảo hiểm: Doanh thu thuần hoạt động kinh doanh bảo hiểm."""
-    return find_row_series(
-        df_income,
-        ['doanh thu thuần hoạt động kinh doanh bảo hiểm',
-         'doanh thu thuần hđkd bảo hiểm',
-         'net insurance business revenue'],
-        exclude_keywords=['chi phí', 'tổng doanh thu'],
-        period=period
-    )
+    return pd.Series(dtype=float)
 
 
 def build_financial_table(df_income, df_balance, df_ratio=None, ticker=None, period='year'):
