@@ -1,6 +1,36 @@
 """
-financial_normalizer.py — v2
+financial_normalizer.py — v3 (FIX: revenue năm hiện tại bị sai riêng lẻ)
 Fix systematic cho 3 ngành: ngân hàng, chứng khoán, bảo hiểm.
+
+=== BUG ĐÃ FIX SO VỚI v2 ===
+
+Triệu chứng: doanh thu (TOI) đúng cho các năm đã chốt sổ (VD 2021-2024)
+nhưng SAI riêng cho năm gần nhất / chưa chốt sổ (VD 2025).
+
+Nguyên nhân gốc:
+  1. `_find_revenue_financial_sector` (v2) chạy kiểu waterfall
+     "toàn-hoặc-không": hễ Strategy A trả về Series KHÔNG RỖNG
+     (dù chỉ đúng vài năm) là return luôn, không bao giờ chạy
+     Strategy B/C để bù cho riêng những năm bị thiếu/sai.
+  2. Sanity-check trong Strategy A (v2) so sánh TOI vs NII theo
+     TỶ LỆ GỘP (>50% số năm sai mới loại cả series) chứ không xét
+     từng năm riêng lẻ. Với BCTC ngân hàng/CK/bảo hiểm, năm hiện
+     tại thường được vnstock tổng hợp từ dữ liệu quý lũy kế mới
+     nhất, có thể tồn tại 2 dòng "Chi phí hoạt động" trong cùng
+     bảng (1 dòng thuộc cấu trúc năm đã chốt, 1 dòng thuộc phần
+     lũy kế quý mới) khiến `opex_positions[0]` (luôn lấy dòng đầu
+     tiên) trỏ tới dòng TOI đúng cho các năm cũ nhưng sai cho năm
+     mới nhất. Vì chỉ 1/5 năm sai (20% < 50%), toàn bộ Series vẫn
+     được chấp nhận — bao gồm cả giá trị sai của năm mới nhất.
+
+Fix trong v3:
+  - Sanity-check giờ làm theo TỪNG NĂM (per-year): năm nào
+    TOI < NII sẽ bị loại BỎ RIÊNG năm đó, không kéo theo các năm
+    khác trong cùng Series.
+  - `_find_revenue_financial_sector` giờ MERGE kết quả theo năm
+    giữa A → B → C → NII fallback: năm nào chiến lược trước tính
+    đúng thì giữ, năm nào thiếu/bị loại thì tự động thử chiến lược
+    sau CHỈ CHO ĐÚNG NĂM ĐÓ, thay vì bỏ toàn bộ các chiến lược sau.
 
 Thay vì keyword fuzzy matching trên tên dòng (không reliable),
 dùng 2 chiến lược chắc chắn hơn:
@@ -13,6 +43,9 @@ dùng 2 chiến lược chắc chắn hơn:
       Chi phí hoạt động
       Lợi nhuận thuần từ HĐKD
       ...
+    (v3: xét TẤT CẢ các dòng "Chi phí hoạt động" tìm được, không
+    chỉ dòng đầu tiên, để tránh lấy nhầm khi có dòng trùng do dữ
+    liệu quý lũy kế của năm hiện tại)
 
   CHIẾN LƯỢC B — Bottom-up aggregation:
     TOI = NII + tổng các dòng thu nhập ngoài lãi (non-interest income)
@@ -21,7 +54,7 @@ dùng 2 chiến lược chắc chắn hơn:
   CHIẾN LƯỢC C — item_id whitelist (VCI source):
     Một số item_id VCI cố định, không đổi theo tên.
 
-Thứ tự: A → B → C → NII fallback (báo warning)
+Thứ tự: A → B → C → NII fallback (báo warning), MERGE theo từng năm.
 """
 
 import pandas as pd
@@ -183,7 +216,7 @@ def find_row_series(df: pd.DataFrame,
 
 # ══════════════════════════════════════════════════════════════════════════════
 # CORE FIX: Revenue cho ngành tài chính
-# 3 chiến lược, áp dụng tuần tự
+# 3 chiến lược, MERGE THEO TỪNG NĂM (v3)
 # ══════════════════════════════════════════════════════════════════════════════
 
 # Keyword nhận diện "Chi phí hoạt động" (anchor cố định trong BCTC)
@@ -265,14 +298,20 @@ def _strategy_A_structural(df_income: pd.DataFrame,
         LNTT từ HĐKD
         ...
 
-    Tìm index dòng "Chi phí hoạt động", lấy dòng trước đó.
+    v3: có thể tồn tại NHIỀU dòng "Chi phí hoạt động" trong cùng bảng
+    (VD: 1 dòng thuộc cấu trúc năm đã chốt sổ, 1 dòng thuộc phần dữ
+    liệu quý lũy kế của năm hiện tại được vnstock ghép thêm vào).
+    Vì vậy ta xét TẤT CẢ các anchor tìm được, và với MỖI CỘT NĂM,
+    chọn giá trị hợp lệ tốt nhất (đã qua sanity-check theo NII)
+    trong số các dòng "ngay trên anchor" ứng viên — thay vì chỉ
+    dùng anchor đầu tiên cho toàn bộ các năm.
     """
     if not text_cols:
         return pd.Series(dtype=float)
 
     combined = df_income[text_cols].astype(str).agg(' '.join, axis=1).str.lower()
 
-    # Tìm dòng "Chi phí hoạt động"
+    # Tìm TẤT CẢ các dòng "Chi phí hoạt động"
     opex_mask = pd.Series(False, index=df_income.index)
     for kw in _OPEX_KEYWORDS:
         opex_mask |= combined.str.contains(kw, regex=False, na=False)
@@ -281,42 +320,50 @@ def _strategy_A_structural(df_income: pd.DataFrame,
         return pd.Series(dtype=float)
 
     opex_positions = df_income.index[opex_mask].tolist()
-    opex_pos = opex_positions[0]   # lấy lần xuất hiện đầu tiên
 
-    # Lấy vị trí integer trong DataFrame
-    opex_iloc = df_income.index.get_loc(opex_pos)
-    if opex_iloc == 0:
+    # Lấy dòng NGAY TRÊN mỗi anchor tìm được → danh sách các dòng ứng viên TOI
+    candidate_rows = []
+    for opex_pos in opex_positions:
+        opex_iloc = df_income.index.get_loc(opex_pos)
+        if opex_iloc == 0:
+            continue
+        toi_iloc = opex_iloc - 1
+        candidate_rows.append(df_income.iloc[toi_iloc])
+
+    if not candidate_rows:
         return pd.Series(dtype=float)
 
-    # Dòng ngay trên = TOI
-    toi_iloc = opex_iloc - 1
-    toi_row  = df_income.iloc[toi_iloc]
+    # NII dùng để sanity-check TỪNG NĂM (không phải gộp theo tỷ lệ như v2)
+    nii_series = _nii_fallback(df_income, year_cols, text_cols, period)
 
     result = {}
     for yc in year_cols:
-        v = _read_val(toi_row, yc)
-        if v is not None and v > 0:
-            result[_year_key(yc, period)] = v
+        yk = _year_key(yc, period)
+        best_val = None
+        for cand_row in candidate_rows:
+            v = _read_val(cand_row, yc)
+            if v is None or v <= 0:
+                continue
+            # ── Sanity check THEO TỪNG NĂM ──────────────────────────
+            # Nếu có NII cho năm này, TOI ứng viên phải >= NII, nếu
+            # không thì đây là dòng bị lấy nhầm (VD dòng thành phần
+            # nhỏ hơn thay vì dòng tổng) cho riêng năm đó → bỏ qua,
+            # không loại các năm khác trong cùng candidate.
+            if yk in nii_series.index and pd.notna(nii_series.get(yk)):
+                if v < nii_series[yk]:
+                    continue
+            # Trong các ứng viên hợp lệ, ưu tiên giá trị LỚN NHẤT
+            # (dòng tổng luôn >= các dòng thành phần bị lấy nhầm)
+            if best_val is None or v > best_val:
+                best_val = v
+        if best_val is not None:
+            result[yk] = best_val
 
     if not result:
         return pd.Series(dtype=float)
 
     s = pd.Series(result).sort_index()
-
-    # ── Sanity check: TOI (Strategy A) phải >= NII ──────────────────
-    # Nếu dòng tìm được nhỏ hơn NII → đã lấy nhầm dòng thành phần
-    # (xảy ra khi không có dòng tổng, dòng cuối cùng trước chi phí = 1 dòng nhỏ)
-    nii_series = _nii_fallback(df_income, year_cols, text_cols, period)
-    if not nii_series.empty:
-        common = s.index.intersection(nii_series.index)
-        if len(common) > 0:
-            # Nếu quá 50% các năm có TOI < NII → kết quả sai, bỏ qua
-            toi_lt_nii = (s.loc[common] < nii_series.loc[common]).sum()
-            if toi_lt_nii > len(common) * 0.5:
-                logger.debug("Strategy A sanity FAIL: result < NII, skipping")
-                return pd.Series(dtype=float)
-
-    logger.debug(f"Strategy A (structural) found TOI: {s.to_dict()}")
+    logger.debug(f"Strategy A (structural, per-year) found TOI: {s.to_dict()}")
     return s
 
 
@@ -452,7 +499,8 @@ def _nii_fallback(df_income: pd.DataFrame,
         if v is not None:
             result[_year_key(yc, period)] = v
 
-    logger.warning("Using NII fallback — may undercount TOI by ~15-25%")
+    if result:
+        logger.warning("Using NII fallback — may undercount TOI by ~15-25%")
     return pd.Series(result).sort_index() if result else pd.Series(dtype=float)
 
 
@@ -460,7 +508,13 @@ def _find_revenue_financial_sector(df_income: pd.DataFrame,
                                    period: str = 'year') -> pd.Series:
     """
     Entry point cho ngân hàng, CK, bảo hiểm.
-    Chạy 3 chiến lược theo thứ tự, lấy kết quả đầu tiên hợp lệ.
+
+    v3: MERGE kết quả THEO TỪNG NĂM giữa 4 chiến lược (A → B → C →
+    NII fallback), thay vì lấy nguyên Series của chiến lược đầu
+    tiên không rỗng. Nhờ vậy, nếu một chiến lược tính đúng cho phần
+    lớn các năm nhưng thiếu/bị loại ở 1 năm cụ thể (VD năm hiện tại
+    chưa chốt sổ), các chiến lược sau sẽ tự động được thử CHỈ CHO
+    ĐÚNG NĂM ĐÓ để bù vào, thay vì bỏ qua toàn bộ.
     """
     if df_income is None or df_income.empty:
         return pd.Series(dtype=float)
@@ -472,23 +526,34 @@ def _find_revenue_financial_sector(df_income: pd.DataFrame,
     if not year_cols:
         return pd.Series(dtype=float)
 
-    # ── A: Structural (dòng ngay trên chi phí hoạt động) ──────────────
-    s = _strategy_A_structural(df_income, year_cols, text_cols, period)
-    if not s.empty:
-        return s
+    all_year_keys = [_year_key(yc, period) for yc in year_cols]
 
-    # ── B: Bottom-up aggregation (NII + non-interest lines) ────────────
-    s = _strategy_B_aggregation(df_income, year_cols, text_cols, period)
-    if not s.empty:
-        return s
+    strategies = [
+        ('A (structural)',  lambda: _strategy_A_structural(df_income, year_cols, text_cols, period)),
+        ('B (aggregation)', lambda: _strategy_B_aggregation(df_income, year_cols, text_cols, period)),
+        ('C (item_id)',     lambda: _strategy_C_item_id(df_income, year_cols, period)),
+        ('NII fallback',    lambda: _nii_fallback(df_income, year_cols, text_cols, period)),
+    ]
 
-    # ── C: item_id whitelist ────────────────────────────────────────────
-    s = _strategy_C_item_id(df_income, year_cols, period)
-    if not s.empty:
-        return s
+    merged: dict = {}
+    for name, fn in strategies:
+        if set(all_year_keys) <= set(merged.keys()):
+            break  # đã có đủ giá trị cho mọi năm, không cần chạy tiếp
+        s = fn()
+        if s.empty:
+            continue
+        filled_this_round = []
+        for yk in s.index:
+            if yk not in merged:
+                merged[yk] = s[yk]
+                filled_this_round.append(yk)
+        if filled_this_round:
+            logger.debug(f"Strategy {name} filled years: {filled_this_round}")
 
-    # ── Fallback: NII với exclude gross ────────────────────────────────
-    return _nii_fallback(df_income, year_cols, text_cols, period)
+    if not merged:
+        return pd.Series(dtype=float)
+
+    return pd.Series(merged).sort_index()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
