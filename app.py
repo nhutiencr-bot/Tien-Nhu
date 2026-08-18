@@ -153,14 +153,24 @@ st.caption(
 df_symbols = load_all_symbols()
 display_list, display_to_symbol = build_display_options(df_symbols)
 
+# [FIX] Dùng session_state để giữ lựa chọn qua các lần rerun
+if 'selected_label' not in st.session_state:
+    st.session_state['selected_label'] = "— Chọn mã —"
+
 ticker_input = None
 col_sel, col_spacer = st.columns([2, 5])
 with col_sel:
     if display_list:
+        # Tính index an toàn từ session_state
+        _all_opts = ["— Chọn mã —"] + display_list
+        _saved = st.session_state.get('selected_label', "— Chọn mã —")
+        _idx = _all_opts.index(_saved) if _saved in _all_opts else 0
+
         selected_label = st.selectbox(
             f"Đang có {len(display_list)} mã (HOSE/HNX/UPCOM):",
-            options=["— Chọn mã —"] + display_list,
-            index=0,
+            options=_all_opts,
+            index=_idx,
+            key='selected_label',
             label_visibility="visible",
         )
         if selected_label != "— Chọn mã —":
@@ -175,7 +185,7 @@ with col_sel:
 # Guard
 # ---------------------------------------------------------------------------
 if not ticker_input:
-    st.info("👈 Vui lòng chọn mã cổ phiếu trong sidebar để bắt đầu.")
+    st.info("👈 Vui lòng chọn mã cổ phiếu ở trên để bắt đầu.")
     st.stop()
 
 # ---------------------------------------------------------------------------
