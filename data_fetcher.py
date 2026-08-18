@@ -112,7 +112,12 @@ def _drop_current_year_cols(df: pd.DataFrame) -> pd.DataFrame:
     """
     if df is None or df.empty:
         return df
-    drop_cols = [c for c in df.columns if str(c).strip() == str(CURRENT_YEAR)]
+    # [FIX vnstock v3.2.8] annual col có thể là '2026' hoặc '2026-Q4'
+    drop_cols = [
+        c for c in df.columns
+        if str(c).strip() == str(CURRENT_YEAR)
+        or str(c).strip() == f'{CURRENT_YEAR}-Q4'
+    ]
     if drop_cols:
         df = df.drop(columns=drop_cols)
     return df
@@ -218,9 +223,14 @@ def _fetch_vnstock(ticker):
         def _missing_years(df, years):
             if df is None or df.empty:
                 return years
-            year_cols = [c for c in df.columns
-                         if re.fullmatch(r'\d{4}', str(c).strip())]
-            have = {int(c) for c in year_cols}
+            # [FIX vnstock v3.2.8] nhận diện cả '2025' lẫn '2025-Q4' là có năm 2025
+            have = set()
+            for c in df.columns:
+                c_str = str(c).strip()
+                if re.fullmatch(r'\d{4}', c_str):
+                    have.add(int(c_str))
+                elif re.fullmatch(r'\d{4}-Q4', c_str):
+                    have.add(int(c_str[:4]))
             return [y for y in years if y not in have]
 
         missing_inc = _missing_years(inc_y, YEARS)
@@ -236,10 +246,13 @@ def _fetch_vnstock(ticker):
                             if df_q is not None and not df_q.empty:
                                 df_agg = _agg_quarterly_to_annual(df_q, missing_inc, is_flow=True)
                                 if not df_agg.empty:
+                                    # [FIX] _agg trả cột là int năm (2025), không phải string
                                     new_cols = [c for c in df_agg.columns
-                                                if str(c).strip().isdigit()]
+                                                if str(c).strip().isdigit() or
+                                                (isinstance(c, int) and 2000 <= c <= 2099)]
+                                    existing = {str(c) for c in inc_y.columns}
                                     for col in new_cols:
-                                        if str(col) not in [str(c) for c in inc_y.columns]:
+                                        if str(col) not in existing:
                                             inc_y = pd.concat([inc_y, df_agg[[col]]], axis=1) \
                                                 if not inc_y.empty else df_agg
                         except Exception:
@@ -250,10 +263,13 @@ def _fetch_vnstock(ticker):
                             if df_q is not None and not df_q.empty:
                                 df_agg = _agg_quarterly_to_annual(df_q, missing_bal, is_flow=False)
                                 if not df_agg.empty:
+                                    # [FIX] _agg trả cột là int năm (2025), không phải string
                                     new_cols = [c for c in df_agg.columns
-                                                if str(c).strip().isdigit()]
+                                                if str(c).strip().isdigit() or
+                                                (isinstance(c, int) and 2000 <= c <= 2099)]
+                                    existing = {str(c) for c in bal_y.columns}
                                     for col in new_cols:
-                                        if str(col) not in [str(c) for c in bal_y.columns]:
+                                        if str(col) not in existing:
                                             bal_y = pd.concat([bal_y, df_agg[[col]]], axis=1) \
                                                 if not bal_y.empty else df_agg
                         except Exception:
