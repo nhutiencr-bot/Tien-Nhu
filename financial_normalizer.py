@@ -37,6 +37,14 @@ Các sửa đổi so với bản trước (399 dòng):
           yr key vẫn là int năm vì str(col)[:4] đã đúng.
   [KEPT]  build_5y_financial_table() truyền ticker xuống — giữ nguyên.
   [KEPT]  find_row_series() chọn dòng nhiều data nhất — giữ nguyên.
+
+  [FIX 10] vnstock v3.2.8 — Tidy Data + Semantic ID:
+           - Finance API giờ trả Tidy (Long-form): mỗi chỉ tiêu có item_id
+             dạng Taxonomy ID (BS_CASH_AND_PRECIOUS_METALS, NI_NET_INTEREST_INCOME...).
+           - _find_revenue_for_bank/_securities/_insurance: bổ sung item_ids
+             Taxonomy để match chính xác thay vì dò từ khoá.
+           - _get_year_columns(): đã match '2025-Q4' (giữ nguyên).
+           - Thêm SEMANTIC_ID_BANK/SECURITIES/INSURANCE map để dễ bảo trì.
 """
 
 import re
@@ -84,6 +92,41 @@ CONSTRUCTION_TICKERS = {
 }
 
 TARGET_YEARS = list(range(2021, 2026))
+
+# ---------------------------------------------------------------------------
+# [FIX 10] Semantic ID (Taxonomy) — vnstock v3.2.8
+# Dùng item_id chính xác để không bị sai khi tên hiển thị thay đổi.
+# ---------------------------------------------------------------------------
+
+# Ngân hàng — ưu tiên NII, fallback tổng thu nhập hoạt động
+BANK_REVENUE_IDS = [
+    'NI_NET_INTEREST_INCOME',           # Thu nhập lãi thuần (priority 1)
+    'NI_TOTAL_NET_OPERATING_INCOME',    # Tổng thu nhập hoạt động thuần
+    'NI_TOTAL_OPERATING_INCOME',        # Tổng thu nhập hoạt động
+    'NI_NET_INCOME_FROM_SERVICES',      # Thu nhập thuần từ dịch vụ (fallback)
+]
+
+# Chứng khoán — doanh thu hoạt động
+SECURITIES_REVENUE_IDS = [
+    'NI_OPERATING_REVENUE',             # Doanh thu hoạt động
+    'NI_TOTAL_OPERATING_REVENUE',       # Tổng doanh thu hoạt động
+    'NI_NET_REVENUE',                   # Doanh thu thuần
+]
+
+# Bảo hiểm — phí bảo hiểm thuần
+INSURANCE_REVENUE_IDS = [
+    'NI_NET_PREMIUM_REVENUE',           # Phí bảo hiểm thuần
+    'NI_INSURANCE_OPERATING_REVENUE',   # Doanh thu hoạt động bảo hiểm
+    'NI_TOTAL_OPERATING_REVENUE',
+    'NI_NET_REVENUE',
+]
+
+# Net profit — dùng chung mọi ngành
+NET_PROFIT_IDS = [
+    'NI_NET_PROFIT_AFTER_TAX',
+    'NI_PROFIT_AFTER_TAX',
+    'net_profit', 'net_profit_after_tax', 'profit_after_tax',  # alias cũ
+]
 
 CFO_KEYWORDS = [
     'luu chuyen tien thuan tu hoat dong kinh doanh',
@@ -235,6 +278,16 @@ def find_row_series(df: pd.DataFrame, keywords, exclude_keywords=None,
 # ---------------------------------------------------------------------------
 
 def _find_revenue_for_bank(df_income, period='year'):
+    # [FIX 10] Thử item_id Taxonomy trước — chính xác nhất, không phụ thuộc tên hiển thị
+    for tax_id in BANK_REVENUE_IDS:
+        s = find_row_series(df_income, keywords=['net interest income', 'thu nhap lai thuan'],
+                            item_ids=[tax_id], period=period)
+        if not s.empty and not s.dropna().empty:
+            # Ưu tiên series có data ở năm mới nhất
+            if s.dropna().index[-1] == s.index[-1]:
+                return s
+
+    # Fallback: dò từ khoá (giữ nguyên logic cũ)
     priority = [
         (
             ['thu nhap lai thuan', 'net interest income', 'lai thuan', 'nii'],
@@ -259,6 +312,14 @@ def _find_revenue_for_bank(df_income, period='year'):
 
 
 def _find_revenue_for_securities(df_income, period='year'):
+    # [FIX 10] Taxonomy ID trước
+    for tax_id in SECURITIES_REVENUE_IDS:
+        s = find_row_series(df_income, keywords=['doanh thu hoat dong', 'operating revenue'],
+                            item_ids=[tax_id], period=period)
+        if not s.empty and not s.dropna().empty:
+            if s.dropna().index[-1] == s.index[-1]:
+                return s
+
     priority = [
         (
             ['doanh thu hoat dong', 'operating revenue', 'tong doanh thu hoat dong'],
@@ -277,6 +338,14 @@ def _find_revenue_for_securities(df_income, period='year'):
 
 
 def _find_revenue_for_insurance(df_income, period='year'):
+    # [FIX 10] Taxonomy ID trước
+    for tax_id in INSURANCE_REVENUE_IDS:
+        s = find_row_series(df_income, keywords=['phi bao hiem thuan', 'net premium'],
+                            item_ids=[tax_id], period=period)
+        if not s.empty and not s.dropna().empty:
+            if s.dropna().index[-1] == s.index[-1]:
+                return s
+
     priority = [
         (
             ['phi bao hiem thuan', 'doanh thu phi bao hiem', 'net premium',
@@ -483,7 +552,7 @@ def build_financial_table(df_income, df_balance, df_ratio=None,
         ['loi nhuan sau thue', 'net profit', 'profit after tax', 'net income',
          'loi nhuan thuan', 'lai sau thue'],
         exclude_keywords=['truoc thue', 'before tax', 'thieu so', 'minority'],
-        item_ids=['net_profit', 'net_profit_after_tax', 'profit_after_tax'],
+        item_ids=NET_PROFIT_IDS,   # [FIX 10] thêm Taxonomy IDs
         period=period
     )
 
