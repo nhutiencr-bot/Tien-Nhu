@@ -1,9 +1,9 @@
 streamlit
-plotly
-pandas<3.0.0
+plotly 
+pandas
 numpy
 yfinance
-vnstock>=3.2.8,<4.0.0
+vnstock>=4.0.0
 requests
 lxml
 beautifulsoup4
