@@ -50,6 +50,26 @@ SOURCE_FALLBACK_ORDER = ['DNSE', 'KBS', 'VCI']
 DEFAULT_YEAR_LIMIT = 5
 
 
+# ════════════════════════════════════════════════════════════════════════
+# [v3.2.8] com_type helper — truyền vào Finance API để bóc tách đúng
+# loại báo cáo tài chính theo ngành (Bank/Securities/Insurance/Regular).
+# Tránh trường hợp vnstock tự detect sai khi tên công ty không rõ ràng.
+# ════════════════════════════════════════════════════════════════════════
+from financial_normalizer import (
+    BANK_TICKERS       as _BANK_TICKERS_SET,
+    SECURITIES_TICKERS as _SEC_TICKERS_SET,
+    INSURANCE_TICKERS  as _INS_TICKERS_SET,
+)
+
+def _get_com_type(ticker: str) -> str:
+    """Trả về com_type chuẩn vnstock v3.2.8 cho ticker."""
+    t = (ticker or '').upper().strip()
+    if t in _BANK_TICKERS_SET:      return 'Bank'
+    if t in _SEC_TICKERS_SET:       return 'Securities'
+    if t in _INS_TICKERS_SET:       return 'Insurance'
+    return 'Regular'
+
+
 def normalize_to_billion_vnd(series):
     """
     Chuẩn hoá series về đơn vị tỷ VNĐ.
@@ -165,23 +185,79 @@ def _safe_fetch(fn, default=None):
 
 
 def _merge_financial_dataframes(dfs: list):
+    """
+    Merge nhiều DataFrame BCTC từ các nguồn khác nhau thành một DataFrame duy nhất.
+
+    [v3.2.8] Xử lý thêm:
+    - Tidy Data (Long-form): nếu df có cột 'period'/'value' (long format) thì
+      pivot về wide trước khi merge, đảm bảo backward-compatible.
+    - Bảo toàn cột item_id (Semantic ID / Taxonomy) từ df đầu tiên.
+    - Bảo toàn cột item_en (tên tiếng Anh) từ df đầu tiên.
+    """
     dfs = [d for d in dfs if d is not None and not d.empty]
     if not dfs:
         return pd.DataFrame()
-    if len(dfs) == 1:
-        return dfs[0]
+
+    def _pivot_long_to_wide(df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Nếu df ở Long-form (có cột 'period' và 'value'), pivot về wide format.
+        Wide format: rows = chỉ tiêu, cols = kỳ (2021, 2022, ..., 2025-Q4).
+        """
+        # Heuristic: long-form có cột 'value' (hoặc 'amount') và 'period' (hoặc 'year')
+        val_col    = next((c for c in df.columns if str(c).lower() in ('value', 'amount')), None)
+        period_col = next((c for c in df.columns if str(c).lower() in ('period', 'year', 'quarter')), None)
+        item_col   = next((c for c in df.columns if str(c).lower() in ('item', 'item_vn', 'name', 'metric', 'chỉ tiêu')), None)
+        id_col     = next((c for c in df.columns if str(c).lower() == 'item_id'), None)
+        en_col     = next((c for c in df.columns if str(c).lower() == 'item_en'), None)
+
+        if val_col is None or period_col is None or item_col is None:
+            return df  # Không phải long-form → giữ nguyên
+
+        # Pivot
+        index_cols = [c for c in [item_col, id_col, en_col] if c is not None]
+        try:
+            wide = df.pivot_table(
+                index=index_cols,
+                columns=period_col,
+                values=val_col,
+                aggfunc='first',
+            ).reset_index()
+            wide.columns.name = None
+            # Rename item_col về 'item' để _merge_financial_dataframes nhận ra
+            if item_col != 'item':
+                wide = wide.rename(columns={item_col: 'item'})
+            if id_col and id_col != 'item_id':
+                wide = wide.rename(columns={id_col: 'item_id'})
+            if en_col and en_col != 'item_en':
+                wide = wide.rename(columns={en_col: 'item_en'})
+        except Exception:
+            return df  # Pivot lỗi → trả về nguyên
+
+        return wide
 
     def _year_cols(df):
-        return [c for c in df.columns if re_fullmatch_year(c)]
+        return [c for c in df.columns if _is_year_col(c)]
 
-    def re_fullmatch_year(c):
+    def _is_year_col(c):
         c_str = str(c).strip()
         return c_str.replace('-', '').replace('Q', '').isdigit() and len(c_str) >= 4
+
+    # Pivot long-form nếu cần
+    dfs = [_pivot_long_to_wide(d) for d in dfs]
+    dfs = [d for d in dfs if d is not None and not d.empty]
+    if not dfs:
+        return pd.DataFrame()
+
+    if len(dfs) == 1:
+        return dfs[0]
 
     dfs_sorted = sorted(dfs, key=lambda d: len(_year_cols(d)), reverse=True)
     merged = dfs_sorted[0].copy()
     key_col = 'item' if 'item' in merged.columns else merged.columns[0]
     merged['_key_norm'] = merged[key_col].astype(str).str.lower().str.strip()
+
+    # Các cột metadata cần giữ lại từ df gốc (df[0]) — không cần merge thêm
+    _meta_cols = {'item', 'item_id', 'item_en'}
 
     for other in dfs_sorted[1:]:
         other_key_col = 'item' if 'item' in other.columns else other.columns[0]
@@ -199,14 +275,26 @@ def _merge_financial_dataframes(dfs: list):
 
 def _fetch_income_statement(ticker, source, period='year', limit=FETCH_LIMIT_YEAR):
     sources_to_try = [source] + [s for s in SOURCE_FALLBACK_ORDER if s != source]
+    # [v3.2.8] Xác định com_type để vnstock bóc tách đúng mẫu báo cáo
+    com_type = _get_com_type(ticker)
     dfs = []
     for src in sources_to_try:
         try:
             f = Finance(symbol=ticker, source=src, period=period)
-            try:
-                df = f.income_statement(period=period, limit=limit)
-            except TypeError:
-                df = f.income_statement(period=period)
+            df = None
+            # Thử theo thứ tự ưu tiên: (format+com_type) → (format) → (limit) → (bare)
+            for _kwargs in [
+                dict(period=period, limit=limit, format='wide', drop_empty=True, com_type=com_type),
+                dict(period=period, limit=limit, format='wide'),
+                dict(period=period, limit=limit),
+                dict(period=period),
+            ]:
+                try:
+                    df = f.income_statement(**_kwargs)
+                    if df is not None and not df.empty:
+                        break
+                except TypeError:
+                    continue
             if df is not None and not df.empty:
                 dfs.append(df)
         except Exception:
@@ -220,10 +308,19 @@ def _fetch_ratio(ticker, source, period='year', limit=FETCH_LIMIT_YEAR):
     for src in sources_to_try:
         try:
             f = Finance(symbol=ticker, source=src, period=period)
-            try:
-                df = f.ratio(period=period, limit=limit)
-            except TypeError:
-                df = f.ratio(period=period)
+            df = None
+            for _kwargs in [
+                dict(period=period, limit=limit, format='wide', drop_empty=True),
+                dict(period=period, limit=limit, format='wide'),
+                dict(period=period, limit=limit),
+                dict(period=period),
+            ]:
+                try:
+                    df = f.ratio(**_kwargs)
+                    if df is not None and not df.empty:
+                        break
+                except TypeError:
+                    continue
             if df is not None and not df.empty:
                 dfs.append(df)
         except Exception:
@@ -233,14 +330,24 @@ def _fetch_ratio(ticker, source, period='year', limit=FETCH_LIMIT_YEAR):
 
 def _fetch_cashflow(ticker, source, period='year', limit=FETCH_LIMIT_YEAR):
     sources_to_try = [source] + [s for s in SOURCE_FALLBACK_ORDER if s != source]
+    com_type = _get_com_type(ticker)
     dfs = []
     for src in sources_to_try:
         try:
             f = Finance(symbol=ticker, source=src, period=period)
-            try:
-                df = f.cash_flow(period=period, limit=limit)
-            except TypeError:
-                df = f.cash_flow(period=period)
+            df = None
+            for _kwargs in [
+                dict(period=period, limit=limit, format='wide', drop_empty=True, com_type=com_type),
+                dict(period=period, limit=limit, format='wide'),
+                dict(period=period, limit=limit),
+                dict(period=period),
+            ]:
+                try:
+                    df = f.cash_flow(**_kwargs)
+                    if df is not None and not df.empty:
+                        break
+                except TypeError:
+                    continue
             if df is not None and not df.empty:
                 dfs.append(df)
         except Exception:
@@ -250,14 +357,24 @@ def _fetch_cashflow(ticker, source, period='year', limit=FETCH_LIMIT_YEAR):
 
 def _fetch_balance_sheet(ticker, source, period='year', limit=FETCH_LIMIT_YEAR):
     sources_to_try = [source] + [s for s in SOURCE_FALLBACK_ORDER if s != source]
+    com_type = _get_com_type(ticker)
     dfs = []
     for src in sources_to_try:
         try:
             f = Finance(symbol=ticker, source=src, period=period)
-            try:
-                df = f.balance_sheet(period=period, limit=limit)
-            except TypeError:
-                df = f.balance_sheet(period=period)
+            df = None
+            for _kwargs in [
+                dict(period=period, limit=limit, format='wide', drop_empty=True, com_type=com_type),
+                dict(period=period, limit=limit, format='wide'),
+                dict(period=period, limit=limit),
+                dict(period=period),
+            ]:
+                try:
+                    df = f.balance_sheet(**_kwargs)
+                    if df is not None and not df.empty:
+                        break
+                except TypeError:
+                    continue
             if df is not None and not df.empty:
                 dfs.append(df)
         except Exception:
