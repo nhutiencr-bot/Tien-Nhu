@@ -136,6 +136,42 @@ def _fetch_vnstock(ticker):
 
         inc_y, bal_y, rat_y = pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
+        # [v3.2.8] Xác định com_type để truyền vào Finance API
+        try:
+            from financial_normalizer import (
+                BANK_TICKERS       as _DF_BANK,
+                SECURITIES_TICKERS as _DF_SEC,
+                INSURANCE_TICKERS  as _DF_INS,
+            )
+            _t = ticker.upper().strip()
+            _com_type = ('Bank'       if _t in _DF_BANK else
+                         'Securities' if _t in _DF_SEC  else
+                         'Insurance'  if _t in _DF_INS  else 'Regular')
+        except Exception:
+            _com_type = 'Regular'
+
+        def _call_finance_api(fn, base_kwargs: dict):
+            """
+            Gọi Finance API method với graceful fallback:
+            (format+drop_empty+com_type) → (format+drop_empty) → (format) → (base only).
+            """
+            extra_tries = [
+                dict(**base_kwargs, format='wide', drop_empty=True, com_type=_com_type),
+                dict(**base_kwargs, format='wide', drop_empty=True),
+                dict(**base_kwargs, format='wide'),
+                base_kwargs,
+            ]
+            for kwargs in extra_tries:
+                try:
+                    df = fn(**kwargs)
+                    if df is not None and not df.empty:
+                        return df
+                except TypeError:
+                    continue
+                except Exception:
+                    break
+            return None
+
         for source in ['VCI', 'KBS', 'DNSE']:
             try:
                 f = Finance(symbol=ticker, source=source)
@@ -143,7 +179,8 @@ def _fetch_vnstock(ticker):
                 # ── Tầng 1: Annual (nhẹ nhất, 1 request/bảng) ──
                 if inc_y.empty:
                     try:
-                        df = f.income_statement(period='year', lang='vi')
+                        df = _call_finance_api(f.income_statement,
+                                               dict(period='year', lang='vi'))
                         if df is not None and not df.empty:
                             inc_y = _drop_current_year_cols(df)
                     except Exception:
@@ -151,7 +188,8 @@ def _fetch_vnstock(ticker):
 
                 if bal_y.empty:
                     try:
-                        df = f.balance_sheet(period='year', lang='vi')
+                        df = _call_finance_api(f.balance_sheet,
+                                               dict(period='year', lang='vi'))
                         if df is not None and not df.empty:
                             bal_y = _drop_current_year_cols(df)
                     except Exception:
@@ -159,7 +197,8 @@ def _fetch_vnstock(ticker):
 
                 if rat_y.empty:
                     try:
-                        df = f.ratio(period='year', lang='vi')
+                        df = _call_finance_api(f.ratio,
+                                               dict(period='year', lang='vi'))
                         if df is not None and not df.empty:
                             rat_y = _drop_current_year_cols(df)
                     except Exception:
@@ -242,11 +281,12 @@ def _fetch_vnstock(ticker):
                     f = Finance(symbol=ticker, source=source)
                     if missing_inc:
                         try:
-                            df_q = f.income_statement(period='quarter', lang='vi')
+                            # [v3.2.8] dùng _call_finance_api để thử format='wide' trước
+                            df_q = _call_finance_api(f.income_statement,
+                                                     dict(period='quarter', lang='vi'))
                             if df_q is not None and not df_q.empty:
                                 df_agg = _agg_quarterly_to_annual(df_q, missing_inc, is_flow=True)
                                 if not df_agg.empty:
-                                    # [FIX] _agg trả cột là int năm (2025), không phải string
                                     new_cols = [c for c in df_agg.columns
                                                 if str(c).strip().isdigit() or
                                                 (isinstance(c, int) and 2000 <= c <= 2099)]
@@ -259,11 +299,11 @@ def _fetch_vnstock(ticker):
                             pass
                     if missing_bal:
                         try:
-                            df_q = f.balance_sheet(period='quarter', lang='vi')
+                            df_q = _call_finance_api(f.balance_sheet,
+                                                     dict(period='quarter', lang='vi'))
                             if df_q is not None and not df_q.empty:
                                 df_agg = _agg_quarterly_to_annual(df_q, missing_bal, is_flow=False)
                                 if not df_agg.empty:
-                                    # [FIX] _agg trả cột là int năm (2025), không phải string
                                     new_cols = [c for c in df_agg.columns
                                                 if str(c).strip().isdigit() or
                                                 (isinstance(c, int) and 2000 <= c <= 2099)]
