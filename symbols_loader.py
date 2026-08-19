@@ -1,50 +1,83 @@
-import streamlit as st
+"""
+symbols_loader.py
+-----------------
+Load danh sách mã cổ phiếu — dùng vnstock v3.1.0 (explorer) thay vnstock.api
+"""
+
 import pandas as pd
-import os
 
-LISTING_CACHE_TTL = 12 * 60 * 60  # 12 tiếng
+from vn_symbols_data import VN_SYMBOLS
 
-@st.cache_data(ttl=LISTING_CACHE_TTL)
-def load_all_symbols():
-    try:
-        from supabase import create_client
-        url = os.environ.get("SUPABASE_URL") or st.secrets.get("SUPABASE_URL")
-        key = os.environ.get("SUPABASE_KEY") or st.secrets.get("SUPABASE_KEY")
-        if not url or not key:
-            raise ValueError("Thiếu SUPABASE_URL hoặc SUPABASE_KEY")
-        
-        supabase = create_client(url, key)
-        res = supabase.table('symbols').select('symbol,organ_name,exchange').execute()
-        df = pd.DataFrame(res.data)
-        
-        if df.empty:
-            raise ValueError("Supabase trả về rỗng")
-        
-        df['symbol'] = df['symbol'].astype(str).str.strip().str.upper()
-        df['organ_name'] = df['organ_name'].fillna('').astype(str).str.strip()
-        df['exchange'] = df['exchange'].fillna('KHÁC').astype(str).str.strip()
-        df = df.drop_duplicates('symbol').sort_values(['exchange','symbol']).reset_index(drop=True)
-        
-        print(f"[SYMBOLS] ✅ Loaded {len(df)} symbols from Supabase")
-        return df
-
-    except Exception as e:
-        print(f"[SYMBOLS] ❌ {e}")
-        st.warning("Không tải được danh sách mã. Bạn vẫn có thể gõ tay mã cổ phiếu.")
-        return pd.DataFrame(columns=['symbol', 'exchange', 'organ_name'])
+# Nếu nguồn live trả về ít hơn ngưỡng này thì coi như bị chặn (403) / lỗi và
+# dùng danh sách tĩnh đầy đủ (~1398 mã) thay vì rơi về vài chục mã.
+MIN_LIVE_SYMBOLS = 500
 
 
-def build_display_options(df_symbols: pd.DataFrame):
-    if df_symbols.empty:
+def _static_symbols_df() -> pd.DataFrame:
+    """
+    Danh sách TĨNH ~1398 mã HOSE/HNX/UPCOM (embed sẵn trong vn_symbols_data.py).
+    Dùng làm fallback khi API live bị 403/timeout trên Streamlit Cloud, để
+    dropdown luôn đủ mã thay vì chỉ còn ~35 mã.
+    """
+    return pd.DataFrame(VN_SYMBOLS, columns=["symbol", "organ_name", "exchange"])
+
+
+def load_all_symbols() -> pd.DataFrame:
+    """
+    Trả về DataFrame(symbol, organ_name, exchange).
+
+    Thử VCI rồi TCBS (vnstock explorer). Chỉ chấp nhận kết quả live khi có
+    >= MIN_LIVE_SYMBOLS mã; nếu ít hơn (dấu hiệu 403/bị chặn — chỉ trả vài
+    chục mã) hoặc lỗi, dùng danh sách tĩnh đầy đủ ~1398 mã.
+    """
+    for provider in ("vci", "tcbs"):
+        try:
+            if provider == "vci":
+                from vnstock.explorer.vci.listing import Listing
+            else:
+                from vnstock.explorer.tcbs.listing import Listing
+            lst = Listing()
+            df = lst.all_symbols()
+            if df is not None and not df.empty and len(df) >= MIN_LIVE_SYMBOLS:
+                return df
+        except Exception:
+            continue
+
+    # Tất cả nguồn live lỗi hoặc trả quá ít mã -> danh sách tĩnh đầy đủ.
+    return _static_symbols_df()
+
+
+def build_display_options(df: pd.DataFrame):
+    """
+    Trả về (display_list, display_to_symbol).
+    display_list: ["ACB — Ngân hàng TMCP Á Châu (HOSE)", ...]
+    display_to_symbol: {"ACB — ...": "ACB"}
+    """
+    if df is None or df.empty:
         return [], {}
+
     display_list = []
     display_to_symbol = {}
-    for _, row in df_symbols.iterrows():
-        name = row['organ_name']
-        if name and name not in ('', 'nan', 'None'):
-            label = f"{row['symbol']} — {name} ({row['exchange']})"
+
+    # Chuẩn hoá tên cột
+    sym_col  = next((c for c in df.columns if c.lower() in ["symbol", "ticker"]), None)
+    name_col = next((c for c in df.columns if "name" in c.lower() or "organ" in c.lower()), None)
+    exch_col = next((c for c in df.columns if "exchange" in c.lower() or "comgroup" in c.lower()), None)
+
+    if sym_col is None:
+        return [], {}
+
+    for _, row in df.iterrows():
+        sym  = str(row[sym_col]).strip().upper()
+        name = str(row[name_col]).strip() if name_col else ""
+        exch = str(row[exch_col]).strip() if exch_col else ""
+
+        if exch and exch.upper() not in ("NAN", "NONE", ""):
+            label = f"{sym} — {name} ({exch})" if name else f"{sym} ({exch})"
         else:
-            label = f"{row['symbol']} ({row['exchange']})"
+            label = f"{sym} — {name}" if name else sym
+
         display_list.append(label)
-        display_to_symbol[label] = row['symbol']
+        display_to_symbol[label] = sym
+
     return display_list, display_to_symbol
