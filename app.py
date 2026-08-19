@@ -6,7 +6,7 @@ from bs4 import BeautifulSoup
 import streamlit as st
 
 from styles import apply_premium_fintech_theme
-from pipeline_helpers import execute_equity_research_pipeline
+from equity_pipeline import execute_equity_research_pipeline
 from symbols_loader import load_all_symbols, build_display_options
 from ui_components import (
     render_kpi_cards, render_tab_kqkd, render_tab_valuation,
