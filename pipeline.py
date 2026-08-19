@@ -50,26 +50,6 @@ SOURCE_FALLBACK_ORDER = ['DNSE', 'KBS', 'VCI']
 DEFAULT_YEAR_LIMIT = 5
 
 
-# ════════════════════════════════════════════════════════════════════════
-# [v3.2.8] com_type helper — truyền vào Finance API để bóc tách đúng
-# loại báo cáo tài chính theo ngành (Bank/Securities/Insurance/Regular).
-# Tránh trường hợp vnstock tự detect sai khi tên công ty không rõ ràng.
-# ════════════════════════════════════════════════════════════════════════
-from financial_normalizer import (
-    BANK_TICKERS       as _BANK_TICKERS_SET,
-    SECURITIES_TICKERS as _SEC_TICKERS_SET,
-    INSURANCE_TICKERS  as _INS_TICKERS_SET,
-)
-
-def _get_com_type(ticker: str) -> str:
-    """Trả về com_type chuẩn vnstock v3.2.8 cho ticker."""
-    t = (ticker or '').upper().strip()
-    if t in _BANK_TICKERS_SET:      return 'Bank'
-    if t in _SEC_TICKERS_SET:       return 'Securities'
-    if t in _INS_TICKERS_SET:       return 'Insurance'
-    return 'Regular'
-
-
 def normalize_to_billion_vnd(series):
     """
     Chuẩn hoá series về đơn vị tỷ VNĐ.
@@ -185,79 +165,23 @@ def _safe_fetch(fn, default=None):
 
 
 def _merge_financial_dataframes(dfs: list):
-    """
-    Merge nhiều DataFrame BCTC từ các nguồn khác nhau thành một DataFrame duy nhất.
-
-    [v3.2.8] Xử lý thêm:
-    - Tidy Data (Long-form): nếu df có cột 'period'/'value' (long format) thì
-      pivot về wide trước khi merge, đảm bảo backward-compatible.
-    - Bảo toàn cột item_id (Semantic ID / Taxonomy) từ df đầu tiên.
-    - Bảo toàn cột item_en (tên tiếng Anh) từ df đầu tiên.
-    """
     dfs = [d for d in dfs if d is not None and not d.empty]
     if not dfs:
         return pd.DataFrame()
-
-    def _pivot_long_to_wide(df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Nếu df ở Long-form (có cột 'period' và 'value'), pivot về wide format.
-        Wide format: rows = chỉ tiêu, cols = kỳ (2021, 2022, ..., 2025-Q4).
-        """
-        # Heuristic: long-form có cột 'value' (hoặc 'amount') và 'period' (hoặc 'year')
-        val_col    = next((c for c in df.columns if str(c).lower() in ('value', 'amount')), None)
-        period_col = next((c for c in df.columns if str(c).lower() in ('period', 'year', 'quarter')), None)
-        item_col   = next((c for c in df.columns if str(c).lower() in ('item', 'item_vn', 'name', 'metric', 'chỉ tiêu')), None)
-        id_col     = next((c for c in df.columns if str(c).lower() == 'item_id'), None)
-        en_col     = next((c for c in df.columns if str(c).lower() == 'item_en'), None)
-
-        if val_col is None or period_col is None or item_col is None:
-            return df  # Không phải long-form → giữ nguyên
-
-        # Pivot
-        index_cols = [c for c in [item_col, id_col, en_col] if c is not None]
-        try:
-            wide = df.pivot_table(
-                index=index_cols,
-                columns=period_col,
-                values=val_col,
-                aggfunc='first',
-            ).reset_index()
-            wide.columns.name = None
-            # Rename item_col về 'item' để _merge_financial_dataframes nhận ra
-            if item_col != 'item':
-                wide = wide.rename(columns={item_col: 'item'})
-            if id_col and id_col != 'item_id':
-                wide = wide.rename(columns={id_col: 'item_id'})
-            if en_col and en_col != 'item_en':
-                wide = wide.rename(columns={en_col: 'item_en'})
-        except Exception:
-            return df  # Pivot lỗi → trả về nguyên
-
-        return wide
-
-    def _year_cols(df):
-        return [c for c in df.columns if _is_year_col(c)]
-
-    def _is_year_col(c):
-        c_str = str(c).strip()
-        return c_str.replace('-', '').replace('Q', '').isdigit() and len(c_str) >= 4
-
-    # Pivot long-form nếu cần
-    dfs = [_pivot_long_to_wide(d) for d in dfs]
-    dfs = [d for d in dfs if d is not None and not d.empty]
-    if not dfs:
-        return pd.DataFrame()
-
     if len(dfs) == 1:
         return dfs[0]
+
+    def _year_cols(df):
+        return [c for c in df.columns if re_fullmatch_year(c)]
+
+    def re_fullmatch_year(c):
+        c_str = str(c).strip()
+        return c_str.replace('-', '').replace('Q', '').isdigit() and len(c_str) >= 4
 
     dfs_sorted = sorted(dfs, key=lambda d: len(_year_cols(d)), reverse=True)
     merged = dfs_sorted[0].copy()
     key_col = 'item' if 'item' in merged.columns else merged.columns[0]
     merged['_key_norm'] = merged[key_col].astype(str).str.lower().str.strip()
-
-    # Các cột metadata cần giữ lại từ df gốc (df[0]) — không cần merge thêm
-    _meta_cols = {'item', 'item_id', 'item_en'}
 
     for other in dfs_sorted[1:]:
         other_key_col = 'item' if 'item' in other.columns else other.columns[0]
@@ -275,26 +199,14 @@ def _merge_financial_dataframes(dfs: list):
 
 def _fetch_income_statement(ticker, source, period='year', limit=FETCH_LIMIT_YEAR):
     sources_to_try = [source] + [s for s in SOURCE_FALLBACK_ORDER if s != source]
-    # [v3.2.8] Xác định com_type để vnstock bóc tách đúng mẫu báo cáo
-    com_type = _get_com_type(ticker)
     dfs = []
     for src in sources_to_try:
         try:
             f = Finance(symbol=ticker, source=src, period=period)
-            df = None
-            # Thử theo thứ tự ưu tiên: (format+com_type) → (format) → (limit) → (bare)
-            for _kwargs in [
-                dict(period=period, limit=limit, format='wide', drop_empty=True, com_type=com_type),
-                dict(period=period, limit=limit, format='wide'),
-                dict(period=period, limit=limit),
-                dict(period=period),
-            ]:
-                try:
-                    df = f.income_statement(**_kwargs)
-                    if df is not None and not df.empty:
-                        break
-                except TypeError:
-                    continue
+            try:
+                df = f.income_statement(period=period, limit=limit)
+            except TypeError:
+                df = f.income_statement(period=period)
             if df is not None and not df.empty:
                 dfs.append(df)
         except Exception:
@@ -308,19 +220,10 @@ def _fetch_ratio(ticker, source, period='year', limit=FETCH_LIMIT_YEAR):
     for src in sources_to_try:
         try:
             f = Finance(symbol=ticker, source=src, period=period)
-            df = None
-            for _kwargs in [
-                dict(period=period, limit=limit, format='wide', drop_empty=True),
-                dict(period=period, limit=limit, format='wide'),
-                dict(period=period, limit=limit),
-                dict(period=period),
-            ]:
-                try:
-                    df = f.ratio(**_kwargs)
-                    if df is not None and not df.empty:
-                        break
-                except TypeError:
-                    continue
+            try:
+                df = f.ratio(period=period, limit=limit)
+            except TypeError:
+                df = f.ratio(period=period)
             if df is not None and not df.empty:
                 dfs.append(df)
         except Exception:
@@ -330,24 +233,14 @@ def _fetch_ratio(ticker, source, period='year', limit=FETCH_LIMIT_YEAR):
 
 def _fetch_cashflow(ticker, source, period='year', limit=FETCH_LIMIT_YEAR):
     sources_to_try = [source] + [s for s in SOURCE_FALLBACK_ORDER if s != source]
-    com_type = _get_com_type(ticker)
     dfs = []
     for src in sources_to_try:
         try:
             f = Finance(symbol=ticker, source=src, period=period)
-            df = None
-            for _kwargs in [
-                dict(period=period, limit=limit, format='wide', drop_empty=True, com_type=com_type),
-                dict(period=period, limit=limit, format='wide'),
-                dict(period=period, limit=limit),
-                dict(period=period),
-            ]:
-                try:
-                    df = f.cash_flow(**_kwargs)
-                    if df is not None and not df.empty:
-                        break
-                except TypeError:
-                    continue
+            try:
+                df = f.cash_flow(period=period, limit=limit)
+            except TypeError:
+                df = f.cash_flow(period=period)
             if df is not None and not df.empty:
                 dfs.append(df)
         except Exception:
@@ -357,24 +250,14 @@ def _fetch_cashflow(ticker, source, period='year', limit=FETCH_LIMIT_YEAR):
 
 def _fetch_balance_sheet(ticker, source, period='year', limit=FETCH_LIMIT_YEAR):
     sources_to_try = [source] + [s for s in SOURCE_FALLBACK_ORDER if s != source]
-    com_type = _get_com_type(ticker)
     dfs = []
     for src in sources_to_try:
         try:
             f = Finance(symbol=ticker, source=src, period=period)
-            df = None
-            for _kwargs in [
-                dict(period=period, limit=limit, format='wide', drop_empty=True, com_type=com_type),
-                dict(period=period, limit=limit, format='wide'),
-                dict(period=period, limit=limit),
-                dict(period=period),
-            ]:
-                try:
-                    df = f.balance_sheet(**_kwargs)
-                    if df is not None and not df.empty:
-                        break
-                except TypeError:
-                    continue
+            try:
+                df = f.balance_sheet(period=period, limit=limit)
+            except TypeError:
+                df = f.balance_sheet(period=period)
             if df is not None and not df.empty:
                 dfs.append(df)
         except Exception:
@@ -952,11 +835,6 @@ def execute_equity_research_pipeline(ticker):
                         break
             if label_col is None:
                 return None
-            import logging as _rsa_log
-            _rsa_log.warning(
-                f"[RSA] yr={yr} label_col={label_col!r} year_cols={year_cols} kws={keywords}\n"
-                f"  ALL labels: {df[label_col].tolist()}"
-            )
             for kw in keywords:
                 mask = df[label_col].astype(str).str.lower().str.contains(
                     kw.lower(), na=False, regex=False)
@@ -965,7 +843,6 @@ def execute_equity_research_pipeline(ticker):
                         mask &= ~df[label_col].astype(str).str.lower().str.contains(
                             ex.lower(), na=False, regex=False)
                 rows = df[mask]
-                _rsa_log.warning(f"[RSA]   kw={kw!r} → {len(rows)} match(es): {rows[label_col].tolist() if not rows.empty else '[]'} | vals={rows[year_cols].values.tolist() if not rows.empty else []}")
                 if rows.empty:
                     continue
                 # ══════════════════════════════════════════════════════════
@@ -1009,13 +886,7 @@ def execute_equity_research_pipeline(ticker):
             _filled_from_annual = {}
             if df_income is not None and not df_income.empty:
                 _yr0_str = str(_yr0)
-                # [FIX vnstock v3.2.8] annual col có thể là '2025' hoặc '2025-Q4'
-                _annual_col = next(
-                    (c for c in df_income.columns
-                     if str(c).strip() == _yr0_str
-                     or str(c).strip() == f'{_yr0_str}-Q4'),
-                    None
-                )
+                _annual_col = next((c for c in df_income.columns if str(c).strip() == _yr0_str), None)
                 if _annual_col is not None:
                     # FIX: keyword revenue phân biệt ngành — tránh match sai dòng
                     if is_bank:
@@ -1122,19 +993,10 @@ def execute_equity_research_pipeline(ticker):
 
         for _yr0b in _still_missing_0b:
             if _yr0b not in revenue_series.index or pd.isna(revenue_series.get(_yr0b)):
-                # [FIX vnstock v3.2.8] Tầng 0b cũng phải phân biệt ngành như Tầng 0
-                if is_bank:
-                    _kw_0b = ['thu nhập lãi thuần', 'net interest income',
-                               'tổng thu nhập hoạt động thuần', 'thu nhập hoạt động thuần']
-                    _ex_0b = ['chi phí', 'expense', 'dự phòng']
-                elif is_securities:
-                    _kw_0b = ['doanh thu hoạt động', 'operating revenue',
-                               'tổng doanh thu hoạt động', 'doanh thu thuần về hoạt động']
-                    _ex_0b = ['chi phí', 'expense', 'phí hoa hồng']
-                else:
-                    _kw_0b = ['doanh thu thuần', 'net revenue', 'revenue', 'tổng doanh thu']
-                    _ex_0b = ['giá vốn', 'chi phí']
-                _v = _raw_scan_annual(df_income, _yr0b, _kw_0b, exclude=_ex_0b)
+                _v = _raw_scan_annual(
+                    df_income, _yr0b,
+                    ['doanh thu thuần', 'net revenue', 'revenue', 'tổng doanh thu'],
+                    exclude=['giá vốn', 'chi phí'])
                 if _v is not None:
                     revenue_series[_yr0b] = _v
 
@@ -1216,19 +1078,11 @@ def execute_equity_research_pipeline(ticker):
             _rev_bad = [yr for yr in revenue_series.dropna().index
                         if revenue_series[yr] > _rev_median * 10]
             for _rbyr in _rev_bad:
-                # Thử lấy từ annual trước — [FIX] phân biệt ngành
-                if is_bank:
-                    _sc1_kw = ['thu nhập lãi thuần', 'net interest income',
-                                'tổng thu nhập hoạt động thuần']
-                    _sc1_ex = ['chi phí', 'expense', 'dự phòng']
-                elif is_securities:
-                    _sc1_kw = ['doanh thu hoạt động', 'operating revenue',
-                                'tổng doanh thu hoạt động']
-                    _sc1_ex = ['chi phí', 'expense']
-                else:
-                    _sc1_kw = ['doanh thu thuần', 'net revenue', 'revenue', 'tổng doanh thu']
-                    _sc1_ex = ['giá vốn', 'chi phí']
-                _rv_annual = _raw_scan_annual(df_income, _rbyr, _sc1_kw, exclude=_sc1_ex)
+                # Thử lấy từ annual trước
+                _rv_annual = _raw_scan_annual(
+                    df_income, _rbyr,
+                    ['doanh thu thuần', 'net revenue', 'revenue', 'tổng doanh thu'],
+                    exclude=['giá vốn', 'chi phí'])
                 if _rv_annual is not None and _rv_annual < _rev_median * 10:
                     revenue_series[_rbyr] = _rv_annual
                 else:
