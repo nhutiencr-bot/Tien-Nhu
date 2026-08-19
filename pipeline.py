@@ -58,26 +58,50 @@ def normalize_to_billion_vnd(series):
       - Đơn vị ĐỒNG:  median > 5e11  → chia 1e9
       - Đơn vị TRIỆU: median > 5e5   → chia 1e3
       - Đơn vị TỶ:    median <= 5e5  → giữ nguyên
+
+    FIX 1: Thêm per-value magnitude check để tránh partial-year data
+    kéo median xuống thấp gây scale sai cho năm hiện tại.
     """
     if series is None or series.empty:
         return series
     numeric = pd.to_numeric(series, errors='coerce').dropna()
     if numeric.empty:
         return series
+
+    # Dùng max thay vì median để tránh bị kéo thấp bởi partial-year data (năm hiện tại)
+    max_abs = numeric.abs().max()
     median_abs = numeric.abs().median()
-    if median_abs > 5e11:
+
+    # Ưu tiên median khi có >= 3 giá trị (ổn định hơn);
+    # fallback sang max khi chỉ có 1-2 giá trị (hay gặp khi năm hiện tại partial)
+    ref_val = median_abs if len(numeric) >= 3 else max_abs
+
+    if ref_val > 5e11:
         divisor = 1e9
-    elif median_abs > 5e5:
+    elif ref_val > 5e5:
         divisor = 1e3
     else:
         divisor = 1.0
+
     def _to_ty(val):
         try:
             if pd.isna(val):
                 return None
-            return round(float(val) / divisor, 2)
+            v = float(val)
+            # FIX 1b: Per-value magnitude override — nếu giá trị đơn lẻ
+            # rõ ràng thuộc đơn vị khác với divisor đã chọn, scale riêng.
+            # Tránh trường hợp 4 năm ở tỷ, năm 2025 ở đồng → median chọn tỷ
+            # nhưng giá trị 2025 phải chia thêm.
+            abs_v = abs(v)
+            if abs_v > 5e11:
+                return round(v / 1e9, 2)
+            elif abs_v > 5e5:
+                return round(v / 1e3, 2)
+            else:
+                return round(v / divisor, 2) if divisor != 1.0 else round(v, 2)
         except Exception:
             return None
+
     return series.map(_to_ty).dropna()
 
 
@@ -489,7 +513,7 @@ def execute_equity_research_pipeline(ticker):
             "cashflow_y": lambda: _fetch_cashflow(ticker,          source_used, period='year',    limit=FETCH_LIMIT_YEAR),
             "ratio_y":    lambda: _fetch_ratio(ticker,             source_used, period='year',    limit=FETCH_LIMIT_YEAR),
             "balance_y":  lambda: _fetch_balance_sheet(ticker,     source_used, period='year',    limit=FETCH_LIMIT_YEAR),
-            # ✅ quarterly: lấy 20 kỳ (~5 năm) để cover 2021-2025
+            # quarterly: lấy 20 kỳ (~5 năm) để cover 2021-2025
             "income_q":   lambda: _fetch_income_statement(ticker,  source_used, period='quarter', limit=20),
             "ratio_q":    lambda: _fetch_ratio(ticker,             source_used, period='quarter', limit=20),
             "balance_q":  lambda: _fetch_balance_sheet(ticker,     source_used, period='quarter', limit=40),
@@ -528,7 +552,6 @@ def execute_equity_research_pipeline(ticker):
         is_bank = ticker in ['VCB', 'BID', 'CTG', 'TCB', 'MBB', 'ACB', 'STB',
                               'VPB', 'HDB', 'SHB', 'EIB', 'LPB', 'OCB', 'TPB',
                               'VIB', 'MSB', 'SSB', 'NAB', 'ABB', 'BVB']
-        # FIX 4: thêm is_securities để Tầng 0 dùng đúng keyword revenue
         is_securities = ticker in ['SSI', 'VND', 'HCM', 'MBS', 'VCI', 'FTS',
                                     'AGR', 'SBS', 'BSI', 'VPX', 'VCK', 'TCX',
                                     'SHS', 'CTS', 'VDS', 'ORS', 'TVS']
@@ -595,20 +618,13 @@ def execute_equity_research_pipeline(ticker):
 
         # ═══════════════════════════════════════════════════════════════════
         # TẦNG 0 — Aggregate năm thiếu từ quarterly raw DataFrames
-        #
-        # FIX 2025: KHÔNG dùng build_financial_table() vì hàm đó convert index
-        # về int năm, mất thông tin quý. Thay vào đó parse trực tiếp cột của
-        # df_income_q / df_balance_q theo năm target.
         # ═══════════════════════════════════════════════════════════════════
         def _aggregate_year_from_quarters(target_year: int) -> dict:
             """
             Tổng hợp dữ liệu năm target_year từ quarterly DataFrames gốc.
-            Parse trực tiếp cột của df_income_q/df_balance_q thay vì qua
-            build_financial_table() (vốn đã flatten index về int năm).
+            Parse trực tiếp cột của df_income_q/df_balance_q.
             """
             import re as _re2
-
-            current_year = datetime.today().year
 
             def _cols_for_year(df, yr):
                 """Trả về (quarterly_cols, annual_cols) cho năm yr."""
@@ -621,32 +637,33 @@ def execute_equity_research_pipeline(ticker):
                     years_in_col = [int(y) for y in found]
                     if not all(y == yr for y in years_in_col):
                         continue
-                    # Phân biệt quarterly vs annual bằng ký hiệu Q/quý
                     if _re2.search(r'(?i)(^|[^a-zA-Z])Q[1-4]($|[^a-zA-Z0-9])|quý\s*[1-4]|[1-4]\s*/\s*\d{4}|\d{4}\s*/\s*[1-4]|\d{4}[-_]Q[1-4]|Q[1-4][-_]\d{4}', col_s):
                         q_cols.append(col)
                     else:
                         a_cols.append(col)
                 return q_cols, a_cols
 
+            # FIX 3: _latest_quarter_col thêm tie-break theo năm
             def _latest_quarter_col(q_cols):
-                """Lấy cột quý LỚN NHẤT (Q4 > Q3 > Q2 > Q1) từ danh sách quarterly cols."""
+                """
+                Lấy cột quý LỚN NHẤT, sort theo (year, quarter) để tránh
+                chọn nhầm Q4/2024 khi danh sách có cả 2024 và 2025.
+                """
                 if not q_cols:
                     return None
                 def _q_order(col):
-                    m = _re2.search(r'Q([1-4])', str(col), _re2.IGNORECASE)
-                    return int(m.group(1)) if m else 0
+                    col_s = str(col)
+                    m_yr = _re2.search(r'\b(20\d{2})\b', col_s)
+                    m_q  = _re2.search(r'Q([1-4])', col_s, _re2.IGNORECASE)
+                    yr = int(m_yr.group(1)) if m_yr else 0
+                    q  = int(m_q.group(1))  if m_q  else 0
+                    return (yr, q)  # sort by (year, quarter) — FIX 3
                 return max(q_cols, key=_q_order)
 
             def _pick_best_row(matched_df, label_col):
                 """
-                FIX (root cause cộng sai doanh thu năm):
-                Khi nhiều dòng cùng match keyword (vd: "Doanh thu thuần" là dòng
-                tổng, nhưng "Doanh thu thuần hoạt động tài chính", "Trong đó:
-                Doanh thu thuần xuất khẩu"... cũng match), ta không được lấy dòng
-                ĐẦU TIÊN theo thứ tự xuất hiện trong DataFrame một cách mù quáng
-                — thứ tự này không đảm bảo là dòng tổng.
-                Heuristic: dòng tổng luôn có label NGẮN NHẤT trong các dòng match
-                (các dòng con luôn có thêm mô tả/hậu tố dài hơn).
+                Chọn dòng có label NGẮN NHẤT trong các dòng match —
+                dòng tổng/cha luôn có tên gọn, dòng con có hậu tố dài hơn.
                 """
                 if matched_df.empty:
                     return matched_df
@@ -654,14 +671,8 @@ def execute_equity_research_pipeline(ticker):
                 return matched_df.loc[[best_idx]]
 
             def _extract_row_values(df, cols, keywords, exclude=None):
-                """
-                Tìm dòng theo keywords trong df, lấy giá trị các cột cols.
-                Trả về list float (bỏ NaN).
-                """
                 if df is None or df.empty or not cols:
                     return []
-
-                # Tìm cột label (tên chỉ tiêu)
                 label_col = None
                 for c in df.columns:
                     if str(c).lower() in ('item', 'chỉ tiêu', 'indicator',
@@ -687,10 +698,6 @@ def execute_equity_research_pipeline(ticker):
                     matched = df[mask]
                     if matched.empty:
                         continue
-                    # FIX 1 (đã có sẵn): chỉ lấy 1 dòng để tránh cộng nhầm nhiều dòng.
-                    # NÂNG CẤP: thay vì luôn lấy dòng đầu tiên theo thứ tự xuất hiện
-                    # (không đảm bảo là dòng tổng), chọn dòng có label ngắn nhất —
-                    # đại diện cho dòng tổng/cha, không phải dòng con chi tiết.
                     matched = _pick_best_row(matched, label_col)
                     for col in cols:
                         if col not in matched.columns:
@@ -703,33 +710,28 @@ def execute_equity_research_pipeline(ticker):
                             except Exception:
                                 pass
                     if vals:
-                        break  # keyword đầu tiên match là đủ
+                        break
                 return vals
 
             inc_q_cols, inc_a_cols = _cols_for_year(df_income_q,  target_year)
             bs_q_cols,  bs_a_cols  = _cols_for_year(df_balance_q, target_year)
-            inc_cols = inc_q_cols  # quarterly cols only
+            inc_cols = inc_q_cols
             bs_cols  = bs_q_cols
             _inc_latest = _latest_quarter_col(inc_q_cols)
             _bs_latest  = _latest_quarter_col(bs_q_cols)
-
 
             if not inc_cols and not bs_cols:
                 return {}
 
             out = {}
 
-            # ── REVENUE: cộng tất cả quý ──
-            # FIX 2: keyword khác nhau theo ngành để tránh match sai
             if is_bank:
-                # Ngân hàng: doanh thu = Thu nhập lãi thuần (NII), không phải doanh thu thuần
                 _rev_kw_q = ['thu nhập lãi thuần', 'net interest income',
                              'tổng thu nhập hoạt động thuần', 'thu nhập hoạt động thuần',
                              'tong thu nhap lai thuan', 'lai thuan tu hoat dong kinh doanh']
                 _rev_ex_q = ['chi phí', 'expense', 'trước dự phòng', 'before provision',
                              'dự phòng', 'provision']
             elif is_securities:
-                # Chứng khoán: doanh thu hoạt động
                 _rev_kw_q = ['doanh thu hoạt động', 'operating revenue',
                              'tổng doanh thu hoạt động',
                              'doanh thu thuần về hoạt động kinh doanh']
@@ -740,9 +742,7 @@ def execute_equity_research_pipeline(ticker):
                 _rev_ex_q = ['giá vốn', 'chi phí', 'cost']
 
             # vnstock quarterly income = LŨY KẾ (cumulative YTD)
-            # → lấy cột quý MỚI NHẤT (= lũy kế cao nhất) thay vì sum tất cả
-            # inc_cols đã được sắp theo thứ tự cột của df → dùng cột cuối cùng
-            # Dùng cột quý MỚI NHẤT (Q4 > Q3 > Q2 > Q1) = lũy kế YTD cao nhất
+            # → lấy cột quý MỚI NHẤT = lũy kế cao nhất
             if _inc_latest:
                 rev_vals_last = _extract_row_values(
                     df_income_q, [_inc_latest],
@@ -753,7 +753,6 @@ def execute_equity_research_pipeline(ticker):
                         out['revenue'] = round(float(rev_norm.iloc[-1]), 2)
                         out['_revenue_q'] = len(inc_cols)
 
-            # ── NET PROFIT: lấy cột quý mới nhất (lũy kế YTD) ──
             if _inc_latest:
                 np_vals_last = _extract_row_values(
                     df_income_q, [_inc_latest],
@@ -768,7 +767,6 @@ def execute_equity_research_pipeline(ticker):
                         out['net_profit'] = round(float(np_norm.iloc[-1]), 2)
                         out['_net_profit_q'] = len(inc_cols)
 
-            # ── EQUITY: lấy giá trị quý mới nhất (stock variable) ──
             eq_vals = _extract_row_values(
                 df_balance_q, bs_cols,
                 keywords=['vốn chủ sở hữu', 'total equity', 'equity',
@@ -779,7 +777,6 @@ def execute_equity_research_pipeline(ticker):
                 if eq_norm is not None and not eq_norm.empty:
                     out['equity'] = round(float(eq_norm.iloc[-1]), 2)
 
-            # ── TOTAL ASSETS: lấy giá trị quý mới nhất ──
             ta_vals = _extract_row_values(
                 df_balance_q, bs_cols,
                 keywords=['tổng cộng tài sản', 'tổng tài sản', 'total assets'])
@@ -800,7 +797,6 @@ def execute_equity_research_pipeline(ticker):
                 or yr not in equity_series.dropna().index
                 or yr not in total_assets_series.dropna().index)
         )
-        # Chỉ thêm năm hiện tại nếu income_q CÓ dữ liệu năm đó
         _current_yr_q0 = datetime.today().year
         if _current_yr_q0 in allowed_years:
             if df_income_q is not None and not df_income_q.empty:
@@ -810,11 +806,11 @@ def execute_equity_research_pipeline(ticker):
                 _inc_q_cols_check = []
             if _inc_q_cols_check:
                 _years_q0_check = sorted(set(_years_q0_check) | {_current_yr_q0})
+
         def _raw_scan_annual(df, yr, keywords, exclude=None):
             if df is None or df.empty:
                 return None
             import re as _re3
-            # Chỉ lấy cột đúng năm yr, KHÔNG lấy cột chứa năm khác
             year_cols = []
             for c in df.columns:
                 found_yrs = [int(y) for y in _re3.findall(r'\b((?:19|20)\d{2})\b', str(c))]
@@ -822,7 +818,6 @@ def execute_equity_research_pipeline(ticker):
                     year_cols.append(c)
             if not year_cols:
                 return None
-            # Tìm label_col (cột tên chỉ tiêu)
             label_col = None
             for _c in df.columns:
                 if str(_c).lower() in ('item', 'chỉ tiêu', 'indicator', 'name', 'metric', 'description'):
@@ -845,23 +840,6 @@ def execute_equity_research_pipeline(ticker):
                 rows = df[mask]
                 if rows.empty:
                     continue
-                # ══════════════════════════════════════════════════════════
-                # FIX (ROOT CAUSE — cộng sai doanh thu năm cho tất cả các mã):
-                # TRƯỚC ĐÂY: lặp qua TẤT CẢ các dòng match (rows[yc].values) và
-                # trả về giá trị KHÔNG-NaN ĐẦU TIÊN gặp được theo thứ tự xuất
-                # hiện gốc trong DataFrame. Nếu có nhiều dòng cùng chứa keyword
-                # (vd: "Doanh thu thuần" là dòng tổng, nhưng "Doanh thu thuần
-                # hoạt động tài chính", "Trong đó: Doanh thu thuần xuất khẩu"...
-                # cũng match), dòng ĐẦU TIÊN không đảm bảo là dòng tổng đúng —
-                # thứ tự dòng khác nhau tuỳ mã/tuỳ nguồn dữ liệu. Đây chính là
-                # lý do doanh thu bị sai theo cả 2 chiều (thiếu hoặc thừa) tuỳ
-                # mã cổ phiếu, trong khi LNST luôn đúng (keyword LNST đặc thù,
-                # hiếm khi đụng hàng dòng con khác).
-                #
-                # SỬA: chọn dòng có LABEL NGẮN NHẤT trong các dòng match được —
-                # dòng tổng/cha luôn có tên gọn ("Doanh thu thuần"), còn các
-                # dòng con/chi tiết luôn có hậu tố hoặc mô tả dài hơn.
-                # ══════════════════════════════════════════════════════════
                 best_idx = rows[label_col].astype(str).str.len().idxmin()
                 best_row = rows.loc[[best_idx]]
                 for yc in year_cols:
@@ -881,14 +859,18 @@ def execute_equity_research_pipeline(ticker):
         _dbg2.warning(f"[DEBUG T0] revenue_series index={list(revenue_series.dropna().index)} values={list(revenue_series.dropna().values.round(0))}")
         _dbg2.warning(f"[DEBUG T0] _years_q0_check={_years_q0_check}")
         _dbg2.warning(f"[DEBUG df_income cols]={list(df_income.columns) if df_income is not None and not df_income.empty else 'EMPTY'}")
+
         for _yr0 in _years_q0_check:
-            # Ưu tiên lấy từ df_income annual (cứng) trước — tránh lỗi cộng quý
+            # FIX 2: Năm hiện tại KHÔNG tin tưởng annual API vì dữ liệu chưa đủ năm.
+            # Bỏ qua annual, fallback thẳng xuống quarterly để lấy YTD chính xác.
+            _is_current_year = (_yr0 == datetime.today().year)
+
             _filled_from_annual = {}
-            if df_income is not None and not df_income.empty:
+            if df_income is not None and not df_income.empty and not _is_current_year:
+                # Chỉ dùng annual cho các năm đã kết thúc (không phải năm hiện tại)
                 _yr0_str = str(_yr0)
                 _annual_col = next((c for c in df_income.columns if str(c).strip() == _yr0_str), None)
                 if _annual_col is not None:
-                    # FIX: keyword revenue phân biệt ngành — tránh match sai dòng
                     if is_bank:
                         _rev_kw_annual = ['thu nhập lãi thuần', 'net interest income',
                                           'tổng thu nhập hoạt động thuần',
@@ -917,7 +899,7 @@ def execute_equity_research_pipeline(ticker):
                     if _np_v is not None:
                         _filled_from_annual['net_profit'] = _np_v
 
-            # Nếu annual đã có đủ revenue + net_profit → dùng luôn, bỏ qua quarterly
+            # Nếu annual đã có đủ revenue + net_profit (chỉ cho năm đã kết thúc)
             if 'revenue' in _filled_from_annual or 'net_profit' in _filled_from_annual:
                 for _field, _series in [
                     ('revenue',    revenue_series),
@@ -938,7 +920,7 @@ def execute_equity_research_pipeline(ticker):
                             if _yr0 not in _series.index or pd.isna(_series.get(_yr0)):
                                 _series[_yr0] = _agg[_field]
             else:
-                # Không có annual → fallback quarterly như cũ
+                # Năm hiện tại hoặc không có annual → fallback quarterly
                 _agg = _aggregate_year_from_quarters(_yr0)
                 if not _agg:
                     continue
@@ -952,7 +934,6 @@ def execute_equity_research_pipeline(ticker):
                     if _field in _agg and _agg[_field] is not None:
                         if _yr0 not in _series.index or pd.isna(_series.get(_yr0)):
                             _series[_yr0] = _agg[_field]
-
 
         # ── Tầng 0c: Balance sheet năm hiện tại từ annual nếu balance_q không có ──
         _current_yr = datetime.today().year
@@ -1030,7 +1011,7 @@ def execute_equity_research_pipeline(ticker):
         total_assets_series = total_assets_series.sort_index()
 
         # ─────────────────────────────────────────────────────────────────
-        # Helper dùng cho sanity checks bên dưới (phải define trước khi dùng)
+        # Helper dùng cho sanity checks bên dưới
         # ─────────────────────────────────────────────────────────────────
         def _extract_row_values_eq(df, cols, keywords, exclude=None):
             """Extract giá trị từ df quarterly cho sanity check equity/assets."""
@@ -1069,29 +1050,54 @@ def execute_equity_research_pipeline(ticker):
             return vals
 
         # ─────────────────────────────────────────────────────────────────
-        # SANITY CHECK 1: Revenue bất thường (outlier so với median các năm khác)
-        # Nguyên nhân: income_q chỉ có Q3+Q4 → cộng 2 quý nhưng đơn vị sai
-        # → Xoá năm đó để trigger refetch từ annual/CafeF
+        # SANITY CHECK 1: Revenue bất thường — check CẢ 2 CHIỀU (cao & thấp)
+        #
+        # FIX 1: Thêm lower bound check cho năm hiện tại.
+        # Nếu revenue[current_year] < 20% median → có thể là partial annual
+        # từ API (chỉ Q1 hoặc Q2) → xoá để trigger refetch từ quarterly/CafeF.
         # ─────────────────────────────────────────────────────────────────
         if len(revenue_series.dropna()) >= 3:
             _rev_median = revenue_series.dropna().median()
-            _rev_bad = [yr for yr in revenue_series.dropna().index
-                        if revenue_series[yr] > _rev_median * 10]
+
+            # Upper bound: outlier cao bất thường (>10x median)
+            _rev_bad_high = [yr for yr in revenue_series.dropna().index
+                             if revenue_series[yr] > _rev_median * 10]
+
+            # FIX 1: Lower bound: năm hiện tại quá thấp so với median (<20%)
+            # → nhiều khả năng là partial-year data từ annual API
+            _current_yr_sanity = datetime.today().year
+            _rev_bad_low = [
+                yr for yr in revenue_series.dropna().index
+                if yr == _current_yr_sanity
+                and revenue_series[yr] < _rev_median * 0.2
+                and len(revenue_series.dropna()) >= 3
+            ]
+
+            _rev_bad = list(set(_rev_bad_high + _rev_bad_low))
+
             for _rbyr in _rev_bad:
-                # Thử lấy từ annual trước
-                _rv_annual = _raw_scan_annual(
-                    df_income, _rbyr,
-                    ['doanh thu thuần', 'net revenue', 'revenue', 'tổng doanh thu'],
-                    exclude=['giá vốn', 'chi phí'])
-                if _rv_annual is not None and _rv_annual < _rev_median * 10:
-                    revenue_series[_rbyr] = _rv_annual
+                # Ưu tiên lấy từ quarterly (năm hiện tại) hoặc annual (năm cũ)
+                if _rbyr == _current_yr_sanity:
+                    # Năm hiện tại: lấy từ quarterly YTD
+                    _agg_fix = _aggregate_year_from_quarters(_rbyr)
+                    _rv_fix = _agg_fix.get('revenue')
+                    if _rv_fix is not None and _rv_fix > _rev_median * 0.05:
+                        revenue_series[_rbyr] = _rv_fix
+                    else:
+                        revenue_series[_rbyr] = np.nan
                 else:
-                    revenue_series[_rbyr] = np.nan
+                    # Năm cũ: thử lấy từ annual
+                    _rv_annual = _raw_scan_annual(
+                        df_income, _rbyr,
+                        ['doanh thu thuần', 'net revenue', 'revenue', 'tổng doanh thu'],
+                        exclude=['giá vốn', 'chi phí'])
+                    if _rv_annual is not None and _rv_annual < _rev_median * 10:
+                        revenue_series[_rbyr] = _rv_annual
+                    else:
+                        revenue_series[_rbyr] = np.nan
 
         # ─────────────────────────────────────────────────────────────────
-        # SANITY CHECK 2: equity không thể ≥ total_assets (VCSH < Tổng TS)
-        # Nếu equity[yr] ≥ total_assets[yr] * 0.99 → giá trị bị match sai
-        # → Tính lại bằng total_assets - total_liabilities, hoặc xoá để refetch
+        # SANITY CHECK 2: equity không thể ≥ total_assets
         # ─────────────────────────────────────────────────────────────────
         _common_eq_ta = equity_series.index.intersection(total_assets_series.index)
         _bad_eq_years = [
@@ -1105,7 +1111,6 @@ def execute_equity_research_pipeline(ticker):
                          'nợ phải trả', 'liabilities']
             for _byr in _bad_eq_years:
                 _fixed = False
-                # Thử tính lại từ quarterly balance: total_assets - total_liabilities
                 if df_balance_q is not None and not df_balance_q.empty:
                     import re as _re_eq
                     _bq_cols = [c for c in df_balance_q.columns
@@ -1126,7 +1131,6 @@ def execute_equity_research_pipeline(ticker):
                                 if 0 < _eq_calc < float(_ta_norm.iloc[-1]):
                                     equity_series[_byr] = round(_eq_calc, 2)
                                     _fixed = True
-                # Fallback từ df_balance annual
                 if not _fixed:
                     _ta_v = _raw_scan_annual(df_balance, _byr,
                                              ['tổng cộng tài sản', 'tổng tài sản', 'total assets'])
@@ -1138,7 +1142,6 @@ def execute_equity_research_pipeline(ticker):
                             equity_series[_byr] = round(_eq_calc, 2)
                             _fixed = True
                 if not _fixed:
-                    # Xoá giá trị sai để trigger refetch từ CafeF/DNSE
                     equity_series[_byr] = np.nan
 
         equity_series = equity_series.sort_index()
@@ -1153,12 +1156,10 @@ def execute_equity_research_pipeline(ticker):
                 or yr not in equity_series.dropna().index
                 or yr not in total_assets_series.dropna().index)
         )
-        # Luôn retry năm hiện tại qua CafeF/DNSE
         _current_yr_miss = datetime.today().year
         if _current_yr_miss in allowed_years and _current_yr_miss not in _missing_any:
             _missing_any = sorted(set(_missing_any) | {_current_yr_miss})
 
-        # Khởi tạo _cf_cf ở ngoài if để CFO fallback block luôn có thể dùng
         _cf_cf = pd.DataFrame()
 
         def _merge_series(base: pd.Series, patch: pd.Series) -> pd.Series:
@@ -1205,7 +1206,6 @@ def execute_equity_research_pipeline(ticker):
             try:
                 _cafef_full = fetch_cafef_yearly_full(ticker, years=list(allowed_years))
 
-                # Expose lỗi nội bộ từ cafef_fallback (nếu có)
                 _cafef_internal_err = _cafef_full.pop('__error__', None)
                 _cafef_trace        = _cafef_full.pop('__trace__', None)
 
@@ -1254,7 +1254,6 @@ def execute_equity_research_pipeline(ticker):
         if _missing_after_cafef:
             try:
                 import requests as _req_dnse
-                # Probe DNSE API trực tiếp để lấy raw response cho debug
                 _dnse_probe_url = (
                     f"https://api.dnse.com.vn/analysis-api/v1/analysis/financial-report"
                     f"?symbol={ticker}&type=IS&period=YEARLY"
@@ -1290,11 +1289,8 @@ def execute_equity_research_pipeline(ticker):
                 _dnse_debug["error"] = f"{type(_dnse_exc).__name__}: {_dnse_exc}"
                 _dnse_debug["trace"] = _tb_dn.format_exc(limit=5)
 
-        # (debug expander đã được gỡ bỏ)
-
         # ─────────────────────────────────────────────────────────────────
-        # TẦNG 2b — Yahoo Finance fallback (equity & total_assets chính yếu)
-        # Chạy khi DNSE vẫn thiếu ít nhất 1 năm cho equity hoặc total_assets
+        # TẦNG 2b — Yahoo Finance fallback
         # ─────────────────────────────────────────────────────────────────
         _missing_after_dnse = sorted(
             yr for yr in allowed_years
@@ -1308,15 +1304,11 @@ def execute_equity_research_pipeline(ticker):
         if _missing_after_dnse:
             try:
                 _yahoo_data = _fetch_yahoo_financials(ticker, set(_missing_after_dnse))
-                # Yahoo data đã được convert sang tỷ VNĐ trong _fetch_yahoo_financials
-                # KHÔNG gọi normalize_to_billion_vnd lần nữa
                 _rev_yh  = _filter_years(_yahoo_data.get("revenue",      pd.Series(dtype=float)))
                 _np_yh   = _filter_years(_yahoo_data.get("net_profit",   pd.Series(dtype=float)))
                 _eq_yh   = _filter_years(_yahoo_data.get("equity",       pd.Series(dtype=float)))
                 _ta_yh   = _filter_years(_yahoo_data.get("total_assets", pd.Series(dtype=float)))
 
-                # Yahoo báo đơn vị USD gốc đã convert trong hàm → KHÔNG normalize lại
-                # Nhưng cần kiểm tra đơn vị bằng sanity check: equity ngân hàng VN thường > 1,000 tỷ
                 _yahoo_debug = {
                     "revenue":      dict(_rev_yh)  if not _rev_yh.empty  else "⚠️ rỗng",
                     "net_profit":   dict(_np_yh)   if not _np_yh.empty   else "⚠️ rỗng",
@@ -1332,8 +1324,6 @@ def execute_equity_research_pipeline(ticker):
                 import traceback as _tb_yh
                 _yahoo_debug["error"] = f"{type(_yh_exc).__name__}: {_yh_exc}"
                 _yahoo_debug["trace"] = _tb_yh.format_exc(limit=5)
-
-
 
         # ─────────────────────────────────────────────────────────────────
         # TẦNG 3 — Website scraping
@@ -1453,18 +1443,12 @@ def execute_equity_research_pipeline(ticker):
         if _cross_unit_recheck(net_profit_series, revenue_series, equity_series):
             net_profit_series = net_profit_series / 1000
 
-        # FIX 3: threshold phải rất chặt (>20, không phải >2)
-        # Lý do: ROS = 65% → LNST/Revenue = 0.65 < 2 không trigger bình thường,
-        # nhưng nếu revenue bị sai (chỉ lấy 1 quý = 1/4 thực) thì ratio vọt lên cao.
-        # Chỉ nhân khi ratio > 20 — rõ ràng lỗi đơn vị, không phải ROS cao.
-        # Không áp dụng cho bank/securities vì ratio LNST/Revenue của họ không chuẩn.
         if not is_bank and not is_securities and \
                 not revenue_series.empty and not net_profit_series.empty:
             common_ry = revenue_series.index.intersection(net_profit_series.index)
             if len(common_ry) >= 2:
                 rev_med = revenue_series.loc[common_ry].abs().median()
                 np_med  = net_profit_series.loc[common_ry].abs().median()
-                # Chỉ nhân khi revenue nhỏ hơn LNST 20 lần — chắc chắn lỗi đơn vị
                 if rev_med > 0 and np_med / rev_med > 20:
                     revenue_series = revenue_series * 1000
 
@@ -1525,8 +1509,6 @@ def execute_equity_research_pipeline(ticker):
         if bvps_latest == 0.0 and issue_share > 0 and not equity_series.empty:
             bvps_latest = get_latest(equity_series, default=0.0) * 1e9 / issue_share
 
-        _normalize_pct = _normalize_pct_series
-
         roe_series = _normalize_pct_series(roe_series)
         roa_series = _normalize_pct_series(roa_series)
 
@@ -1583,7 +1565,6 @@ def execute_equity_research_pipeline(ticker):
                 if eq_med_ce > 0 and cfo_med_ce / eq_med_ce > 50:
                     cfo_series_for_multiples = cfo_series_for_multiples / 1000
 
-        # CFO OUTLIER GUARD
         if not cfo_series_for_multiples.empty and len(cfo_series_for_multiples) >= 2:
             _cfo_vals = cfo_series_for_multiples.abs()
             _cfo_median_all = _cfo_vals.median()
@@ -1758,8 +1739,8 @@ def execute_equity_research_pipeline(ticker):
             np_q   = normalize_net_profit_with_anchor(fin_q['net_profit'], eq_q, fin_q['roe'])
             eps_q  = fin_q['eps']
             bvps_q = fin_q['bvps']
-            roe_q  = _normalize_pct(fin_q['roe'])
-            roa_q  = _normalize_pct(fin_q['roa'])
+            roe_q  = _normalize_pct_series(fin_q['roe'])
+            roa_q  = _normalize_pct_series(fin_q['roa'])
             quarters = sorted(
                 set(rev_q.index) | set(np_q.index) | set(eq_q.index) | set(ta_q.index),
                 key=lambda c: (int(str(c).split('-Q')[0]), int(str(c).split('-Q')[1])))
@@ -1849,12 +1830,10 @@ def execute_equity_research_pipeline(ticker):
 
         _shares_map = {}
         if outstanding_shares_series is not None and not outstanding_shares_series.empty:
-            # outstanding_shares_series đã ở đơn vị cổ phiếu lẻ (do _build_shares_series)
             for _y, _v in (outstanding_shares_series / 1e9).items():
                 if pd.notna(_v) and _v > 0:
                     _shares_map[_y] = round(float(_v), 2)
         if issue_share > 0:
-            # issue_share từ overview → thường đơn vị lẻ, guard nếu < 1e7 → là triệu
             _iss_norm = issue_share if issue_share >= 1e7 else issue_share * 1e6
             for _y in years_available:
                 if _y not in _shares_map:
@@ -1883,7 +1862,6 @@ def execute_equity_research_pipeline(ticker):
                     _last = _grp.sort_values('time')['_val'].iloc[-1]
                     if pd.notna(_last) and _last > 0:
                         _price_eoy[int(_yr)] = float(_last)
-                # Năm hiện tại: nếu chưa có Dec → dùng giá mới nhất có sẵn
                 _cur_yr_price = datetime.today().year
                 if _cur_yr_price not in _price_eoy and _cur_yr_price in years_available:
                     _last_any = _dp.sort_values('time')['_val'].iloc[-1]
@@ -1958,9 +1936,9 @@ def execute_equity_research_pipeline(ticker):
                                  else "RỦI RO (Downtrend)",
         }
 
-        # ── 11. Tin tức ────────────────────────────────────────────────────
+        # ── Tin tức ────────────────────────────────────────────────────────
         vnstock_news = []
-        news_raw = results.get("news", pd.DataFrame())  # fix: inline thay vì qua df_news_raw
+        news_raw = results.get("news", pd.DataFrame())
         if news_raw is not None and not news_raw.empty:
             for _, row in news_raw.head(10).iterrows():
                 vnstock_news.append({
