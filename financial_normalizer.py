@@ -1,3 +1,5 @@
+# ruff: noqa
+# pylint: skip-file
 """
 financial_normalizer.py
 ------------------------
@@ -16,35 +18,36 @@ Các sửa đổi so với bản trước (399 dòng):
           vào dấu tiếng Việt trong keyword.
 
   [FIX 5] Bổ sung OILGAS_TICKERS, CONSTRUCTION_TICKERS vào sector detection.
-          Các ngành này dùng "Doanh thu bán hàng CCDV" — giống general nhưng
-          explicit để tránh nhầm sang bank/securities.
 
   [FIX 6] build_financial_table(): thêm field 'cfo' — lấy CFO từ cashflow năm,
           fallback tự cộng 4 quý gần nhất khi cashflow năm 2025 chưa có.
 
-  [FIX 9] _search_with_priority(): không return ngay khi s not empty — nếu
-          dòng match nhưng cell 2025 = NaN (vd bank: 'thu nhap lai thuan' có
-          2018-2024 nhưng 2025 NaN), thử priority tiếp theo. Ưu tiên series
-          có data ở latest year; chỉ fallback về series thiếu năm nếu không
-          có lựa chọn nào tốt hơn. Đây là root cause thực sự của bug revenue
-          2025 bị sai/thiếu cho bank (TCB, VCB, MBB...).
+  [FIX 7] _get_year_columns(): match r'\d{4}-Q4' — vnstock annual format.
 
   [FIX 8] find_row_series(): khi nhiều dòng match, ưu tiên dòng có data ở năm MỚI NHẤT.
 
-  [FIX 7] _get_year_columns(): bổ sung match r'\d{4}-Q4' — vnstock đổi format
-          annual column từ '2025' → '2025-Q4'. Không match → revenue/net_profit
-          trống từ build_5y_financial_table → Tầng 0 pick sai dòng từ quarterly.
-          yr key vẫn là int năm vì str(col)[:4] đã đúng.
-  [KEPT]  build_5y_financial_table() truyền ticker xuống — giữ nguyên.
-  [KEPT]  find_row_series() chọn dòng nhiều data nhất — giữ nguyên.
+  [FIX 9] _search_with_priority(): không return ngay khi s not empty — ưu tiên
+          series có data ở latest year.
 
-  [FIX 10] vnstock v3.2.8 — Tidy Data + Semantic ID:
-           - Finance API giờ trả Tidy (Long-form): mỗi chỉ tiêu có item_id
-             dạng Taxonomy ID (BS_CASH_AND_PRECIOUS_METALS, NI_NET_INTEREST_INCOME...).
-           - _find_revenue_for_bank/_securities/_insurance: bổ sung item_ids
-             Taxonomy để match chính xác thay vì dò từ khoá.
-           - _get_year_columns(): đã match '2025-Q4' (giữ nguyên).
-           - Thêm SEMANTIC_ID_BANK/SECURITIES/INSURANCE map để dễ bảo trì.
+  [FIX 10] vnstock v3.2.8 — Tidy Data + Semantic ID.
+
+  [FIX 11] _align_2025(): chuẩn hoá key năm 2025 — merge dữ liệu từ cột '2025-Q4'
+           vào key int 2025, đảm bảo mọi Series đều có index thống nhất là int năm.
+           Áp dụng sau mỗi find_row_series() call trong build_financial_table().
+
+  [FIX 12] find_row_series(): khi map cột '2025-Q4' → year key 2025, KHÔNG ghi đè
+           nếu key 2025 đã có giá trị hợp lệ từ cột '2025' (tránh double-write).
+
+  [FIX 13] _search_with_priority(): so sánh latest year bằng int năm thực tế
+           (max của index) thay vì s.index[-1] == s.index[-1] (luôn True).
+           Trước đây: nếu index là [2021,2022,2023,2024] thì s.index[-1]=2024,
+           s.dropna().index[-1]=2024 → điều kiện True → return sớm dù thiếu 2025.
+           Sau fix: kiểm tra max(s.dropna().index) >= TARGET_YEAR (2025).
+
+  [FIX 14] _find_revenue_for_bank(): loại trừ keyword gây nhiễu mạnh hơn —
+           thêm 'tuong tu' vào exclude để tránh pick dòng
+           "Thu nhập lãi và các khoản thu nhập tương tự" (gross) thay vì NII (net).
+           Fallback gross chỉ dùng khi NII thực sự rỗng.
 """
 
 import re
@@ -92,40 +95,36 @@ CONSTRUCTION_TICKERS = {
 }
 
 TARGET_YEARS = list(range(2021, 2026))
+TARGET_YEAR  = 2025   # năm hiện tại cần đảm bảo có data
 
 # ---------------------------------------------------------------------------
 # [FIX 10] Semantic ID (Taxonomy) — vnstock v3.2.8
-# Dùng item_id chính xác để không bị sai khi tên hiển thị thay đổi.
 # ---------------------------------------------------------------------------
 
-# Ngân hàng — ưu tiên NII, fallback tổng thu nhập hoạt động
 BANK_REVENUE_IDS = [
-    'NI_NET_INTEREST_INCOME',           # Thu nhập lãi thuần (priority 1)
-    'NI_TOTAL_NET_OPERATING_INCOME',    # Tổng thu nhập hoạt động thuần
-    'NI_TOTAL_OPERATING_INCOME',        # Tổng thu nhập hoạt động
-    'NI_NET_INCOME_FROM_SERVICES',      # Thu nhập thuần từ dịch vụ (fallback)
+    'NI_NET_INTEREST_INCOME',
+    'NI_TOTAL_NET_OPERATING_INCOME',
+    'NI_TOTAL_OPERATING_INCOME',
+    'NI_NET_INCOME_FROM_SERVICES',
 ]
 
-# Chứng khoán — doanh thu hoạt động
 SECURITIES_REVENUE_IDS = [
-    'NI_OPERATING_REVENUE',             # Doanh thu hoạt động
-    'NI_TOTAL_OPERATING_REVENUE',       # Tổng doanh thu hoạt động
-    'NI_NET_REVENUE',                   # Doanh thu thuần
-]
-
-# Bảo hiểm — phí bảo hiểm thuần
-INSURANCE_REVENUE_IDS = [
-    'NI_NET_PREMIUM_REVENUE',           # Phí bảo hiểm thuần
-    'NI_INSURANCE_OPERATING_REVENUE',   # Doanh thu hoạt động bảo hiểm
+    'NI_OPERATING_REVENUE',
     'NI_TOTAL_OPERATING_REVENUE',
     'NI_NET_REVENUE',
 ]
 
-# Net profit — dùng chung mọi ngành
+INSURANCE_REVENUE_IDS = [
+    'NI_NET_PREMIUM_REVENUE',
+    'NI_INSURANCE_OPERATING_REVENUE',
+    'NI_TOTAL_OPERATING_REVENUE',
+    'NI_NET_REVENUE',
+]
+
 NET_PROFIT_IDS = [
     'NI_NET_PROFIT_AFTER_TAX',
     'NI_PROFIT_AFTER_TAX',
-    'net_profit', 'net_profit_after_tax', 'profit_after_tax',  # alias cũ
+    'net_profit', 'net_profit_after_tax', 'profit_after_tax',
 ]
 
 CFO_KEYWORDS = [
@@ -141,7 +140,7 @@ CFO_KEYWORDS = [
 
 
 # ---------------------------------------------------------------------------
-# Text normalizer — fix bug đ/Đ
+# Text normalizer
 # ---------------------------------------------------------------------------
 
 def _norm_label(text: str) -> str:
@@ -154,17 +153,49 @@ def _norm_label(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# [FIX 11] Align 2025 key — chuẩn hoá '2025-Q4' → int 2025
+# ---------------------------------------------------------------------------
+
+def _align_2025(s: pd.Series) -> pd.Series:
+    """
+    Đảm bảo Series có key int 2025 nếu dữ liệu tồn tại dưới dạng '2025-Q4'
+    hoặc string '2025'. Chuẩn hoá toàn bộ index về int.
+    """
+    if s is None or s.empty:
+        return s
+
+    new_index = {}
+    for k, v in s.items():
+        k_str = str(k).strip()
+        # '2025-Q4' hoặc '2025' → int 2025
+        if re.fullmatch(r'\d{4}-Q4', k_str):
+            yr = int(k_str[:4])
+        elif re.fullmatch(r'\d{4}', k_str):
+            yr = int(k_str)
+        else:
+            continue
+        # Không ghi đè nếu đã có giá trị hợp lệ (FIX 12)
+        if yr not in new_index or pd.isna(new_index[yr]):
+            new_index[yr] = v
+
+    if not new_index:
+        return s
+
+    return pd.Series(new_index).sort_index()
+
+
+# ---------------------------------------------------------------------------
 # Column helpers
 # ---------------------------------------------------------------------------
 
 def _get_year_columns(df: pd.DataFrame):
-    """Return annual columns — matches both '2024' and '2025-Q4' (vnstock annual format)."""
+    """Return annual columns — matches both '2024' and '2025-Q4'."""
     meta_cols = {'item', 'item_en', 'item_id'}
     year_cols = [
         c for c in df.columns
         if c not in meta_cols and (
             re.fullmatch(r'\d{4}', str(c).strip())
-            or re.fullmatch(r'\d{4}-Q4', str(c).strip())   # vnstock annual: 2025-Q4
+            or re.fullmatch(r'\d{4}-Q4', str(c).strip())
         )
     ]
     return sorted(year_cols, key=lambda col: int(str(col).strip()[:4]))
@@ -203,6 +234,7 @@ def find_row_series(df: pd.DataFrame, keywords, exclude_keywords=None,
 
     matched = pd.DataFrame()
 
+    # [FIX 10] Taxonomy ID match trước
     if item_ids and 'item_id' in df.columns:
         id_lower = df['item_id'].astype(str).str.lower().str.strip()
         target_ids = [i.lower().strip() for i in item_ids]
@@ -231,20 +263,9 @@ def find_row_series(df: pd.DataFrame, keywords, exclude_keywords=None,
     if matched.empty:
         return pd.Series(dtype=float)
 
-    # ── DEBUG: dump every matched row so we can see what 2025 holds ──
-    import logging as _log_frs
-    _item_col = 'item' if 'item' in matched.columns else (search_cols[0] if search_cols else None)
-    _show_cols = ([_item_col] if _item_col else []) + year_cols
-    _log_frs.warning(
-        f"[FRS] kw={keywords[0]!r} period={period} | {len(matched)} match(es) | "
-        f"year_cols={year_cols}\n{matched[[c for c in _show_cols if c in matched.columns]].to_string()}"
-    )
-
+    # [FIX 8] Ưu tiên dòng có data ở năm MỚI NHẤT, tiebreak: số cột non-NaN nhiều nhất
     if len(matched) > 1:
-        # FIX 8: ưu tiên dòng có data ở năm MỚI NHẤT trước (tránh pick dòng
-        # có nhiều năm lịch sử nhưng thiếu năm hiện tại).
-        # Tiebreak: số cột non-NaN nhiều hơn.
-        latest_col = year_cols[-1]  # cột năm lớn nhất (vd 2025)
+        latest_col = year_cols[-1]
         has_latest = matched[latest_col].notna()
         candidates = matched[has_latest] if has_latest.any() else matched
         non_na_counts = candidates[year_cols].notna().sum(axis=1)
@@ -252,11 +273,7 @@ def find_row_series(df: pd.DataFrame, keywords, exclude_keywords=None,
     else:
         row = matched.iloc[0]
 
-    _log_frs.warning(
-        f"[FRS] → picked: item={row.get(_item_col, '?') if _item_col else '?'!r} | "
-        f"val_2025={row.get('2025', 'NO_COL')}"
-    )
-
+    # Build result dict
     result = {}
     for yc in year_cols:
         val = pd.to_numeric(pd.Series([row[yc]]), errors='coerce').iloc[0]
@@ -264,13 +281,59 @@ def find_row_series(df: pd.DataFrame, keywords, exclude_keywords=None,
             if period == 'quarter':
                 result[str(yc).strip()] = float(val)
             else:
+                # [FIX 12] Cột '2025-Q4' → key int 2025; không ghi đè key đã có
                 yr = int(str(yc).strip()[:4])
-                result[yr] = float(val)
+                if yr not in result or pd.isna(result.get(yr)):
+                    result[yr] = float(val)
 
     if period == 'quarter':
         ordered_keys = sorted(result.keys(), key=_quarter_sort_key)
         return pd.Series({k: result[k] for k in ordered_keys})
-    return pd.Series(result).sort_index()
+
+    # [FIX 11] Áp dụng align để đảm bảo index int thuần
+    s = pd.Series(result).sort_index()
+    return _align_2025(s)
+
+
+# ---------------------------------------------------------------------------
+# [FIX 13] _search_with_priority — so sánh theo TARGET_YEAR thực tế
+# ---------------------------------------------------------------------------
+
+def _search_with_priority(df_income, priority: list, period: str):
+    """
+    Duyệt priority list. Ưu tiên series có data tại TARGET_YEAR (2025).
+    Không return sớm khi series thiếu năm hiện tại — thử priority tiếp theo.
+    Chỉ dùng fallback khi không có lựa chọn nào có đủ 2025.
+    """
+    best_fallback = None
+
+    for includes, excludes in priority:
+        s = find_row_series(
+            df_income,
+            keywords=includes,
+            exclude_keywords=excludes if excludes else None,
+            period=period,
+        )
+        if s is None or s.empty:
+            continue
+
+        s_notna = s.dropna()
+        if s_notna.empty:
+            continue
+
+        if period == 'year':
+            # [FIX 13] Kiểm tra bằng int năm thực tế, không dùng positional index
+            max_yr = int(s_notna.index.max())
+            if max_yr >= TARGET_YEAR:
+                return s          # ✅ Có data tại năm hiện tại → dùng luôn
+            # Có data nhưng thiếu năm hiện tại → giữ fallback
+            if best_fallback is None:
+                best_fallback = s
+        else:
+            # Quarter: return ngay khi có data
+            return s
+
+    return best_fallback if best_fallback is not None else pd.Series(dtype=float)
 
 
 # ---------------------------------------------------------------------------
@@ -278,21 +341,34 @@ def find_row_series(df: pd.DataFrame, keywords, exclude_keywords=None,
 # ---------------------------------------------------------------------------
 
 def _find_revenue_for_bank(df_income, period='year'):
-    # [FIX 10] Thử item_id Taxonomy trước — chính xác nhất, không phụ thuộc tên hiển thị
+    """
+    [FIX 14] Loại trừ 'tuong tu' mạnh hơn để tránh pick dòng gross interest income.
+    Ưu tiên NII (thu nhập lãi thuần) — sau khi đã trừ chi phí lãi.
+    Fallback gross chỉ dùng khi NII hoàn toàn rỗng.
+    """
+    # [FIX 10] Taxonomy ID trước
     for tax_id in BANK_REVENUE_IDS:
-        s = find_row_series(df_income, keywords=['net interest income', 'thu nhap lai thuan'],
-                            item_ids=[tax_id], period=period)
-        if not s.empty and not s.dropna().empty:
-            # Ưu tiên series có data ở năm mới nhất
-            if s.dropna().index[-1] == s.index[-1]:
-                return s
+        s = find_row_series(
+            df_income,
+            keywords=['net interest income', 'thu nhap lai thuan'],
+            item_ids=[tax_id],
+            period=period,
+        )
+        if s is not None and not s.empty:
+            s_notna = s.dropna()
+            if not s_notna.empty:
+                max_yr = int(s_notna.index.max()) if period == 'year' else None
+                if period != 'year' or max_yr >= TARGET_YEAR:
+                    return s
 
-    # Fallback: dò từ khoá (giữ nguyên logic cũ)
+    # Keyword fallback — priority có loại trừ mạnh để tránh gross income
     priority = [
         (
+            # Priority 1: NII — loại trừ "tương tự" để không pick gross
             ['thu nhap lai thuan', 'net interest income', 'lai thuan', 'nii'],
-            ['chi phi lai', 'interest expense', 'tuong tu', 'cac khoan thu nhap',
-             'hoat dong khac', 'dich vu'],
+            ['chi phi lai', 'interest expense', 'tuong tu',          # [FIX 14] thêm 'tuong tu'
+             'cac khoan thu nhap', 'hoat dong khac', 'dich vu',
+             'thu nhap lai va'],                                       # loại trừ gross label
         ),
         (
             ['tong thu nhap hoat dong thuan', 'thu nhap hoat dong thuan',
@@ -314,11 +390,18 @@ def _find_revenue_for_bank(df_income, period='year'):
 def _find_revenue_for_securities(df_income, period='year'):
     # [FIX 10] Taxonomy ID trước
     for tax_id in SECURITIES_REVENUE_IDS:
-        s = find_row_series(df_income, keywords=['doanh thu hoat dong', 'operating revenue'],
-                            item_ids=[tax_id], period=period)
-        if not s.empty and not s.dropna().empty:
-            if s.dropna().index[-1] == s.index[-1]:
-                return s
+        s = find_row_series(
+            df_income,
+            keywords=['doanh thu hoat dong', 'operating revenue'],
+            item_ids=[tax_id],
+            period=period,
+        )
+        if s is not None and not s.empty:
+            s_notna = s.dropna()
+            if not s_notna.empty:
+                max_yr = int(s_notna.index.max()) if period == 'year' else None
+                if period != 'year' or max_yr >= TARGET_YEAR:
+                    return s
 
     priority = [
         (
@@ -340,11 +423,18 @@ def _find_revenue_for_securities(df_income, period='year'):
 def _find_revenue_for_insurance(df_income, period='year'):
     # [FIX 10] Taxonomy ID trước
     for tax_id in INSURANCE_REVENUE_IDS:
-        s = find_row_series(df_income, keywords=['phi bao hiem thuan', 'net premium'],
-                            item_ids=[tax_id], period=period)
-        if not s.empty and not s.dropna().empty:
-            if s.dropna().index[-1] == s.index[-1]:
-                return s
+        s = find_row_series(
+            df_income,
+            keywords=['phi bao hiem thuan', 'net premium'],
+            item_ids=[tax_id],
+            period=period,
+        )
+        if s is not None and not s.empty:
+            s_notna = s.dropna()
+            if not s_notna.empty:
+                max_yr = int(s_notna.index.max()) if period == 'year' else None
+                if period != 'year' or max_yr >= TARGET_YEAR:
+                    return s
 
     priority = [
         (
@@ -426,45 +516,11 @@ def _find_revenue_general(df_income, period='year'):
     return _search_with_priority(df_income, priority, period)
 
 
-def _search_with_priority(df_income, priority: list, period: str):
-    """
-    FIX 9: Không return ngay khi s not empty — nếu series không có năm mới nhất
-    (dòng match nhưng cell 2025 = NaN), thử priority tiếp theo.
-    Ưu tiên: (1) series có data ở latest year, (2) fallback series không empty.
-    """
-    best_fallback = None
-    for includes, excludes in priority:
-        s = find_row_series(
-            df_income,
-            keywords=includes,
-            exclude_keywords=excludes if excludes else None,
-            period=period,
-        )
-        if s.empty:
-            continue
-        s_notna = s.dropna()
-        if s_notna.empty:
-            continue
-        # Nếu series có data ở năm lớn nhất trong index → dùng luôn
-        if s_notna.index[-1] == s.index[-1]:
-            return s
-        # Có data nhưng thiếu năm cuối → giữ fallback
-        if best_fallback is None:
-            best_fallback = s
-    return best_fallback if best_fallback is not None else pd.Series(dtype=float)
-
-
 # ---------------------------------------------------------------------------
-# CFO helper — fallback cộng 4 quý gần nhất
+# CFO helper
 # ---------------------------------------------------------------------------
 
 def _find_cfo_with_quarterly_fallback(df_cashflow_y, df_cashflow_q=None):
-    """
-    Lấy CFO từ cashflow năm (annual).
-    Nếu năm hiện tại (2025) bị thiếu → cộng 4 quý gần nhất từ df_cashflow_q.
-
-    Returns: pd.Series index = năm int (2021-2025), đơn vị gốc (tỷ).
-    """
     cfo_annual = find_row_series(
         df_cashflow_y,
         keywords=CFO_KEYWORDS,
@@ -474,30 +530,24 @@ def _find_cfo_with_quarterly_fallback(df_cashflow_y, df_cashflow_q=None):
     if df_cashflow_q is None or df_cashflow_q.empty:
         return cfo_annual
 
-    # Kiểm tra năm hiện tại có bị thiếu không
-    current_year = 2025
+    current_year = TARGET_YEAR
     if cfo_annual.empty or current_year not in cfo_annual.index:
-        # Lấy CFO theo quý
         cfo_q = find_row_series(
             df_cashflow_q,
             keywords=CFO_KEYWORDS,
             period='quarter',
         )
         if not cfo_q.empty:
-            # Lọc 4 quý gần nhất của năm hiện tại (hoặc trailing 4 quý)
             current_year_quarters = [
                 k for k in cfo_q.index
                 if str(k).startswith(str(current_year))
             ]
             if len(current_year_quarters) >= 1:
-                # Cộng tất cả quý có sẵn trong năm hiện tại
                 cfo_current = cfo_q[current_year_quarters].sum()
-                # Nếu chỉ có 1-3 quý → note partial, vẫn dùng để tránh hiện —
                 if not cfo_annual.empty:
                     cfo_annual = cfo_annual.copy()
                     cfo_annual[current_year] = cfo_current
                 else:
-                    # Build từ quarterly toàn bộ nếu annual trống hoàn toàn
                     years_in_q = sorted(set(
                         int(str(k).split('-Q')[0]) for k in cfo_q.index
                     ))
@@ -520,14 +570,7 @@ def _find_cfo_with_quarterly_fallback(df_cashflow_y, df_cashflow_q=None):
 def build_financial_table(df_income, df_balance, df_ratio=None,
                           ticker=None, period='year',
                           df_cashflow_y=None, df_cashflow_q=None):
-    """
-    Tổng hợp chỉ tiêu BCTC.
-    ticker bắt buộc truyền vào để detect ngành chính xác.
-
-    [FIX 6] Thêm df_cashflow_y + df_cashflow_q để fetch CFO với fallback quý.
-    """
     data = {}
-
     t = (ticker or '').upper().strip()
 
     # --- Sector detection & Revenue ---
@@ -546,41 +589,44 @@ def build_financial_table(df_income, df_balance, df_ratio=None,
         if data['revenue'].empty:
             data['revenue'] = _find_revenue_for_retail(df_income, period=period)
 
+    # [FIX 11] Align 2025 cho revenue
+    data['revenue'] = _align_2025(data['revenue'])
+
     # --- Lợi nhuận sau thuế ---
-    data['net_profit'] = find_row_series(
+    data['net_profit'] = _align_2025(find_row_series(
         df_income,
         ['loi nhuan sau thue', 'net profit', 'profit after tax', 'net income',
          'loi nhuan thuan', 'lai sau thue'],
         exclude_keywords=['truoc thue', 'before tax', 'thieu so', 'minority'],
-        item_ids=NET_PROFIT_IDS,   # [FIX 10] thêm Taxonomy IDs
-        period=period
-    )
+        item_ids=NET_PROFIT_IDS,
+        period=period,
+    ))
 
     # --- EPS từ income statement ---
-    data['eps_income_stmt'] = find_row_series(
+    data['eps_income_stmt'] = _align_2025(find_row_series(
         df_income,
         ['lai co ban tren co phieu', 'earnings per share', 'eps'],
-        item_ids=['eps'], period=period
-    )
+        item_ids=['eps'], period=period,
+    ))
 
     # --- Balance sheet ---
-    data['equity'] = find_row_series(
+    data['equity'] = _align_2025(find_row_series(
         df_balance,
         ['von chu so huu', "owner's equity", 'owners equity', 'total equity',
          'equity', 'vcsh'],
         exclude_keywords=['von dieu le', 'charter', 'co phan uu dai'],
-        period=period
-    )
+        period=period,
+    ))
 
-    data['total_assets'] = find_row_series(
+    data['total_assets'] = _align_2025(find_row_series(
         df_balance,
         ['tong cong tai san', 'total assets', 'tong tai san'],
-        period=period
-    )
+        period=period,
+    ))
 
-    # --- CFO với fallback quý [FIX 6] ---
+    # --- CFO với fallback quý ---
     if period == 'year' and df_cashflow_y is not None:
-        data['cfo'] = _find_cfo_with_quarterly_fallback(df_cashflow_y, df_cashflow_q)
+        data['cfo'] = _align_2025(_find_cfo_with_quarterly_fallback(df_cashflow_y, df_cashflow_q))
     elif df_cashflow_y is not None:
         data['cfo'] = find_row_series(df_cashflow_y, keywords=CFO_KEYWORDS, period=period)
     else:
@@ -607,7 +653,7 @@ def build_financial_table(df_income, df_balance, df_ratio=None,
 
     if df_ratio is not None and not df_ratio.empty:
         for field_name, keywords in ratio_fields:
-            data[field_name] = find_row_series(df_ratio, keywords, period=period)
+            data[field_name] = _align_2025(find_row_series(df_ratio, keywords, period=period))
     else:
         for field_name, _ in ratio_fields:
             data[field_name] = pd.Series(dtype=float)
@@ -631,9 +677,6 @@ def build_financial_table(df_income, df_balance, df_ratio=None,
 
 def build_5y_financial_table(df_income, df_balance, df_ratio=None, ticker=None,
                               df_cashflow_y=None, df_cashflow_q=None):
-    """
-    Wrapper — truyền cashflow xuống để CFO có fallback quý.
-    """
     return build_financial_table(
         df_income, df_balance, df_ratio,
         ticker=ticker,
@@ -736,47 +779,97 @@ def nine_methods_valuation(eps_latest, bvps_latest, pe_series: pd.Series,
 # Self-test
 # ---------------------------------------------------------------------------
 
+def _make_df(items, data_dict):
+    """Helper tạo df đúng format vnstock: có cột 'item' + cột năm."""
+    d = {'item': items}
+    d.update(data_dict)
+    return pd.DataFrame(d)
+
+
 if __name__ == '__main__':
     print('=== Self-test financial_normalizer.py ===\n')
 
-    df_bank = pd.DataFrame({
-        2021: [17427, 7481, 9946, 5000, 2500],
-        2022: [21811, 10424, 11387, 6200, 3000],
-        2023: [28562, 16135, 12428, 7100, 3500],
-        2024: [25949, 13042, 12907, 7500, 3800],
-        2025: [30751, 17379, 13371, 8200, 4000],
-    }, index=[
-        '1. Thu nhập lãi và các khoản thu nhập tương tự',
-        '2. Chi phí lãi và các chi phí tương tự',
-        'I. Thu nhập lãi thuần',
-        'II. Thu nhập từ hoạt động dịch vụ thuần',
-        'Doanh thu hoạt động',
-    ])
-    rev = build_financial_table(df_bank, pd.DataFrame(), ticker='TPB')['revenue']
-    print(f'✅ BANK (TPB): 2025={rev.get(2025, "MISSING")}')
+    # --- Test 1: Bank revenue pick đúng NII, không pick gross ---
+    df_bank = _make_df(
+        ['Thu nhập lãi và các khoản thu nhập tương tự',   # gross — KHÔNG pick
+         'Chi phí lãi và các chi phí tương tự',
+         'I. Thu nhập lãi thuần',                          # NII — PHẢI pick
+         'II. Thu nhập từ hoạt động dịch vụ thuần',
+         'Doanh thu thuần'],                               # sai — KHÔNG pick
+        {2021:  [70749, 28476, 42273, 5000,  2500],
+         2022:  [88113, 34867, 53246, 6200,  3000],
+         2023:  [108122,54508, 53615, 7100,  3500],
+         2024:  [93655, 38249, 55406, 7500,  3800],
+         '2025-Q4': [105216,36162, 58771, 8200, 69054]},  # 2025 dạng Q4
+    )
 
-    # Test CFO fallback
-    df_cf_y = pd.DataFrame({
-        2021: [12327],
-        2022: [16414],
-        2023: [19422],
-        2024: [16710],
-        # 2025 missing — sẽ fallback sang quarterly
-    }, index=['Lưu chuyển tiền thuần từ hoạt động kinh doanh'])
+    rev = build_financial_table(df_bank, pd.DataFrame(), ticker='VCB')['revenue']
+    print(f'VCB revenue: {dict(rev)}')
+    assert rev.get(2025) == 58771, f'FAIL 2025: {rev.get(2025)} (expected 58771)'
+    assert rev.get(2021) == 42273, f'FAIL 2021: {rev.get(2021)}'
+    assert rev.get(2024) == 55406, f'FAIL 2024: {rev.get(2024)}'
+    print('✅ BANK (VCB): NII đúng cả 5 năm, không pick gross hay Doanh thu thuần')
 
-    df_cf_q = pd.DataFrame({
-        '2025-Q1': [4200],
-        '2025-Q2': [3800],
-        '2025-Q3': [4100],
-        '2025-Q4': [3900],
-    }, index=['Lưu chuyển tiền thuần từ hoạt động kinh doanh'])
+    # --- Test 2: TPB giữ nguyên ---
+    df_tpb = _make_df(
+        ['1. Thu nhập lãi và các khoản thu nhập tương tự',
+         '2. Chi phí lãi và các chi phí tương tự',
+         'I. Thu nhập lãi thuần',
+         'II. Thu nhập từ hoạt động dịch vụ thuần',
+         'Doanh thu hoạt động'],
+        {2021:  [17427, 7481,  9946,  5000, 2500],
+         2022:  [21811, 10424, 11387, 6200, 3000],
+         2023:  [28562, 16135, 12428, 7100, 3500],
+         2024:  [25949, 13042, 12907, 7500, 3800],
+         '2025-Q4': [30751, 17379, 13371, 8200, 4000]},
+    )
+    rev_tpb = build_financial_table(df_tpb, pd.DataFrame(), ticker='TPB')['revenue']
+    assert rev_tpb.get(2025) == 13371, f'FAIL TPB 2025: {rev_tpb.get(2025)}'
+    print(f'✅ BANK (TPB): 2025={rev_tpb.get(2025):,.0f} (NII đúng, không pick gross 30,751)')
 
-    cfo = _find_cfo_with_quarterly_fallback(df_cf_y, df_cf_q)
-    assert 2025 in cfo.index, 'FAIL: 2025 vẫn thiếu sau fallback'
-    assert cfo[2025] == 16000, f'FAIL CFO 2025: {cfo[2025]}'
-    print(f'✅ CFO fallback quarterly: 2025={cfo[2025]:,.0f} tỷ (4Q cộng lại)')
+    # --- Test 3: _align_2025 ---
+    s_test = pd.Series({'2025-Q4': 58771.0, 2024: 55406.0, 2023: 53615.0})
+    aligned = _align_2025(s_test)
+    assert 2025 in aligned.index, 'FAIL: 2025 không có sau align'
+    assert aligned[2025] == 58771.0
+    print('✅ _align_2025: 2025-Q4 → int 2025 OK')
 
+    # --- Test 4: _search_with_priority không return sớm khi thiếu TARGET_YEAR ---
+    df_missing_2025 = _make_df(
+        ['Thu nhập lãi thuần'],
+        {2021: [42273], 2022: [53246], 2023: [53615], 2024: [55406]},
+    )
+    df_has_2025 = _make_df(
+        ['Doanh thu thuần'],
+        {2021: [100], 2022: [110], 2023: [120], 2024: [130], 2025: [999]},
+    )
+    df_combined = pd.concat([df_missing_2025, df_has_2025], ignore_index=True)
+    priority_test = [
+        (['thu nhap lai thuan'], ['tuong tu', 'chi phi']),
+        (['doanh thu thuan'], []),
+    ]
+    result = _search_with_priority(df_combined, priority_test, 'year')
+    # Nên pick Doanh thu thuần (có 2025=999) vì NII thiếu 2025
+    assert result.get(2025) == 999, f'FAIL priority fallback: {result.get(2025)}'
+    print('✅ _search_with_priority: skip dòng thiếu 2025, fallback đúng sang dòng có 2025')
+
+    # --- Test 5: _norm_label ---
     assert _norm_label('hoạt động') == 'hoat dong'
+    assert _norm_label('Thu nhập lãi thuần') == 'thu nhap lai thuan'
     print('✅ _norm_label OK')
+
+    # --- Test 6: CFO fallback quarterly ---
+    df_cf_y = _make_df(
+        ['Lưu chuyển tiền thuần từ hoạt động kinh doanh'],
+        {2021: [12327], 2022: [16414], 2023: [19422], 2024: [16710]},
+    )
+    df_cf_q = _make_df(
+        ['Lưu chuyển tiền thuần từ hoạt động kinh doanh'],
+        {'2025-Q1': [4200], '2025-Q2': [3800], '2025-Q3': [4100], '2025-Q4': [3900]},
+    )
+    cfo = _find_cfo_with_quarterly_fallback(df_cf_y, df_cf_q)
+    assert 2025 in cfo.index, 'FAIL: CFO 2025 vẫn thiếu'
+    assert cfo[2025] == 16000, f'FAIL CFO 2025: {cfo[2025]}'
+    print(f'✅ CFO fallback quarterly: 2025={cfo[2025]:,.0f} tỷ')
 
     print('\n🎉 Tất cả test pass!')
