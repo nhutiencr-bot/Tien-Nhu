@@ -329,20 +329,63 @@ def find_row_series(df: pd.DataFrame, keywords, exclude_keywords=None,
     if matched.empty:
         return pd.Series(dtype=float)
 
-    # [FIX 8] Ưu tiên dòng có data ở năm MỚI NHẤT, tiebreak: số cột non-NaN nhiều nhất
+    # ------------------------------------------------------------------
+    # [ROOT-FIX v3] TÁCH chọn dòng cho "2021-2024" (đã đóng sổ, ổn định)
+    # và "TARGET_YEAR" (2025, dễ bị nguồn dữ liệu trả sai/khác định dạng)
+    # THÀNH HAI LẦN CHỌN ĐỘC LẬP, thay vì chọn 1 dòng duy nhất áp dụng cho
+    # cả 5 cột như trước.
+    #
+    # Lý do: logic cũ (FIX 8) chọn MỘT dòng cho toàn bộ 5 năm, ưu tiên
+    # dòng "có data ở năm mới nhất". Hệ quả 2 chiều:
+    #   (a) Nếu dòng khớp keyword tốt nhất cho 2021-2024 lại KHÔNG có data
+    #       ở 2025 (vd. công ty đổi tên khoản mục / cấu trúc báo cáo từ
+    #       2025), thuật toán BỎ QUA dòng đó dù nó đúng cho 2021-2024, và
+    #       chọn một dòng khác (có thể sai khái niệm) chỉ vì nó "có" 2025.
+    #   (b) Ngược lại, nếu dòng đúng cho 2025 lại thiếu dữ liệu một vài
+    #       năm cũ, các năm cũ bị lấy nhầm từ CHÍNH dòng đó luôn (dù dòng
+    #       khác mới là lựa chọn tốt hơn cho 2021-2024).
+    # Đây là lỗi "cào 5 năm dính liền" — một lựa chọn dòng bị dùng chung
+    # cho toàn bộ chuỗi, khiến sai số ở 1 năm kéo theo/che lấp năm khác.
+    #
+    # Sửa: chọn dòng tốt nhất RIÊNG cho year_cols < TARGET_YEAR (2021-2024)
+    # và RIÊNG cho year_cols >= TARGET_YEAR (2025), rồi ghép giá trị theo
+    # đúng cột — mỗi năm lấy từ dòng phù hợp nhất với chính năm đó.
+    # ------------------------------------------------------------------
     if len(matched) > 1:
-        latest_col = year_cols[-1]
-        has_latest = matched[latest_col].notna()
-        candidates = matched[has_latest] if has_latest.any() else matched
-        non_na_counts = candidates[year_cols].notna().sum(axis=1)
-        row = candidates.loc[non_na_counts.idxmax()]
-    else:
-        row = matched.iloc[0]
+        def _year_of(col):
+            try:
+                return int(str(col).strip()[:4])
+            except (ValueError, TypeError):
+                return -1
 
-    # Build result dict
+        hist_cols = [c for c in year_cols if _year_of(c) < TARGET_YEAR]
+        latest_cols = [c for c in year_cols if _year_of(c) >= TARGET_YEAR]
+
+        def _pick_best_row(cols):
+            if not cols:
+                return None
+            has_data = matched[cols].notna().any(axis=1)
+            candidates = matched[has_data] if has_data.any() else matched
+            non_na_counts = candidates[cols].notna().sum(axis=1)
+            return candidates.loc[non_na_counts.idxmax()]
+
+        row_hist = _pick_best_row(hist_cols)
+        row_latest = _pick_best_row(latest_cols)
+        # Nếu 1 trong 2 nhóm không tìm được dòng (vd rỗng), dùng dòng còn lại
+        row_hist = row_hist if row_hist is not None else row_latest
+        row_latest = row_latest if row_latest is not None else row_hist
+    else:
+        row_hist = row_latest = matched.iloc[0]
+
+    # Build result dict — mỗi cột lấy giá trị từ dòng phù hợp với NHÓM của nó
     result = {}
     for yc in year_cols:
-        val = pd.to_numeric(pd.Series([row[yc]]), errors='coerce').iloc[0]
+        if len(matched) > 1:
+            yr_of_col = int(str(yc).strip()[:4]) if str(yc).strip()[:4].isdigit() else -1
+            src_row = row_latest if yr_of_col >= TARGET_YEAR else row_hist
+        else:
+            src_row = row_hist
+        val = pd.to_numeric(pd.Series([src_row[yc]]), errors='coerce').iloc[0]
         if pd.notna(val):
             if period == 'quarter':
                 result[str(yc).strip()] = float(val)
@@ -920,6 +963,27 @@ if __name__ == '__main__':
     # Nên pick Doanh thu thuần (có Y4=999) vì NII thiếu Y4
     assert result.get(Y4) == 999, f'FAIL priority fallback: {result.get(Y4)}'
     print('✅ _search_with_priority: skip dòng thiếu năm mới nhất, fallback đúng sang dòng có đủ')
+
+    # --- Test 4c: [ROOT-FIX v3] TÁCH chọn dòng cho 2021-2024 vs TARGET_YEAR,
+    #     không để 1 dòng "dính liền" áp đặt cho cả 5 năm ---
+    # Dòng A: đúng khái niệm cho 2021-2024, nhưng THIẾU năm TARGET_YEAR
+    #         (vd. công ty đổi tên khoản mục kể từ TARGET_YEAR).
+    # Dòng B: chỉ có giá trị ở TARGET_YEAR (khoản mục mới/đổi tên),
+    #         KHÔNG có 2021-2024.
+    # Kỳ vọng: 2021-2024 lấy từ dòng A, TARGET_YEAR lấy từ dòng B —
+    # không dòng nào "thắng" toàn bộ 5 năm.
+    df_split = _make_df(
+        ['Doanh thu thuần bán hàng (tên cũ)',   # dòng A: có 2021-2024, KHÔNG có TARGET_YEAR
+         'Doanh thu thuần (tên mới)'],          # dòng B: chỉ có TARGET_YEAR
+        {Y0: [100, None], Y1: [110, None], Y2: [120, None], Y3: [130, None],
+         Y4: [None, 999]},
+    )
+    rev_split = find_row_series(df_split, keywords=['doanh thu thuan'])
+    assert rev_split.get(Y0) == 100, f'FAIL split hist Y0: {rev_split.get(Y0)}'
+    assert rev_split.get(Y3) == 130, f'FAIL split hist Y3: {rev_split.get(Y3)}'
+    assert rev_split.get(Y4) == 999, f'FAIL split target year: {rev_split.get(Y4)}'
+    print(f'✅ ROOT-FIX v3: tách dòng đúng — 2021-2024 lấy dòng A ({Y0}={rev_split[Y0]:.0f}), '
+          f'{Y4} lấy dòng B ({rev_split[Y4]:.0f}), không còn "dính liền" 1 dòng cho cả 5 năm')
 
     # --- Test 4b: [ROOT-FIX v2 regression] TARGET_YEAR phải là năm ĐÃ đóng sổ,
     #     KHÔNG bao giờ được bằng năm lịch hiện tại (IN_PROGRESS_YEAR) ---
