@@ -52,7 +52,52 @@ Các sửa đổi so với bản trước (399 dòng):
 
 import re
 import unicodedata
+import datetime as _dt
 import pandas as pd
+
+
+# ---------------------------------------------------------------------------
+# [ROOT-FIX] Năm mục tiêu (TARGET_YEAR) — KHÔNG hardcode nữa.
+#
+# Lý do đây là chỗ hay gãy nhất của toàn bộ pipeline:
+#   - financial_normalizer.py hardcode TARGET_YEAR = 2025.
+#   - pipeline_helpers.py hardcode TABLE_END_YEAR = 2025 (một "PATCH" trước đó).
+#   - equity_pipeline.py lại dùng datetime.today().year (giá trị ĐỘNG) ở
+#     7 chỗ khác nhau để quyết định "năm nào đang là năm hiện tại, chưa
+#     có báo cáo năm đầy đủ, phải ưu tiên cộng dồn quý thay vì tin cột năm".
+#
+# Ba nguồn "năm hiện tại" này KHÔNG đồng bộ. Khi ngày hệ thống đổi (ví dụ
+# sang năm mới), datetime.today().year nhảy lên trong khi hai hằng số kia
+# vẫn đứng yên ở 2025 → toàn bộ logic "đừng tin annual API cho năm chưa
+# xong, ưu tiên cộng quý / sanity-check outlier" ở equity_pipeline.py
+# (Tầng 0, Tầng 0b, SANITY CHECK 1) lặng lẽ NGỪNG kích hoạt cho năm 2025,
+# vì điều kiện so sánh `_yr0 == datetime.today().year` không còn đúng.
+# Kết quả: doanh thu 2025 bị lấy thẳng từ cột annual (có thể chỉ là dữ
+# liệu luỹ kế 1-3 quý, hoặc bị gộp sai) mà không còn cơ chế nào phát hiện
+# / sửa — dù find_row_series()/_search_with_priority() trong file này có
+# vá bao nhiêu lần cũng không đụng tới nguồn gốc lỗi.
+#
+# Sửa gốc: TARGET_YEAR phải LUÔN LÀ MỘT, dùng chung cho toàn bộ pipeline.
+# Ở đây định nghĩa nó dựa trên ngày hệ thống thực tế (không hardcode),
+# các file khác (pipeline_helpers.py, equity_pipeline.py) PHẢI import
+# TARGET_YEAR/TARGET_YEARS từ đây thay vì tự định nghĩa hằng số riêng.
+# ---------------------------------------------------------------------------
+
+def _compute_target_year(today: _dt.date = None) -> int:
+    """
+    Năm tài chính gần nhất mà bảng 5 năm cần "cố gắng có đủ dữ liệu".
+    Đơn giản hoá: luôn là năm hiện tại theo lịch hệ thống. equity_pipeline.py
+    chịu trách nhiệm coi đây là năm "có thể chưa có báo cáo annual đầy đủ"
+    và ưu tiên cộng dồn quý / sanity-check, KHÔNG được tự suy ra "năm hiện
+    tại" theo cách khác (vd. datetime.today().year riêng lẻ) vì sẽ lại
+    tạo ra 2 nguồn sự thật như bug cũ.
+    """
+    d = today or _dt.date.today()
+    return d.year
+
+
+TARGET_YEAR = _compute_target_year()
+TARGET_YEARS = list(range(TARGET_YEAR - 4, TARGET_YEAR + 1))  # 5 năm gần nhất, tự cuốn chiếu
 
 
 # ---------------------------------------------------------------------------
@@ -94,8 +139,7 @@ CONSTRUCTION_TICKERS = {
     'CTD', 'HBC', 'FCN', 'VCG', 'PC1', 'LCG', 'CII', 'PXL', 'SC5',
 }
 
-TARGET_YEARS = list(range(2021, 2026))
-TARGET_YEAR  = 2025   # năm hiện tại cần đảm bảo có data
+# (TARGET_YEARS / TARGET_YEAR đã được tính động ở đầu file — xem [ROOT-FIX])
 
 # ---------------------------------------------------------------------------
 # [FIX 10] Semantic ID (Taxonomy) — vnstock v3.2.8
@@ -788,6 +832,8 @@ def _make_df(items, data_dict):
 
 if __name__ == '__main__':
     print('=== Self-test financial_normalizer.py ===\n')
+    print(f'TARGET_YEAR = {TARGET_YEAR}  (tính động theo ngày hệ thống, KHÔNG hardcode)')
+    Y0, Y1, Y2, Y3, Y4 = TARGET_YEARS  # 5 năm gần nhất, vd [2021..2025] hoặc cuốn chiếu
 
     # --- Test 1: Bank revenue pick đúng NII, không pick gross ---
     df_bank = _make_df(
@@ -796,18 +842,18 @@ if __name__ == '__main__':
          'I. Thu nhập lãi thuần',                          # NII — PHẢI pick
          'II. Thu nhập từ hoạt động dịch vụ thuần',
          'Doanh thu thuần'],                               # sai — KHÔNG pick
-        {2021:  [70749, 28476, 42273, 5000,  2500],
-         2022:  [88113, 34867, 53246, 6200,  3000],
-         2023:  [108122,54508, 53615, 7100,  3500],
-         2024:  [93655, 38249, 55406, 7500,  3800],
-         '2025-Q4': [105216,36162, 58771, 8200, 69054]},  # 2025 dạng Q4
+        {Y0:  [70749, 28476, 42273, 5000,  2500],
+         Y1:  [88113, 34867, 53246, 6200,  3000],
+         Y2:  [108122,54508, 53615, 7100,  3500],
+         Y3:  [93655, 38249, 55406, 7500,  3800],
+         f'{Y4}-Q4': [105216,36162, 58771, 8200, 69054]},  # năm mới nhất dạng Q4
     )
 
     rev = build_financial_table(df_bank, pd.DataFrame(), ticker='VCB')['revenue']
     print(f'VCB revenue: {dict(rev)}')
-    assert rev.get(2025) == 58771, f'FAIL 2025: {rev.get(2025)} (expected 58771)'
-    assert rev.get(2021) == 42273, f'FAIL 2021: {rev.get(2021)}'
-    assert rev.get(2024) == 55406, f'FAIL 2024: {rev.get(2024)}'
+    assert rev.get(Y4) == 58771, f'FAIL {Y4}: {rev.get(Y4)} (expected 58771)'
+    assert rev.get(Y0) == 42273, f'FAIL {Y0}: {rev.get(Y0)}'
+    assert rev.get(Y3) == 55406, f'FAIL {Y3}: {rev.get(Y3)}'
     print('✅ BANK (VCB): NII đúng cả 5 năm, không pick gross hay Doanh thu thuần')
 
     # --- Test 2: TPB giữ nguyên ---
@@ -817,41 +863,50 @@ if __name__ == '__main__':
          'I. Thu nhập lãi thuần',
          'II. Thu nhập từ hoạt động dịch vụ thuần',
          'Doanh thu hoạt động'],
-        {2021:  [17427, 7481,  9946,  5000, 2500],
-         2022:  [21811, 10424, 11387, 6200, 3000],
-         2023:  [28562, 16135, 12428, 7100, 3500],
-         2024:  [25949, 13042, 12907, 7500, 3800],
-         '2025-Q4': [30751, 17379, 13371, 8200, 4000]},
+        {Y0:  [17427, 7481,  9946,  5000, 2500],
+         Y1:  [21811, 10424, 11387, 6200, 3000],
+         Y2:  [28562, 16135, 12428, 7100, 3500],
+         Y3:  [25949, 13042, 12907, 7500, 3800],
+         f'{Y4}-Q4': [30751, 17379, 13371, 8200, 4000]},
     )
     rev_tpb = build_financial_table(df_tpb, pd.DataFrame(), ticker='TPB')['revenue']
-    assert rev_tpb.get(2025) == 13371, f'FAIL TPB 2025: {rev_tpb.get(2025)}'
-    print(f'✅ BANK (TPB): 2025={rev_tpb.get(2025):,.0f} (NII đúng, không pick gross 30,751)')
+    assert rev_tpb.get(Y4) == 13371, f'FAIL TPB {Y4}: {rev_tpb.get(Y4)}'
+    print(f'✅ BANK (TPB): {Y4}={rev_tpb.get(Y4):,.0f} (NII đúng, không pick gross 30,751)')
 
-    # --- Test 3: _align_2025 ---
-    s_test = pd.Series({'2025-Q4': 58771.0, 2024: 55406.0, 2023: 53615.0})
+    # --- Test 3: _align_2025 (đổi tên ý nghĩa: align năm mới nhất) ---
+    s_test = pd.Series({f'{Y4}-Q4': 58771.0, Y3: 55406.0, Y2: 53615.0})
     aligned = _align_2025(s_test)
-    assert 2025 in aligned.index, 'FAIL: 2025 không có sau align'
-    assert aligned[2025] == 58771.0
-    print('✅ _align_2025: 2025-Q4 → int 2025 OK')
+    assert Y4 in aligned.index, f'FAIL: {Y4} không có sau align'
+    assert aligned[Y4] == 58771.0
+    print(f'✅ _align_2025: {Y4}-Q4 → int {Y4} OK')
 
     # --- Test 4: _search_with_priority không return sớm khi thiếu TARGET_YEAR ---
-    df_missing_2025 = _make_df(
+    df_missing_latest = _make_df(
         ['Thu nhập lãi thuần'],
-        {2021: [42273], 2022: [53246], 2023: [53615], 2024: [55406]},
+        {Y0: [42273], Y1: [53246], Y2: [53615], Y3: [55406]},
     )
-    df_has_2025 = _make_df(
+    df_has_latest = _make_df(
         ['Doanh thu thuần'],
-        {2021: [100], 2022: [110], 2023: [120], 2024: [130], 2025: [999]},
+        {Y0: [100], Y1: [110], Y2: [120], Y3: [130], Y4: [999]},
     )
-    df_combined = pd.concat([df_missing_2025, df_has_2025], ignore_index=True)
+    df_combined = pd.concat([df_missing_latest, df_has_latest], ignore_index=True)
     priority_test = [
         (['thu nhap lai thuan'], ['tuong tu', 'chi phi']),
         (['doanh thu thuan'], []),
     ]
     result = _search_with_priority(df_combined, priority_test, 'year')
-    # Nên pick Doanh thu thuần (có 2025=999) vì NII thiếu 2025
-    assert result.get(2025) == 999, f'FAIL priority fallback: {result.get(2025)}'
-    print('✅ _search_with_priority: skip dòng thiếu 2025, fallback đúng sang dòng có 2025')
+    # Nên pick Doanh thu thuần (có Y4=999) vì NII thiếu Y4
+    assert result.get(Y4) == 999, f'FAIL priority fallback: {result.get(Y4)}'
+    print('✅ _search_with_priority: skip dòng thiếu năm mới nhất, fallback đúng sang dòng có đủ')
+
+    # --- Test 4b: [ROOT-FIX regression] TARGET_YEAR phải tự cuốn theo ngày hệ thống ---
+    fake_today = _dt.date(TARGET_YEAR + 1, 3, 15)  # giả lập sang năm sau
+    assert _compute_target_year(fake_today) == TARGET_YEAR + 1, (
+        'FAIL: TARGET_YEAR không cuốn chiếu theo ngày hệ thống — đây chính là '
+        'bug gốc khiến pipeline lệch năm giữa financial_normalizer.py và '
+        'equity_pipeline.py (xem comment [ROOT-FIX] đầu file).'
+    )
+    print('✅ TARGET_YEAR cuốn chiếu đúng theo ngày hệ thống (không còn hardcode 2025)')
 
     # --- Test 5: _norm_label ---
     assert _norm_label('hoạt động') == 'hoat dong'
@@ -861,15 +916,15 @@ if __name__ == '__main__':
     # --- Test 6: CFO fallback quarterly ---
     df_cf_y = _make_df(
         ['Lưu chuyển tiền thuần từ hoạt động kinh doanh'],
-        {2021: [12327], 2022: [16414], 2023: [19422], 2024: [16710]},
+        {Y0: [12327], Y1: [16414], Y2: [19422], Y3: [16710]},
     )
     df_cf_q = _make_df(
         ['Lưu chuyển tiền thuần từ hoạt động kinh doanh'],
-        {'2025-Q1': [4200], '2025-Q2': [3800], '2025-Q3': [4100], '2025-Q4': [3900]},
+        {f'{Y4}-Q1': [4200], f'{Y4}-Q2': [3800], f'{Y4}-Q3': [4100], f'{Y4}-Q4': [3900]},
     )
     cfo = _find_cfo_with_quarterly_fallback(df_cf_y, df_cf_q)
-    assert 2025 in cfo.index, 'FAIL: CFO 2025 vẫn thiếu'
-    assert cfo[2025] == 16000, f'FAIL CFO 2025: {cfo[2025]}'
-    print(f'✅ CFO fallback quarterly: 2025={cfo[2025]:,.0f} tỷ')
+    assert Y4 in cfo.index, f'FAIL: CFO {Y4} vẫn thiếu'
+    assert cfo[Y4] == 16000, f'FAIL CFO {Y4}: {cfo[Y4]}'
+    print(f'✅ CFO fallback quarterly: {Y4}={cfo[Y4]:,.0f} tỷ')
 
     print('\n🎉 Tất cả test pass!')
