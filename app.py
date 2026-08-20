@@ -133,10 +133,9 @@ def fetch_cafef_reports(ticker: str, limit: int = 8):
 # ---------------------------------------------------------------------------
 # Pipeline cache
 # ---------------------------------------------------------------------------
-@st.cache_data(ttl=_HIST_CACHE_TTL, show_spinner=False)
+@st.cache_data(ttl=7 * 24 * 3600, show_spinner=False)
 def get_cached_pipeline(ticker: str, _today: str):
     return execute_equity_research_pipeline(ticker)
-
 
 # ---------------------------------------------------------------------------
 # Header (đặt TRƯỚC sidebar guard, ngay sau apply_premium_fintech_theme())
@@ -191,7 +190,7 @@ if not ticker_input:
 # ---------------------------------------------------------------------------
 # Pipeline
 # ---------------------------------------------------------------------------
-today_str = datetime.date.today().isoformat()
+today_str = datetime.date.today().strftime("%Y-W%W")  # cache theo tuần
 
 with st.spinner(f"⏳ Đang tải dữ liệu {ticker_input}…"):
     pipeline_output = get_cached_pipeline(ticker_input, _today=today_str)
