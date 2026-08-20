@@ -737,74 +737,62 @@ def execute_equity_research_pipeline(ticker):
             return pd.Series(dtype=float)
 
         # ─────────────────────────────────────────────────────────────────
-        # ── TẦNG 1+2+2b — Song song CafeF / DNSE / Yahoo ──────────────────
-_cafef_debug = {}
-_dnse_debug  = {}
-_yahoo_debug = {}
+        # ─────────────────────────────────────────────────────────────────
+        # TẦNG 1+2+2b — Song song CafeF / DNSE / Yahoo
+        # ─────────────────────────────────────────────────────────────────
+        _cafef_debug = {}
+        _dnse_debug  = {}
+        _yahoo_debug = {}
 
-if _missing_any:
-    def _run_cafef():
-        try:
-            return fetch_cafef_yearly_full(ticker, years=list(allowed_years))
-        except Exception:
-            return {}
+        if _missing_any:
+            def _run_cafef():
+                try:
+                    return fetch_cafef_yearly_full(ticker, years=list(allowed_years))
+                except Exception:
+                    return {}
 
-    def _run_dnse():
-        try:
-            return _fetch_dnse_financials(ticker, allowed_years)
-        except Exception:
-            return {}
+            def _run_dnse():
+                try:
+                    return _fetch_dnse_financials(ticker, allowed_years)
+                except Exception:
+                    return {}
 
-    def _run_yahoo():
-        try:
-            return _fetch_yahoo_financials(ticker, set(_missing_any))
-        except Exception:
-            return {}
+            def _run_yahoo():
+                try:
+                    return _fetch_yahoo_financials(ticker, set(_missing_any))
+                except Exception:
+                    return {}
 
-    with ThreadPoolExecutor(max_workers=3) as _fb_ex:
-        _f_cafef = _fb_ex.submit(_run_cafef)
-        _f_dnse  = _fb_ex.submit(_run_dnse)
-        _f_yahoo = _fb_ex.submit(_run_yahoo)
+            with ThreadPoolExecutor(max_workers=3) as _fb_ex:
+                _f_cafef = _fb_ex.submit(_run_cafef)
+                _f_dnse  = _fb_ex.submit(_run_dnse)
+                _f_yahoo = _fb_ex.submit(_run_yahoo)
+                _cafef_full = _f_cafef.result()
+                _dnse_data  = _f_dnse.result()
+                _yahoo_data = _f_yahoo.result()
 
-        _cafef_full = _f_cafef.result()
-        _dnse_data  = _f_dnse.result()
-        _yahoo_data = _f_yahoo.result()
+            _cafef_full.pop('__error__', None)
+            _cafef_full.pop('__trace__', None)
 
-    # Merge CafeF
-    _cafef_full.pop('__error__', None)
-    _cafef_full.pop('__trace__', None)
-    for _field, _series in [
-        ('revenue',      revenue_series),
-        ('net_profit',   net_profit_series),
-        ('equity',       equity_series),
-        ('total_assets', total_assets_series),
-        ('eps',          eps_series),
-    ]:
-        _s = _filter_years(_cafef_full.get(_field, pd.Series(dtype=float)))
-        if not _s.empty:
-            locals()[_field + '_series'] if False else None
-            if _field == 'eps':
-                eps_series = _merge_series(eps_series, _s)
-            else:
-                _merge_series(_series, _s)
+            # Merge CafeF
+            revenue_series      = _merge_series(revenue_series,      _filter_years(_cafef_full.get('revenue',      pd.Series(dtype=float))))
+            net_profit_series   = _merge_series(net_profit_series,   _filter_years(_cafef_full.get('net_profit',   pd.Series(dtype=float))))
+            equity_series       = _merge_series(equity_series,       _filter_years(_cafef_full.get('equity',       pd.Series(dtype=float))))
+            total_assets_series = _merge_series(total_assets_series, _filter_years(_cafef_full.get('total_assets', pd.Series(dtype=float))))
+            eps_series          = _merge_series(eps_series,          _filter_years(_cafef_full.get('eps',          pd.Series(dtype=float))))
 
-    revenue_series      = _merge_series(revenue_series,      _filter_years(_cafef_full.get('revenue',      pd.Series(dtype=float))))
-    net_profit_series   = _merge_series(net_profit_series,   _filter_years(_cafef_full.get('net_profit',   pd.Series(dtype=float))))
-    equity_series       = _merge_series(equity_series,       _filter_years(_cafef_full.get('equity',       pd.Series(dtype=float))))
-    total_assets_series = _merge_series(total_assets_series, _filter_years(_cafef_full.get('total_assets', pd.Series(dtype=float))))
-    eps_series          = _merge_series(eps_series,          _filter_years(_cafef_full.get('eps',          pd.Series(dtype=float))))
+            # Merge DNSE
+            revenue_series      = _merge_series(revenue_series,      _filter_years(normalize_to_billion_vnd(_dnse_data.get('revenue',      pd.Series(dtype=float)))))
+            net_profit_series   = _merge_series(net_profit_series,   _filter_years(normalize_to_billion_vnd(_dnse_data.get('net_profit',   pd.Series(dtype=float)))))
+            equity_series       = _merge_series(equity_series,       _filter_years(normalize_to_billion_vnd(_dnse_data.get('equity',       pd.Series(dtype=float)))))
+            total_assets_series = _merge_series(total_assets_series, _filter_years(normalize_to_billion_vnd(_dnse_data.get('total_assets', pd.Series(dtype=float)))))
 
-    # Merge DNSE
-    revenue_series      = _merge_series(revenue_series,      _filter_years(normalize_to_billion_vnd(_dnse_data.get('revenue',      pd.Series(dtype=float)))))
-    net_profit_series   = _merge_series(net_profit_series,   _filter_years(normalize_to_billion_vnd(_dnse_data.get('net_profit',   pd.Series(dtype=float)))))
-    equity_series       = _merge_series(equity_series,       _filter_years(normalize_to_billion_vnd(_dnse_data.get('equity',       pd.Series(dtype=float)))))
-    total_assets_series = _merge_series(total_assets_series, _filter_years(normalize_to_billion_vnd(_dnse_data.get('total_assets', pd.Series(dtype=float)))))
+            # Merge Yahoo
+            revenue_series      = _merge_series(revenue_series,      _filter_years(_yahoo_data.get('revenue',      pd.Series(dtype=float))))
+            net_profit_series   = _merge_series(net_profit_series,   _filter_years(_yahoo_data.get('net_profit',   pd.Series(dtype=float))))
+            equity_series       = _merge_series(equity_series,       _filter_years(_yahoo_data.get('equity',       pd.Series(dtype=float))))
+            total_assets_series = _merge_series(total_assets_series, _filter_years(_yahoo_data.get('total_assets', pd.Series(dtype=float))))
 
-    # Merge Yahoo
-    revenue_series      = _merge_series(revenue_series,      _filter_years(_yahoo_data.get('revenue',      pd.Series(dtype=float))))
-    net_profit_series   = _merge_series(net_profit_series,   _filter_years(_yahoo_data.get('net_profit',   pd.Series(dtype=float))))
-    equity_series       = _merge_series(equity_series,       _filter_years(_yahoo_data.get('equity',       pd.Series(dtype=float))))
-    total_assets_series = _merge_series(total_assets_series, _filter_years(_yahoo_data.get('total_assets', pd.Series(dtype=float))))
         # ─────────────────────────────────────────────────────────────────
         # TẦNG 3 — Website scraping
         # ─────────────────────────────────────────────────────────────────
