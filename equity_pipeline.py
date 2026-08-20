@@ -36,7 +36,7 @@ from pipeline_helpers import (
 )
 
 
-@st.cache_data(ttl=1800)
+@st.cache_data(ttl=6*3600)
 def execute_equity_research_pipeline(ticker):
     try:
         q_engine, f_engine, c_engine, source_used = _build_engines_with_fallback(ticker)
@@ -737,132 +737,74 @@ def execute_equity_research_pipeline(ticker):
             return pd.Series(dtype=float)
 
         # ─────────────────────────────────────────────────────────────────
-        # TẦNG 1 — CafeF fallback
-        # ─────────────────────────────────────────────────────────────────
-        _cafef_debug = {}
-        if _missing_any:
-            try:
-                _cafef_full = fetch_cafef_yearly_full(ticker, years=list(allowed_years))
+        # ── TẦNG 1+2+2b — Song song CafeF / DNSE / Yahoo ──────────────────
+_cafef_debug = {}
+_dnse_debug  = {}
+_yahoo_debug = {}
 
-                _cafef_internal_err = _cafef_full.pop('__error__', None)
-                _cafef_trace        = _cafef_full.pop('__trace__', None)
+if _missing_any:
+    def _run_cafef():
+        try:
+            return fetch_cafef_yearly_full(ticker, years=list(allowed_years))
+        except Exception:
+            return {}
 
-                _rev_cf = _filter_years(_cafef_full.get("revenue",      pd.Series(dtype=float)))
-                _np_cf  = _filter_years(_cafef_full.get("net_profit",   pd.Series(dtype=float)))
-                _eq_cf  = _filter_years(_cafef_full.get("equity",       pd.Series(dtype=float)))
-                _ta_cf  = _filter_years(_cafef_full.get("total_assets", pd.Series(dtype=float)))
+    def _run_dnse():
+        try:
+            return _fetch_dnse_financials(ticker, allowed_years)
+        except Exception:
+            return {}
 
-                _cafef_debug = {
-                    "revenue":      dict(_rev_cf),
-                    "net_profit":   dict(_np_cf),
-                    "equity":       dict(_eq_cf),
-                    "total_assets": dict(_ta_cf),
-                }
-                if _cafef_internal_err:
-                    _cafef_debug["__internal_error__"] = _cafef_internal_err
-                    _cafef_debug["__trace__"]          = _cafef_trace
+    def _run_yahoo():
+        try:
+            return _fetch_yahoo_financials(ticker, set(_missing_any))
+        except Exception:
+            return {}
 
-                revenue_series      = _merge_series(revenue_series,      _rev_cf)
-                net_profit_series   = _merge_series(net_profit_series,   _np_cf)
-                equity_series       = _merge_series(equity_series,       _eq_cf)
-                total_assets_series = _merge_series(total_assets_series, _ta_cf)
+    with ThreadPoolExecutor(max_workers=3) as _fb_ex:
+        _f_cafef = _fb_ex.submit(_run_cafef)
+        _f_dnse  = _fb_ex.submit(_run_dnse)
+        _f_yahoo = _fb_ex.submit(_run_yahoo)
 
-                _eps_cf_raw = _cafef_full.get("eps", pd.Series(dtype=float))
-                if not _eps_cf_raw.empty:
-                    _eps_cf = _filter_years(_eps_cf_raw)
-                    eps_series = _merge_series(eps_series, _eps_cf)
+        _cafef_full = _f_cafef.result()
+        _dnse_data  = _f_dnse.result()
+        _yahoo_data = _f_yahoo.result()
 
-            except Exception as _cafef_exc:
-                import traceback as _tb_cf
-                _cafef_debug["error"] = f"{type(_cafef_exc).__name__}: {_cafef_exc}"
-                _cafef_debug["trace"] = _tb_cf.format_exc(limit=5)
+    # Merge CafeF
+    _cafef_full.pop('__error__', None)
+    _cafef_full.pop('__trace__', None)
+    for _field, _series in [
+        ('revenue',      revenue_series),
+        ('net_profit',   net_profit_series),
+        ('equity',       equity_series),
+        ('total_assets', total_assets_series),
+        ('eps',          eps_series),
+    ]:
+        _s = _filter_years(_cafef_full.get(_field, pd.Series(dtype=float)))
+        if not _s.empty:
+            locals()[_field + '_series'] if False else None
+            if _field == 'eps':
+                eps_series = _merge_series(eps_series, _s)
+            else:
+                _merge_series(_series, _s)
 
-        # ─────────────────────────────────────────────────────────────────
-        # TẦNG 2 — DNSE fallback
-        # ─────────────────────────────────────────────────────────────────
-        _missing_after_cafef = sorted(
-            yr for yr in allowed_years
-            if (yr not in revenue_series.dropna().index
-                or yr not in net_profit_series.dropna().index
-                or yr not in equity_series.dropna().index
-                or yr not in total_assets_series.dropna().index)
-        )
+    revenue_series      = _merge_series(revenue_series,      _filter_years(_cafef_full.get('revenue',      pd.Series(dtype=float))))
+    net_profit_series   = _merge_series(net_profit_series,   _filter_years(_cafef_full.get('net_profit',   pd.Series(dtype=float))))
+    equity_series       = _merge_series(equity_series,       _filter_years(_cafef_full.get('equity',       pd.Series(dtype=float))))
+    total_assets_series = _merge_series(total_assets_series, _filter_years(_cafef_full.get('total_assets', pd.Series(dtype=float))))
+    eps_series          = _merge_series(eps_series,          _filter_years(_cafef_full.get('eps',          pd.Series(dtype=float))))
 
-        _dnse_debug = {}
-        if _missing_after_cafef:
-            try:
-                import requests as _req_dnse
-                _dnse_probe_url = (
-                    f"https://api.dnse.com.vn/analysis-api/v1/analysis/financial-report"
-                    f"?symbol={ticker}&type=IS&period=YEARLY"
-                )
-                try:
-                    _probe_r = _req_dnse.get(_dnse_probe_url,
-                                             headers={"Accept": "application/json", "User-Agent": "Mozilla/5.0"},
-                                             timeout=10)
-                    _dnse_debug["__probe_status__"] = _probe_r.status_code
-                    _dnse_debug["__probe_keys__"]   = list(_probe_r.json().keys()) if _probe_r.ok else _probe_r.text[:300]
-                except Exception as _pe:
-                    _dnse_debug["__probe_error__"] = str(_pe)
+    # Merge DNSE
+    revenue_series      = _merge_series(revenue_series,      _filter_years(normalize_to_billion_vnd(_dnse_data.get('revenue',      pd.Series(dtype=float)))))
+    net_profit_series   = _merge_series(net_profit_series,   _filter_years(normalize_to_billion_vnd(_dnse_data.get('net_profit',   pd.Series(dtype=float)))))
+    equity_series       = _merge_series(equity_series,       _filter_years(normalize_to_billion_vnd(_dnse_data.get('equity',       pd.Series(dtype=float)))))
+    total_assets_series = _merge_series(total_assets_series, _filter_years(normalize_to_billion_vnd(_dnse_data.get('total_assets', pd.Series(dtype=float)))))
 
-                _dnse_data = _fetch_dnse_financials(ticker, allowed_years)
-                _rev_dn  = _filter_years(normalize_to_billion_vnd(_dnse_data.get("revenue",      pd.Series(dtype=float))))
-                _np_dn   = _filter_years(normalize_to_billion_vnd(_dnse_data.get("net_profit",   pd.Series(dtype=float))))
-                _eq_dn   = _filter_years(normalize_to_billion_vnd(_dnse_data.get("equity",       pd.Series(dtype=float))))
-                _ta_dn   = _filter_years(normalize_to_billion_vnd(_dnse_data.get("total_assets", pd.Series(dtype=float))))
-
-                _dnse_debug.update({
-                    "revenue":      dict(_rev_dn),
-                    "net_profit":   dict(_np_dn),
-                    "equity":       dict(_eq_dn),
-                    "total_assets": dict(_ta_dn),
-                })
-
-                revenue_series      = _merge_series(revenue_series,      _rev_dn)
-                net_profit_series   = _merge_series(net_profit_series,   _np_dn)
-                equity_series       = _merge_series(equity_series,       _eq_dn)
-                total_assets_series = _merge_series(total_assets_series, _ta_dn)
-            except Exception as _dnse_exc:
-                import traceback as _tb_dn
-                _dnse_debug["error"] = f"{type(_dnse_exc).__name__}: {_dnse_exc}"
-                _dnse_debug["trace"] = _tb_dn.format_exc(limit=5)
-
-        # ─────────────────────────────────────────────────────────────────
-        # TẦNG 2b — Yahoo Finance fallback
-        # ─────────────────────────────────────────────────────────────────
-        _missing_after_dnse = sorted(
-            yr for yr in allowed_years
-            if (yr not in revenue_series.dropna().index
-                or yr not in net_profit_series.dropna().index
-                or yr not in equity_series.dropna().index
-                or yr not in total_assets_series.dropna().index)
-        )
-
-        _yahoo_debug = {}
-        if _missing_after_dnse:
-            try:
-                _yahoo_data = _fetch_yahoo_financials(ticker, set(_missing_after_dnse))
-                _rev_yh  = _filter_years(_yahoo_data.get("revenue",      pd.Series(dtype=float)))
-                _np_yh   = _filter_years(_yahoo_data.get("net_profit",   pd.Series(dtype=float)))
-                _eq_yh   = _filter_years(_yahoo_data.get("equity",       pd.Series(dtype=float)))
-                _ta_yh   = _filter_years(_yahoo_data.get("total_assets", pd.Series(dtype=float)))
-
-                _yahoo_debug = {
-                    "revenue":      dict(_rev_yh)  if not _rev_yh.empty  else "⚠️ rỗng",
-                    "net_profit":   dict(_np_yh)   if not _np_yh.empty   else "⚠️ rỗng",
-                    "equity":       dict(_eq_yh)   if not _eq_yh.empty   else "⚠️ rỗng",
-                    "total_assets": dict(_ta_yh)   if not _ta_yh.empty   else "⚠️ rỗng",
-                }
-
-                revenue_series      = _merge_series(revenue_series,      _rev_yh)
-                net_profit_series   = _merge_series(net_profit_series,   _np_yh)
-                equity_series       = _merge_series(equity_series,       _eq_yh)
-                total_assets_series = _merge_series(total_assets_series, _ta_yh)
-            except Exception as _yh_exc:
-                import traceback as _tb_yh
-                _yahoo_debug["error"] = f"{type(_yh_exc).__name__}: {_yh_exc}"
-                _yahoo_debug["trace"] = _tb_yh.format_exc(limit=5)
-
+    # Merge Yahoo
+    revenue_series      = _merge_series(revenue_series,      _filter_years(_yahoo_data.get('revenue',      pd.Series(dtype=float))))
+    net_profit_series   = _merge_series(net_profit_series,   _filter_years(_yahoo_data.get('net_profit',   pd.Series(dtype=float))))
+    equity_series       = _merge_series(equity_series,       _filter_years(_yahoo_data.get('equity',       pd.Series(dtype=float))))
+    total_assets_series = _merge_series(total_assets_series, _filter_years(_yahoo_data.get('total_assets', pd.Series(dtype=float))))
         # ─────────────────────────────────────────────────────────────────
         # TẦNG 3 — Website scraping
         # ─────────────────────────────────────────────────────────────────
