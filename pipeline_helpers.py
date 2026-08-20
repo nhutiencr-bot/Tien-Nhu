@@ -26,12 +26,23 @@ from unpatch_vnai import apply_unpatch
 apply_unpatch()
 
 # ════════════════════════════════════════════════════════════════════════
-# PATCH 1 — Khóa cứng khoảng năm bảng 5 năm: 2021–2025
-# Năm nào trong ALLOWED_YEARS mà không lấy được sẽ hiển thị None (trắng).
+# [ROOT-FIX] KHÔNG hardcode khoảng năm nữa.
+# Bản cũ "khoá cứng" TABLE_START_YEAR/TABLE_END_YEAR = 2021/2025 (PATCH 1),
+# trong khi equity_pipeline.py lại dùng datetime.today().year (giá trị
+# ĐỘNG) để quyết định "năm nào đang là năm hiện tại, chưa có báo cáo đầy
+# đủ". Hai nguồn "năm hiện tại" lệch nhau theo thời gian → đây là nguyên
+# nhân gốc của lỗi doanh thu năm mới nhất bị sai/thiếu dù financial_normalizer.py
+# đã sửa rất nhiều lần. Xem chi tiết trong comment [ROOT-FIX] ở đầu
+# financial_normalizer.py.
+#
+# Từ giờ TARGET_YEAR/TARGET_YEARS chỉ định nghĩa Ở MỘT NƠI DUY NHẤT
+# (financial_normalizer.py) và mọi nơi khác import lại từ đó.
 # ════════════════════════════════════════════════════════════════════════
-TABLE_START_YEAR = 2021
-TABLE_END_YEAR   = 2025
-ALLOWED_YEARS    = set(range(TABLE_START_YEAR, TABLE_END_YEAR + 1))  # {2021,2022,2023,2024,2025}
+from financial_normalizer import TARGET_YEAR, TARGET_YEARS
+
+TABLE_END_YEAR   = TARGET_YEAR
+TABLE_START_YEAR = TARGET_YEAR - 4
+ALLOWED_YEARS    = set(TARGET_YEARS)  # 5 năm gần nhất, tự cuốn chiếu theo TARGET_YEAR
 
 # PATCH 2 — Fetch 7 năm để dự phòng, sau đó _filter_years() cắt về đúng khoảng
 FETCH_LIMIT_YEAR = 7
