@@ -57,47 +57,69 @@ import pandas as pd
 
 
 # ---------------------------------------------------------------------------
-# [ROOT-FIX] Năm mục tiêu (TARGET_YEAR) — KHÔNG hardcode nữa.
+# [ROOT-FIX v2] Có HAI khái niệm "năm hiện tại" khác nhau, KHÔNG được
+# gộp làm một (bản vá trước của tôi đã mắc đúng lỗi này):
 #
-# Lý do đây là chỗ hay gãy nhất của toàn bộ pipeline:
-#   - financial_normalizer.py hardcode TARGET_YEAR = 2025.
-#   - pipeline_helpers.py hardcode TABLE_END_YEAR = 2025 (một "PATCH" trước đó).
-#   - equity_pipeline.py lại dùng datetime.today().year (giá trị ĐỘNG) ở
-#     7 chỗ khác nhau để quyết định "năm nào đang là năm hiện tại, chưa
-#     có báo cáo năm đầy đủ, phải ưu tiên cộng dồn quý thay vì tin cột năm".
+#   1. TARGET_YEAR — năm CUỐI CÙNG của bảng 5 năm hiển thị (2021-2025...).
+#      Đây phải là năm đã ĐÓNG SỔ, tức đã/gần như chắc chắn có báo cáo
+#      tài chính năm (thường công bố trong Q1 năm sau, hạn chót ~31/3
+#      theo quy định UBCKNN). KHÔNG được để bằng năm lịch hiện tại,
+#      nếu không năm đang chạy dở (chỉ có 1-3 quý) sẽ lọt vào bảng.
 #
-# Ba nguồn "năm hiện tại" này KHÔNG đồng bộ. Khi ngày hệ thống đổi (ví dụ
-# sang năm mới), datetime.today().year nhảy lên trong khi hai hằng số kia
-# vẫn đứng yên ở 2025 → toàn bộ logic "đừng tin annual API cho năm chưa
-# xong, ưu tiên cộng quý / sanity-check outlier" ở equity_pipeline.py
-# (Tầng 0, Tầng 0b, SANITY CHECK 1) lặng lẽ NGỪNG kích hoạt cho năm 2025,
-# vì điều kiện so sánh `_yr0 == datetime.today().year` không còn đúng.
-# Kết quả: doanh thu 2025 bị lấy thẳng từ cột annual (có thể chỉ là dữ
-# liệu luỹ kế 1-3 quý, hoặc bị gộp sai) mà không còn cơ chế nào phát hiện
-# / sửa — dù find_row_series()/_search_with_priority() trong file này có
-# vá bao nhiêu lần cũng không đụng tới nguồn gốc lỗi.
+#   2. IN_PROGRESS_YEAR — năm lịch THỰC TẾ hôm nay (datetime.today().year),
+#      dùng để nhận diện "năm này chắc chắn CHƯA có báo cáo năm đầy đủ,
+#      phải ưu tiên cộng dồn quý". Đây là khái niệm dùng trong
+#      equity_pipeline.py cho Tầng 0 / SANITY CHECK.
 #
-# Sửa gốc: TARGET_YEAR phải LUÔN LÀ MỘT, dùng chung cho toàn bộ pipeline.
-# Ở đây định nghĩa nó dựa trên ngày hệ thống thực tế (không hardcode),
-# các file khác (pipeline_helpers.py, equity_pipeline.py) PHẢI import
-# TARGET_YEAR/TARGET_YEARS từ đây thay vì tự định nghĩa hằng số riêng.
+# Bug trước đây (2 lượt sửa gộp chung 1 biến TARGET_YEAR cho cả 2 việc):
+#   (a) Lượt 1: TARGET_YEAR hardcode = 2025 mãi mãi trong khi
+#       equity_pipeline.py dùng datetime.today().year động ⇒ khi lịch hệ
+#       thống đã sang 2026, điều kiện "_yr0 == datetime.today().year" cho
+#       2025 luôn False ⇒ toàn bộ cơ chế cộng-dồn-quý/sanity-check ngừng
+#       áp dụng cho 2025 ⇒ tin nhầm annual value có thể sai/thiếu.
+#   (b) Lượt 2 (bản vá trước của tôi): đổi TARGET_YEAR = ngày_hôm_nay.year
+#       (2026) để "đồng bộ" — nhưng làm vậy khiến khung 5 năm TRÔI theo
+#       lịch thực thành 2022-2026, kéo theo:
+#         - Cào thêm năm 2026 (mới có 2 quý, chưa đóng sổ) vào bảng.
+#         - Làm rớt năm 2021 ra khỏi allowed_years.
+#         - _is_current_year giờ so sánh _yr0 == 2026 nên KHÔNG BAO GIỜ
+#           đúng với 2025 nữa ⇒ 2025 (dù đã đóng sổ) bị coi là "năm chưa
+#           đóng sổ" ở một chỗ khác của logic cũ và ngược lại tuỳ nơi —
+#           vẫn sai, chỉ là sai kiểu khác.
+#
+# Sửa đúng: tách hẳn 2 hằng số, KHÔNG bao giờ dùng lẫn cho nhau.
+# equity_pipeline.py phải import CẢ HAI và dùng đúng ngữ cảnh:
+#   - "X in allowed_years" / "_is_current_year" / "đừng tin annual"
+#     → dùng IN_PROGRESS_YEAR.
+#   - Khung hiển thị 5 năm (ALLOWED_YEARS, TABLE_END_YEAR)
+#     → dùng TARGET_YEAR.
 # ---------------------------------------------------------------------------
 
 def _compute_target_year(today: _dt.date = None) -> int:
     """
-    Năm tài chính gần nhất mà bảng 5 năm cần "cố gắng có đủ dữ liệu".
-    Đơn giản hoá: luôn là năm hiện tại theo lịch hệ thống. equity_pipeline.py
-    chịu trách nhiệm coi đây là năm "có thể chưa có báo cáo annual đầy đủ"
-    và ưu tiên cộng dồn quý / sanity-check, KHÔNG được tự suy ra "năm hiện
-    tại" theo cách khác (vd. datetime.today().year riêng lẻ) vì sẽ lại
-    tạo ra 2 nguồn sự thật như bug cũ.
+    Năm CUỐI của bảng 5 năm — năm gần nhất được coi là đã đóng sổ.
+
+    Quy tắc: doanh nghiệp niêm yết VN phải công bố BCTC năm (kiểm toán)
+    trong vòng ~90 ngày sau khi kết thúc năm tài chính, hạn chót thường
+    là 31/3 năm sau. Để an toàn, chỉ coi năm N là "đã đóng sổ" (đưa vào
+    bảng) kể từ tháng 4 năm N+1 trở đi; nếu đang ở Q1 (tháng 1-3), lùi
+    thêm 1 năm nữa vì báo cáo của năm N có thể chưa công bố xong.
     """
+    d = today or _dt.date.today()
+    if d.month >= 4:
+        return d.year - 1
+    return d.year - 2
+
+
+def _compute_in_progress_year(today: _dt.date = None) -> int:
+    """Năm lịch THỰC TẾ hôm nay — năm chắc chắn chưa đóng sổ (≤4 quý)."""
     d = today or _dt.date.today()
     return d.year
 
 
 TARGET_YEAR = _compute_target_year()
-TARGET_YEARS = list(range(TARGET_YEAR - 4, TARGET_YEAR + 1))  # 5 năm gần nhất, tự cuốn chiếu
+IN_PROGRESS_YEAR = _compute_in_progress_year()
+TARGET_YEARS = list(range(TARGET_YEAR - 4, TARGET_YEAR + 1))  # 5 năm gần nhất ĐÃ đóng sổ
 
 
 # ---------------------------------------------------------------------------
@@ -899,14 +921,19 @@ if __name__ == '__main__':
     assert result.get(Y4) == 999, f'FAIL priority fallback: {result.get(Y4)}'
     print('✅ _search_with_priority: skip dòng thiếu năm mới nhất, fallback đúng sang dòng có đủ')
 
-    # --- Test 4b: [ROOT-FIX regression] TARGET_YEAR phải tự cuốn theo ngày hệ thống ---
-    fake_today = _dt.date(TARGET_YEAR + 1, 3, 15)  # giả lập sang năm sau
-    assert _compute_target_year(fake_today) == TARGET_YEAR + 1, (
-        'FAIL: TARGET_YEAR không cuốn chiếu theo ngày hệ thống — đây chính là '
-        'bug gốc khiến pipeline lệch năm giữa financial_normalizer.py và '
-        'equity_pipeline.py (xem comment [ROOT-FIX] đầu file).'
+    # --- Test 4b: [ROOT-FIX v2 regression] TARGET_YEAR phải là năm ĐÃ đóng sổ,
+    #     KHÔNG bao giờ được bằng năm lịch hiện tại (IN_PROGRESS_YEAR) ---
+    assert TARGET_YEAR < IN_PROGRESS_YEAR, (
+        f'FAIL: TARGET_YEAR ({TARGET_YEAR}) phải nhỏ hơn IN_PROGRESS_YEAR '
+        f'({IN_PROGRESS_YEAR}) — nếu bằng nhau, năm chưa đóng sổ sẽ lọt '
+        f'vào bảng 5 năm (đúng bug đã gặp: cào thêm 2026 khi 2026 mới có 2 quý).'
     )
-    print('✅ TARGET_YEAR cuốn chiếu đúng theo ngày hệ thống (không còn hardcode 2025)')
+    # Giữa năm (tháng >= 4): năm trước liền kề coi là đã đóng sổ
+    assert _compute_target_year(_dt.date(2026, 8, 20)) == 2025
+    # Đầu năm (tháng 1-3): báo cáo năm trước có thể CHƯA công bố xong → lùi thêm 1 năm
+    assert _compute_target_year(_dt.date(2026, 2, 1)) == 2024
+    print(f'✅ TARGET_YEAR={TARGET_YEAR} (đã đóng sổ) < IN_PROGRESS_YEAR={IN_PROGRESS_YEAR} '
+          f'(đang chạy dở) — không còn lẫn 2 khái niệm vào 1 biến')
 
     # --- Test 5: _norm_label ---
     assert _norm_label('hoạt động') == 'hoat dong'
