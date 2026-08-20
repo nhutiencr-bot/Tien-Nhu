@@ -7,9 +7,14 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from financial_normalizer import (
     find_row_series, build_5y_financial_table, build_financial_table,
     get_latest, get_latest_n_years, cagr,
-    TARGET_YEAR,  # [ROOT-FIX] năm báo cáo mới nhất — nguồn sự thật DUY NHẤT,
-                  # KHÔNG dùng datetime.today().year rời rạc ở nhiều chỗ nữa
-                  # (xem comment [ROOT-FIX] trong financial_normalizer.py)
+    # [ROOT-FIX v2] HAI hằng số năm KHÁC NHAU, dùng đúng chỗ — xem comment
+    # [ROOT-FIX v2] đầu financial_normalizer.py để hiểu vì sao tách ra:
+    #   TARGET_YEAR       = năm cuối bảng 5 năm, ĐÃ đóng sổ (vd 2025)
+    #   IN_PROGRESS_YEAR  = năm lịch hôm nay, CHƯA đóng sổ (vd 2026)
+    # Test build_5y_financial_table không dùng datetime.today().year rời rạc
+    # ở nhiều chỗ nữa — đó chính là bug khiến 2026 (2 quý) lọt vào bảng và
+    # đồng thời khiến 2025 vẫn bị coi nhầm là "năm chưa đóng sổ" ở nơi khác.
+    TARGET_YEAR, IN_PROGRESS_YEAR,
 )
 from valuation import (
     dupont_decomposition, dcf_fcff_scenarios, reverse_dcf_implied_growth,
@@ -329,7 +334,7 @@ def execute_equity_research_pipeline(ticker):
                 or yr not in equity_series.dropna().index
                 or yr not in total_assets_series.dropna().index)
         )
-        _current_yr_q0 = TARGET_YEAR  # [ROOT-FIX] không dùng datetime.today().year rời rạc
+        _current_yr_q0 = IN_PROGRESS_YEAR  # [ROOT-FIX v2] năm đang chạy dở, KHÔNG phải TARGET_YEAR
         if _current_yr_q0 in allowed_years:
             if df_income_q is not None and not df_income_q.empty:
                 _inc_q_cols_check = [c for c in df_income_q.columns
@@ -391,7 +396,7 @@ def execute_equity_research_pipeline(ticker):
         for _yr0 in _years_q0_check:
             # FIX 2: Năm hiện tại KHÔNG tin tưởng annual API vì dữ liệu chưa đủ năm.
             # Bỏ qua annual, fallback thẳng xuống quarterly để lấy YTD chính xác.
-            _is_current_year = (_yr0 == TARGET_YEAR)  # [ROOT-FIX]
+            _is_current_year = (_yr0 == IN_PROGRESS_YEAR)  # [ROOT-FIX v2]
 
             _filled_from_annual = {}
             if df_income is not None and not df_income.empty and not _is_current_year:
@@ -464,7 +469,7 @@ def execute_equity_research_pipeline(ticker):
                             _series[_yr0] = _agg[_field]
 
         # ── Tầng 0c: Balance sheet năm hiện tại từ annual nếu balance_q không có ──
-        _current_yr = TARGET_YEAR  # [ROOT-FIX]
+        _current_yr = IN_PROGRESS_YEAR  # [ROOT-FIX v2]
         if _current_yr in allowed_years:
             for _field, _series, _df, _kws, _ex in [
                 ('equity',       equity_series,       df_balance,
@@ -496,7 +501,7 @@ def execute_equity_research_pipeline(ticker):
                 or yr not in equity_series.dropna().index
                 or yr not in total_assets_series.dropna().index)
         )
-        _current_yr_0b = TARGET_YEAR  # [ROOT-FIX]
+        _current_yr_0b = IN_PROGRESS_YEAR  # [ROOT-FIX v2]
         if _current_yr_0b in allowed_years:
             _still_missing_0b = sorted(set(_still_missing_0b) | {_current_yr_0b})
 
@@ -591,9 +596,14 @@ def execute_equity_research_pipeline(ticker):
             _rev_bad_high = [yr for yr in revenue_series.dropna().index
                              if revenue_series[yr] > _rev_median * 10]
 
-            # FIX 1: Lower bound: năm hiện tại quá thấp so với median (<20%)
-            # → nhiều khả năng là partial-year data từ annual API
-            _current_yr_sanity = TARGET_YEAR  # [ROOT-FIX]
+            # FIX 1: Lower bound cho năm MỚI NHẤT trong bảng (TARGET_YEAR,
+            # ví dụ 2025) — không dùng IN_PROGRESS_YEAR ở đây vì năm đang
+            # chạy dở (2026) không nằm trong revenue_series/allowed_years,
+            # nên check sẽ không bao giờ chạm tới nó. TARGET_YEAR tuy về lý
+            # thuyết đã đóng sổ, nhưng vẫn là năm DỄ bị nguồn dữ liệu
+            # (CafeF/vnstock) trả về bản nháp/luỹ kế chưa đầy đủ nhất do độ
+            # trễ cập nhật phía nguồn — giữ sanity-check này làm lưới an toàn.
+            _current_yr_sanity = TARGET_YEAR
             _rev_bad_low = [
                 yr for yr in revenue_series.dropna().index
                 if yr == _current_yr_sanity
@@ -684,7 +694,7 @@ def execute_equity_research_pipeline(ticker):
                 or yr not in equity_series.dropna().index
                 or yr not in total_assets_series.dropna().index)
         )
-        _current_yr_miss = TARGET_YEAR  # [ROOT-FIX]
+        _current_yr_miss = IN_PROGRESS_YEAR  # [ROOT-FIX v2]
         if _current_yr_miss in allowed_years and _current_yr_miss not in _missing_any:
             _missing_any = sorted(set(_missing_any) | {_current_yr_miss})
 
