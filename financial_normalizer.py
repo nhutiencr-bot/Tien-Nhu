@@ -330,62 +330,41 @@ def find_row_series(df: pd.DataFrame, keywords, exclude_keywords=None,
         return pd.Series(dtype=float)
 
     # ------------------------------------------------------------------
-    # [ROOT-FIX v3] TÁCH chọn dòng cho "2021-2024" (đã đóng sổ, ổn định)
-    # và "TARGET_YEAR" (2025, dễ bị nguồn dữ liệu trả sai/khác định dạng)
-    # THÀNH HAI LẦN CHỌN ĐỘC LẬP, thay vì chọn 1 dòng duy nhất áp dụng cho
-    # cả 5 cột như trước.
+    # [ROOT-FIX v3 → REVERTED] Từng thử tách chọn dòng riêng cho
+    # 2021-2024 vs TARGET_YEAR NGAY TRONG find_row_series (tức trong tập
+    # "matched" — các dòng cùng khớp MỘT bộ từ khoá lỏng lẻo). Hậu quả
+    # thực tế trên VCB: 2021-2024 vẫn đúng (Thu nhập lãi thuần), nhưng
+    # 2025 bị "mượn" giá trị từ một dòng KHÁC trong cùng tập matched —
+    # dòng đó cũng khớp lỏng bộ từ khoá (vd cũng chứa "thu nhập"/"thuần")
+    # nhưng là MỘT KHÁI NIỆM KẾ TOÁN KHÁC (rộng hơn NII), cho ra 69,054
+    # thay vì 58,771.41 đúng. Tách ở lớp "matched rows của 1 bộ từ khoá"
+    # là KHÔNG AN TOÀN vì các dòng trong "matched" không đảm bảo cùng
+    # khái niệm — chúng chỉ đảm bảo cùng khớp từ khoá.
     #
-    # Lý do: logic cũ (FIX 8) chọn MỘT dòng cho toàn bộ 5 năm, ưu tiên
-    # dòng "có data ở năm mới nhất". Hệ quả 2 chiều:
-    #   (a) Nếu dòng khớp keyword tốt nhất cho 2021-2024 lại KHÔNG có data
-    #       ở 2025 (vd. công ty đổi tên khoản mục / cấu trúc báo cáo từ
-    #       2025), thuật toán BỎ QUA dòng đó dù nó đúng cho 2021-2024, và
-    #       chọn một dòng khác (có thể sai khái niệm) chỉ vì nó "có" 2025.
-    #   (b) Ngược lại, nếu dòng đúng cho 2025 lại thiếu dữ liệu một vài
-    #       năm cũ, các năm cũ bị lấy nhầm từ CHÍNH dòng đó luôn (dù dòng
-    #       khác mới là lựa chọn tốt hơn cho 2021-2024).
-    # Đây là lỗi "cào 5 năm dính liền" — một lựa chọn dòng bị dùng chung
-    # cho toàn bộ chuỗi, khiến sai số ở 1 năm kéo theo/che lấp năm khác.
+    # → Chuyển việc tách 2021-2024 / TARGET_YEAR lên _search_with_priority()
+    # thay vì làm ở đây. Ở đó, mỗi "tier" trong priority list là MỘT khái
+    # niệm kế toán được đặt tên rõ ràng, xếp hạng ưu tiên bởi người viết
+    # (NII → Tổng thu nhập HĐ thuần → ...). Nếu tier ưu tiên nhất thiếu
+    # đúng TARGET_YEAR, ta mới thử tier kế tiếp CHỈ CHO NĂM ĐÓ — không
+    # bao giờ trộn 2 dòng chưa rõ cùng khái niệm hay không như ở đây.
     #
-    # Sửa: chọn dòng tốt nhất RIÊNG cho year_cols < TARGET_YEAR (2021-2024)
-    # và RIÊNG cho year_cols >= TARGET_YEAR (2025), rồi ghép giá trị theo
-    # đúng cột — mỗi năm lấy từ dòng phù hợp nhất với chính năm đó.
+    # Ở find_row_series, quay lại logic chọn 1 dòng duy nhất cho toàn bộ
+    # keyword-set (an toàn hơn — mọi dòng trong "matched" ít nhất đã cùng
+    # khớp 1 bộ từ khoá, nhưng KHÔNG trộn giá trị giữa các dòng đó nữa).
     # ------------------------------------------------------------------
     if len(matched) > 1:
-        def _year_of(col):
-            try:
-                return int(str(col).strip()[:4])
-            except (ValueError, TypeError):
-                return -1
-
-        hist_cols = [c for c in year_cols if _year_of(c) < TARGET_YEAR]
-        latest_cols = [c for c in year_cols if _year_of(c) >= TARGET_YEAR]
-
-        def _pick_best_row(cols):
-            if not cols:
-                return None
-            has_data = matched[cols].notna().any(axis=1)
-            candidates = matched[has_data] if has_data.any() else matched
-            non_na_counts = candidates[cols].notna().sum(axis=1)
-            return candidates.loc[non_na_counts.idxmax()]
-
-        row_hist = _pick_best_row(hist_cols)
-        row_latest = _pick_best_row(latest_cols)
-        # Nếu 1 trong 2 nhóm không tìm được dòng (vd rỗng), dùng dòng còn lại
-        row_hist = row_hist if row_hist is not None else row_latest
-        row_latest = row_latest if row_latest is not None else row_hist
+        latest_col = year_cols[-1]
+        has_latest = matched[latest_col].notna()
+        candidates = matched[has_latest] if has_latest.any() else matched
+        non_na_counts = candidates[year_cols].notna().sum(axis=1)
+        row = candidates.loc[non_na_counts.idxmax()]
     else:
-        row_hist = row_latest = matched.iloc[0]
+        row = matched.iloc[0]
 
-    # Build result dict — mỗi cột lấy giá trị từ dòng phù hợp với NHÓM của nó
+    # Build result dict
     result = {}
     for yc in year_cols:
-        if len(matched) > 1:
-            yr_of_col = int(str(yc).strip()[:4]) if str(yc).strip()[:4].isdigit() else -1
-            src_row = row_latest if yr_of_col >= TARGET_YEAR else row_hist
-        else:
-            src_row = row_hist
-        val = pd.to_numeric(pd.Series([src_row[yc]]), errors='coerce').iloc[0]
+        val = pd.to_numeric(pd.Series([row[yc]]), errors='coerce').iloc[0]
         if pd.notna(val):
             if period == 'quarter':
                 result[str(yc).strip()] = float(val)
@@ -408,41 +387,65 @@ def find_row_series(df: pd.DataFrame, keywords, exclude_keywords=None,
 # [FIX 13] _search_with_priority — so sánh theo TARGET_YEAR thực tế
 # ---------------------------------------------------------------------------
 
+def _resolve_year_tiers(all_tier_series):
+    """
+    [ROOT-FIX v4] Nhận danh sách Series đã tìm được, xếp theo THỨ TỰ ƯU
+    TIÊN (phần tử 0 = ưu tiên cao nhất — có thể là taxonomy ID match hoặc
+    keyword tier, miễn là người viết code đã xếp hạng có chủ đích).
+
+    Trả về 1 Series: base = tier ưu tiên cao nhất có dữ liệu (dùng cho
+    TOÀN BỘ các năm, kể cả TARGET_YEAR nếu tier đó có). CHỈ khi base
+    thiếu đúng TARGET_YEAR, mới tìm ở các tier sau để lấy value TARGET_YEAR
+    — không đụng tới các năm còn lại của base.
+
+    Dùng chung cho _search_with_priority() và các hàm _find_revenue_for_*
+    (nơi taxonomy-ID match và keyword-priority match trước đây bị xử lý
+    tách rời — taxonomy match thiếu TARGET_YEAR từng bị VỨT BỎ HOÀN TOÀN
+    (kể cả phần lịch sử đúng), buộc phải tìm lại từ đầu bằng keyword và có
+    thể ra một dòng khác cho toàn bộ chuỗi — đây là nguồn gốc thực sự của
+    lỗi 2025=69,054 thay vì 58,771 ở VCB).
+    """
+    all_tier_series = [s for s in all_tier_series
+                        if s is not None and not s.empty and not s.dropna().empty]
+    if not all_tier_series:
+        return pd.Series(dtype=float)
+
+    base = all_tier_series[0].copy()
+    base_has_target = TARGET_YEAR in base.index and pd.notna(base.get(TARGET_YEAR))
+    if not base_has_target:
+        for s in all_tier_series[1:]:
+            v = s.get(TARGET_YEAR)
+            if pd.notna(v):
+                base.loc[TARGET_YEAR] = v
+                break
+    return base.sort_index()
+
+
 def _search_with_priority(df_income, priority: list, period: str):
     """
-    Duyệt priority list. Ưu tiên series có data tại TARGET_YEAR (2025).
-    Không return sớm khi series thiếu năm hiện tại — thử priority tiếp theo.
-    Chỉ dùng fallback khi không có lựa chọn nào có đủ 2025.
+    Duyệt priority list theo thứ tự ưu tiên (mỗi tier = một khái niệm kế
+    toán được đặt tên rõ ràng, vd tier 1 = NII, tier 2 = Tổng thu nhập HĐ...).
+    Xem _resolve_year_tiers() để biết cách gộp lịch sử/TARGET_YEAR.
     """
-    best_fallback = None
+    if period != 'year':
+        # Quarter: giữ hành vi cũ — trả về tier đầu tiên có dữ liệu
+        for includes, excludes in priority:
+            s = find_row_series(
+                df_income, keywords=includes,
+                exclude_keywords=excludes if excludes else None, period=period,
+            )
+            if s is not None and not s.empty and not s.dropna().empty:
+                return s
+        return pd.Series(dtype=float)
 
-    for includes, excludes in priority:
-        s = find_row_series(
-            df_income,
-            keywords=includes,
-            exclude_keywords=excludes if excludes else None,
-            period=period,
+    all_tier_series = [
+        find_row_series(
+            df_income, keywords=includes,
+            exclude_keywords=excludes if excludes else None, period='year',
         )
-        if s is None or s.empty:
-            continue
-
-        s_notna = s.dropna()
-        if s_notna.empty:
-            continue
-
-        if period == 'year':
-            # [FIX 13] Kiểm tra bằng int năm thực tế, không dùng positional index
-            max_yr = int(s_notna.index.max())
-            if max_yr >= TARGET_YEAR:
-                return s          # ✅ Có data tại năm hiện tại → dùng luôn
-            # Có data nhưng thiếu năm hiện tại → giữ fallback
-            if best_fallback is None:
-                best_fallback = s
-        else:
-            # Quarter: return ngay khi có data
-            return s
-
-    return best_fallback if best_fallback is not None else pd.Series(dtype=float)
+        for includes, excludes in priority
+    ]
+    return _resolve_year_tiers(all_tier_series)
 
 
 # ---------------------------------------------------------------------------
@@ -455,22 +458,6 @@ def _find_revenue_for_bank(df_income, period='year'):
     Ưu tiên NII (thu nhập lãi thuần) — sau khi đã trừ chi phí lãi.
     Fallback gross chỉ dùng khi NII hoàn toàn rỗng.
     """
-    # [FIX 10] Taxonomy ID trước
-    for tax_id in BANK_REVENUE_IDS:
-        s = find_row_series(
-            df_income,
-            keywords=['net interest income', 'thu nhap lai thuan'],
-            item_ids=[tax_id],
-            period=period,
-        )
-        if s is not None and not s.empty:
-            s_notna = s.dropna()
-            if not s_notna.empty:
-                max_yr = int(s_notna.index.max()) if period == 'year' else None
-                if period != 'year' or max_yr >= TARGET_YEAR:
-                    return s
-
-    # Keyword fallback — priority có loại trừ mạnh để tránh gross income
     priority = [
         (
             # Priority 1: NII — loại trừ "tương tự" để không pick gross
@@ -493,25 +480,38 @@ def _find_revenue_for_bank(df_income, period='year'):
             ['loi nhuan', 'profit', 'sau thue'],
         ),
     ]
-    return _search_with_priority(df_income, priority, period)
+
+    if period != 'year':
+        for tax_id in BANK_REVENUE_IDS:
+            s = find_row_series(
+                df_income, keywords=['net interest income', 'thu nhap lai thuan'],
+                item_ids=[tax_id], period=period,
+            )
+            if s is not None and not s.empty and not s.dropna().empty:
+                return s
+        return _search_with_priority(df_income, priority, period)
+
+    # [ROOT-FIX v4] Gộp taxonomy-ID tiers + keyword tiers thành MỘT danh
+    # sách ưu tiên duy nhất, xử lý qua _resolve_year_tiers — không còn
+    # vứt bỏ nguyên series taxonomy chỉ vì thiếu đúng TARGET_YEAR.
+    tier_series = [
+        find_row_series(
+            df_income, keywords=['net interest income', 'thu nhap lai thuan'],
+            item_ids=[tax_id], period='year',
+        )
+        for tax_id in BANK_REVENUE_IDS
+    ]
+    tier_series += [
+        find_row_series(
+            df_income, keywords=includes,
+            exclude_keywords=excludes if excludes else None, period='year',
+        )
+        for includes, excludes in priority
+    ]
+    return _resolve_year_tiers(tier_series)
 
 
 def _find_revenue_for_securities(df_income, period='year'):
-    # [FIX 10] Taxonomy ID trước
-    for tax_id in SECURITIES_REVENUE_IDS:
-        s = find_row_series(
-            df_income,
-            keywords=['doanh thu hoat dong', 'operating revenue'],
-            item_ids=[tax_id],
-            period=period,
-        )
-        if s is not None and not s.empty:
-            s_notna = s.dropna()
-            if not s_notna.empty:
-                max_yr = int(s_notna.index.max()) if period == 'year' else None
-                if period != 'year' or max_yr >= TARGET_YEAR:
-                    return s
-
     priority = [
         (
             ['doanh thu hoat dong', 'operating revenue', 'tong doanh thu hoat dong'],
@@ -526,25 +526,36 @@ def _find_revenue_for_securities(df_income, period='year'):
             ['chi phi', 'gia von', 'cost'],
         ),
     ]
-    return _search_with_priority(df_income, priority, period)
+
+    if period != 'year':
+        for tax_id in SECURITIES_REVENUE_IDS:
+            s = find_row_series(
+                df_income, keywords=['doanh thu hoat dong', 'operating revenue'],
+                item_ids=[tax_id], period=period,
+            )
+            if s is not None and not s.empty and not s.dropna().empty:
+                return s
+        return _search_with_priority(df_income, priority, period)
+
+    # [ROOT-FIX v4] Gộp taxonomy-ID + keyword thành 1 danh sách ưu tiên
+    tier_series = [
+        find_row_series(
+            df_income, keywords=['doanh thu hoat dong', 'operating revenue'],
+            item_ids=[tax_id], period='year',
+        )
+        for tax_id in SECURITIES_REVENUE_IDS
+    ]
+    tier_series += [
+        find_row_series(
+            df_income, keywords=includes,
+            exclude_keywords=excludes if excludes else None, period='year',
+        )
+        for includes, excludes in priority
+    ]
+    return _resolve_year_tiers(tier_series)
 
 
 def _find_revenue_for_insurance(df_income, period='year'):
-    # [FIX 10] Taxonomy ID trước
-    for tax_id in INSURANCE_REVENUE_IDS:
-        s = find_row_series(
-            df_income,
-            keywords=['phi bao hiem thuan', 'net premium'],
-            item_ids=[tax_id],
-            period=period,
-        )
-        if s is not None and not s.empty:
-            s_notna = s.dropna()
-            if not s_notna.empty:
-                max_yr = int(s_notna.index.max()) if period == 'year' else None
-                if period != 'year' or max_yr >= TARGET_YEAR:
-                    return s
-
     priority = [
         (
             ['phi bao hiem thuan', 'doanh thu phi bao hiem', 'net premium',
@@ -560,7 +571,33 @@ def _find_revenue_for_insurance(df_income, period='year'):
             ['chi phi', 'gia von'],
         ),
     ]
-    return _search_with_priority(df_income, priority, period)
+
+    if period != 'year':
+        for tax_id in INSURANCE_REVENUE_IDS:
+            s = find_row_series(
+                df_income, keywords=['phi bao hiem thuan', 'net premium'],
+                item_ids=[tax_id], period=period,
+            )
+            if s is not None and not s.empty and not s.dropna().empty:
+                return s
+        return _search_with_priority(df_income, priority, period)
+
+    # [ROOT-FIX v4] Gộp taxonomy-ID + keyword thành 1 danh sách ưu tiên
+    tier_series = [
+        find_row_series(
+            df_income, keywords=['phi bao hiem thuan', 'net premium'],
+            item_ids=[tax_id], period='year',
+        )
+        for tax_id in INSURANCE_REVENUE_IDS
+    ]
+    tier_series += [
+        find_row_series(
+            df_income, keywords=includes,
+            exclude_keywords=excludes if excludes else None, period='year',
+        )
+        for includes, excludes in priority
+    ]
+    return _resolve_year_tiers(tier_series)
 
 
 def _find_revenue_for_realestate(df_income, period='year'):
@@ -964,26 +1001,35 @@ if __name__ == '__main__':
     assert result.get(Y4) == 999, f'FAIL priority fallback: {result.get(Y4)}'
     print('✅ _search_with_priority: skip dòng thiếu năm mới nhất, fallback đúng sang dòng có đủ')
 
-    # --- Test 4c: [ROOT-FIX v3] TÁCH chọn dòng cho 2021-2024 vs TARGET_YEAR,
-    #     không để 1 dòng "dính liền" áp đặt cho cả 5 năm ---
-    # Dòng A: đúng khái niệm cho 2021-2024, nhưng THIẾU năm TARGET_YEAR
-    #         (vd. công ty đổi tên khoản mục kể từ TARGET_YEAR).
-    # Dòng B: chỉ có giá trị ở TARGET_YEAR (khoản mục mới/đổi tên),
-    #         KHÔNG có 2021-2024.
-    # Kỳ vọng: 2021-2024 lấy từ dòng A, TARGET_YEAR lấy từ dòng B —
-    # không dòng nào "thắng" toàn bộ 5 năm.
-    df_split = _make_df(
-        ['Doanh thu thuần bán hàng (tên cũ)',   # dòng A: có 2021-2024, KHÔNG có TARGET_YEAR
-         'Doanh thu thuần (tên mới)'],          # dòng B: chỉ có TARGET_YEAR
-        {Y0: [100, None], Y1: [110, None], Y2: [120, None], Y3: [130, None],
-         Y4: [None, 999]},
+    # --- Test 4c: [ROOT-FIX v4] _resolve_year_tiers — tách theo TIER
+    #     (khái niệm đặt tên rõ ràng), KHÔNG tách theo dòng khớp mờ như
+    #     ROOT-FIX v3 (đã revert vì gây lỗi thực tế trên VCB: 2025 bị
+    #     "mượn" nhầm giá trị 69,054 từ dòng khác thay vì 58,771 đúng).
+    #
+    # Trường hợp 1 — bình thường: tier ưu tiên cao nhất (NII) có ĐỦ cả
+    # 2021-2024 lẫn TARGET_YEAR → dùng nguyên tier đó, KHÔNG được lấy giá
+    # trị TARGET_YEAR từ tier khác dù tier khác có giá trị lớn hơn.
+    # (Đây chính là bug đã xảy ra: nếu code lỡ ưu tiên "tier nào có
+    # TARGET_YEAR" thay vì "tier 0 nếu đã đủ", 58,771 sẽ bị 69,054 ghi đè.)
+    tier0_full = pd.Series({Y0: 42273.0, Y1: 53246.0, Y2: 53615.0, Y3: 55406.0, Y4: 58771.0})
+    tier1_bigger = pd.Series({Y0: 50000.0, Y1: 62000.0, Y2: 63000.0, Y3: 65000.0, Y4: 69054.0})
+    resolved = _resolve_year_tiers([tier0_full, tier1_bigger])
+    assert resolved[Y4] == 58771.0, (
+        f'FAIL: TARGET_YEAR bị ghi đè bởi tier khác dù tier 0 đã có đủ dữ liệu '
+        f'({resolved[Y4]} thay vì 58771.0) — đúng dạng bug đã gặp trên VCB.'
     )
-    rev_split = find_row_series(df_split, keywords=['doanh thu thuan'])
-    assert rev_split.get(Y0) == 100, f'FAIL split hist Y0: {rev_split.get(Y0)}'
-    assert rev_split.get(Y3) == 130, f'FAIL split hist Y3: {rev_split.get(Y3)}'
-    assert rev_split.get(Y4) == 999, f'FAIL split target year: {rev_split.get(Y4)}'
-    print(f'✅ ROOT-FIX v3: tách dòng đúng — 2021-2024 lấy dòng A ({Y0}={rev_split[Y0]:.0f}), '
-          f'{Y4} lấy dòng B ({rev_split[Y4]:.0f}), không còn "dính liền" 1 dòng cho cả 5 năm')
+    assert resolved[Y0] == 42273.0
+    print(f'✅ _resolve_year_tiers: tier 0 đủ dữ liệu → dùng nguyên, không bị tier khác '
+          f'ghi đè TARGET_YEAR (58771 giữ nguyên, không lẫn 69054)')
+
+    # Trường hợp 2 — tier 0 THỰC SỰ thiếu TARGET_YEAR (vd NaN thật) →
+    # mới mượn từ tier 1, nhưng KHÔNG đụng tới 2021-2024 của tier 0.
+    tier0_missing_target = pd.Series({Y0: 42273.0, Y1: 53246.0, Y2: 53615.0, Y3: 55406.0})
+    resolved2 = _resolve_year_tiers([tier0_missing_target, tier1_bigger])
+    assert resolved2[Y4] == 69054.0, f'FAIL fallback target year: {resolved2.get(Y4)}'
+    assert resolved2[Y0] == 42273.0, 'FAIL: 2021-2024 của tier 0 bị đụng vào khi mượn tier 1'
+    print('✅ _resolve_year_tiers: tier 0 thật sự thiếu TARGET_YEAR → mượn đúng tier 1 '
+          'cho riêng năm đó, 2021-2024 vẫn giữ nguyên từ tier 0')
 
     # --- Test 4b: [ROOT-FIX v2 regression] TARGET_YEAR phải là năm ĐÃ đóng sổ,
     #     KHÔNG bao giờ được bằng năm lịch hiện tại (IN_PROGRESS_YEAR) ---
