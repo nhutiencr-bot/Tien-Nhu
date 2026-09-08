@@ -48,6 +48,30 @@ Các sửa đổi so với bản trước (399 dòng):
            thêm 'tuong tu' vào exclude để tránh pick dòng
            "Thu nhập lãi và các khoản thu nhập tương tự" (gross) thay vì NII (net).
            Fallback gross chỉ dùng khi NII thực sự rỗng.
+
+  [FIX 15] _find_revenue_general() / _find_revenue_for_retail() /
+           _find_revenue_for_realestate(): ĐẢO PRIORITY — "doanh thu thuần"
+           (MS10, net) lên tier 0, "doanh thu bán hàng và cung cấp dịch vụ"
+           (MS01, gross) xuống tier fallback.
+
+           ROOT CAUSE của bug "2021-2024 đúng, 2025 sai": 3 hàm này để
+           gross revenue (MS01) làm tier 0, net revenue (MS10) làm tier 1.
+           Vì _resolve_year_tiers() lấy base = TOÀN BỘ series của tier 0,
+           và CHỈ vá riêng TARGET_YEAR (2025) từ tier sau nếu tier 0 thiếu
+           đúng năm đó — nên:
+             - Với đa số công ty, MS01 ≈ MS10 (không có/ít khoản giảm trừ
+               doanh thu) ở 2021-2024 → sai lệch không lộ ra, nhìn "đúng".
+             - Ở 2025, nếu dòng MS01 bị thiếu cột năm 2025 trong dữ liệu
+               cào về (annual report năm 2025 mới publish, dòng MS01 có
+               format cột khác/chưa đủ) → toàn bộ base (gồm cả các năm cũ)
+               vẫn là MS01 gross, nhưng riêng 2025 lại bị "vá" từ MS10 —
+               HOẶC ngược lại, nếu MS01 vẫn có cột 2025 nhưng giá trị đó
+               không tương đương MS10 (khoản giảm trừ doanh thu năm 2025
+               lớn hơn các năm trước) → 2025 hiển thị sai thành gross
+               trong khi cột "Doanh thu thuần" phải là net.
+           Fix: coi "doanh thu thuần" là khái niệm ĐÚNG NGAY TỪ ĐẦU (đây
+           mới là MS10 — đúng với tên cột hiển thị "Doanh thu thuần"),
+           gross chỉ dùng khi công ty không có dòng MS10 tách riêng.
 """
 
 import re
@@ -601,7 +625,14 @@ def _find_revenue_for_insurance(df_income, period='year'):
 
 
 def _find_revenue_for_realestate(df_income, period='year'):
+    # [FIX 15] "doanh thu thuan" (MS10, net) lên tier 0 — xem giải thích ở
+    # docstring đầu file. Gross (MS01) và doanh thu cho thuê chỉ dùng khi
+    # công ty không tách riêng dòng MS10.
     priority = [
+        (
+            ['doanh thu thuan', 'net revenue'],
+            ['gia von', 'cost', 'hoat dong tai chinh', 'hoat dong khac'],
+        ),
         (
             ['doanh thu ban hang va cung cap dich vu', 'doanh thu ban hang',
              'doanh thu ban bat dong san'],
@@ -611,24 +642,22 @@ def _find_revenue_for_realestate(df_income, period='year'):
             ['doanh thu cho thue', 'rental revenue', 'rental income'],
             ['chi phi'],
         ),
-        (
-            ['doanh thu thuan', 'net revenue'],
-            ['gia von', 'cost', 'hoat dong tai chinh', 'hoat dong khac'],
-        ),
     ]
     return _search_with_priority(df_income, priority, period)
 
 
 def _find_revenue_for_retail(df_income, period='year'):
+    # [FIX 15] "doanh thu thuan" (MS10, net) lên tier 0 — xem giải thích ở
+    # docstring đầu file.
     priority = [
+        (
+            ['doanh thu thuan', 'net revenue', 'net sales'],
+            ['gia von', 'chi phi lai'],
+        ),
         (
             ['doanh thu ban hang va cung cap dich vu',
              'doanh thu thuan ve ban hang va cung cap dich vu'],
             ['gia von', 'cost'],
-        ),
-        (
-            ['doanh thu thuan', 'net revenue', 'net sales'],
-            ['gia von', 'chi phi lai'],
         ),
         (
             ['doanh thu ban hang', 'sales revenue'],
@@ -643,15 +672,19 @@ def _find_revenue_for_retail(df_income, period='year'):
 
 
 def _find_revenue_general(df_income, period='year'):
+    # [FIX 15] "doanh thu thuan" (MS10, net) lên tier 0 — xem giải thích ở
+    # docstring đầu file. Trước đây gross (MS01) là tier 0, khiến cột
+    # "Doanh thu thuần" hiển thị nhầm doanh thu gộp khi MS01 và MS10 lệch
+    # nhau (điển hình lộ ra ở năm mới nhất — 2025).
     priority = [
+        (
+            ['doanh thu thuan', 'net revenue', 'net sales'],
+            ['gia von', 'cost of', 'hoat dong tai chinh', 'hoat dong khac'],
+        ),
         (
             ['doanh thu ban hang va cung cap dich vu', 'doanh thu ban hang',
              'revenue from goods and services', 'sales revenue'],
             ['gia von', 'cost of', 'chiet khau', 'giam gia', 'hang ban tra lai'],
-        ),
-        (
-            ['doanh thu thuan', 'net revenue', 'net sales'],
-            ['gia von', 'cost of', 'hoat dong tai chinh', 'hoat dong khac'],
         ),
         (
             ['doanh thu', 'revenue'],
