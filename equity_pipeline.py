@@ -7,6 +7,16 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from financial_normalizer import (
     find_row_series, build_5y_financial_table, build_financial_table,
     get_latest, get_latest_n_years, cagr,
+    # [FIX 15b] Dùng chung bộ chuẩn hoá tiếng Việt (bỏ dấu, hạ chữ thường)
+    # với financial_normalizer.find_row_series() cho các hàm match keyword
+    # nội bộ ở Tầng 0 (_extract_row_values / _raw_scan_annual) bên dưới —
+    # trước đây các hàm này match bằng .str.lower().str.contains() thô,
+    # không bỏ dấu, nên nếu dữ liệu quý/năm mới nhất (2025) trả về nhãn
+    # dòng có encoding dấu khác 1 chút so với dữ liệu năm cũ, "doanh thu
+    # thuần" có thể không khớp được và rơi xuống keyword fallback rộng
+    # hơn (vd "doanh thu", "tổng doanh thu") — góp phần vào lỗi doanh thu
+    # thuần sai riêng ở năm mới nhất trong khi các năm cũ vẫn đúng.
+    _norm_label,
     # [ROOT-FIX v2] HAI hằng số năm KHÁC NHAU, dùng đúng chỗ — xem comment
     # [ROOT-FIX v2] đầu financial_normalizer.py để hiểu vì sao tách ra:
     #   TARGET_YEAR       = năm cuối bảng 5 năm, ĐÃ đóng sổ (vd 2025)
@@ -224,14 +234,18 @@ def execute_equity_research_pipeline(ticker):
                 if label_col is None:
                     return []
 
+                # [FIX 15b] Chuẩn hoá nhãn dòng + keyword bỏ dấu tiếng Việt
+                # (giống find_row_series) trước khi so khớp, để tránh miss
+                # match do khác biệt encoding dấu giữa dữ liệu năm cũ/mới.
+                norm_labels = df[label_col].astype(str).map(_norm_label)
                 vals = []
                 for kw in keywords:
-                    mask = df[label_col].astype(str).str.lower().str.contains(
-                        kw.lower(), na=False, regex=False)
+                    kw_norm = _norm_label(kw)
+                    mask = norm_labels.str.contains(kw_norm, na=False, regex=False)
                     if exclude:
                         for ex in exclude:
-                            mask &= ~df[label_col].astype(str).str.lower().str.contains(
-                                ex.lower(), na=False, regex=False)
+                            mask &= ~norm_labels.str.contains(
+                                _norm_label(ex), na=False, regex=False)
                     matched = df[mask]
                     if matched.empty:
                         continue
@@ -367,13 +381,16 @@ def execute_equity_research_pipeline(ticker):
                         break
             if label_col is None:
                 return None
+            # [FIX 15b] Chuẩn hoá nhãn dòng + keyword bỏ dấu tiếng Việt,
+            # đồng bộ với find_row_series() và _extract_row_values() ở trên.
+            norm_labels = df[label_col].astype(str).map(_norm_label)
             for kw in keywords:
-                mask = df[label_col].astype(str).str.lower().str.contains(
-                    kw.lower(), na=False, regex=False)
+                kw_norm = _norm_label(kw)
+                mask = norm_labels.str.contains(kw_norm, na=False, regex=False)
                 if exclude:
                     for ex in exclude:
-                        mask &= ~df[label_col].astype(str).str.lower().str.contains(
-                            ex.lower(), na=False, regex=False)
+                        mask &= ~norm_labels.str.contains(
+                            _norm_label(ex), na=False, regex=False)
                 rows = df[mask]
                 if rows.empty:
                     continue
