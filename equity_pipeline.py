@@ -764,7 +764,12 @@ def execute_equity_research_pipeline(ticker):
         if _missing_any:
             def _run_cafef():
                 try:
-                    return fetch_cafef_yearly_full(ticker, years=list(allowed_years))
+                    # [FIX 16] Truyền is_bank để CafeF chọn đúng tier ưu tiên
+                    # revenue (NII cho bank, "doanh thu thuần" cho cty thường) —
+                    # tránh lấy nhầm gross (MS01) do MS01 luôn đứng trước MS10
+                    # trong báo cáo gốc. Xem cafef_fallback.py.
+                    return fetch_cafef_yearly_full(ticker, years=list(allowed_years),
+                                                    is_bank=is_bank)
                 except Exception:
                     return {}
 
