@@ -212,8 +212,19 @@ def fetch_cafef_balance_sheet_5y(
         return empty
 
 
-def _scrape_cafef_income(ticker: str, year: int = 0) -> dict:
-    """Scrape KQKD từ CafeF — trả về revenue + net_profit theo năm (đơn vị: tỷ VNĐ)."""
+def _scrape_cafef_income(ticker: str, year: int = 0, is_bank: bool = False) -> dict:
+    """
+    Scrape KQKD từ CafeF — trả về revenue + net_profit theo năm (đơn vị: tỷ VNĐ).
+
+    [FIX 16] revenue dùng TIER PRIORITY thay vì 1 list keyword phẳng.
+    Bug cũ: duyệt các <tr> theo ĐÚNG THỨ TỰ báo cáo gốc (MS01 "doanh thu
+    bán hàng" gross luôn đứng TRƯỚC MS10 "doanh thu thuần" net), và gán
+    "if is_rev and y not in rev_vals: rev_vals[y] = val" — dòng đầu tiên
+    khớp bất kỳ keyword nào trong REVENUE_KEYS sẽ chiếm chỗ trước, khiến
+    dòng MS10 net đến sau bị bỏ qua do năm đó "đã có" giá trị (gross).
+    Fix: quét TOÀN BỘ bảng cho tier 0 (net/NII) trước; chỉ những năm
+    CÒN THIẾU sau tier 0 mới được lấp bằng tier fallback (gross).
+    """
     url = _build_cafef_url(ticker, report_type=2, year=year).replace('/CDKT/', '/KQKD/')
     try:
         resp = _SESSION.get(url, timeout=15)
@@ -239,37 +250,58 @@ def _scrape_cafef_income(ticker: str, year: int = 0) -> dict:
     if not years_list:
         return {'revenue': {}, 'net_profit': {}}
 
-    REVENUE_KEYS = [
-        'doanh thu thuần', 'doanh thu bán hàng', 'tổng doanh thu',
-        'tổng thu nhập hoạt động', 'thu nhập lãi thuần',
-    ]
+    if is_bank:
+        REVENUE_TIERS = [
+            ['thu nhập lãi thuần'],
+            ['tổng thu nhập hoạt động'],
+            ['thu nhập lãi và các khoản thu nhập tương tự'],
+        ]
+    else:
+        REVENUE_TIERS = [
+            ['doanh thu thuần'],
+            ['tổng doanh thu hoạt động', 'doanh thu hoạt động'],
+            ['doanh thu bán hàng'],
+            ['tổng doanh thu'],
+        ]
     PROFIT_KEYS = [
         'lợi nhuận sau thuế thu nhập doanh nghiệp',
         'lợi nhuận sau thuế', 'lnst', 'lãi sau thuế',
     ]
 
-    rev_vals, np_vals = {}, {}
+    # Gom toàn bộ label -> {year: value} 1 lần để tái dùng cho cả revenue
+    # (theo tier) lẫn profit.
+    row_data = []  # list of (label_lower, {year: value})
+    np_vals = {}
     for row in table.find_all('tr')[1:]:
         cells = row.find_all(['td', 'th'])
         if not cells:
             continue
         label = cells[0].get_text(strip=True).lower()
         data_cells = cells[1:]
-        is_rev = any(k in label for k in REVENUE_KEYS)
-        is_np  = any(k in label for k in PROFIT_KEYS)
-        if not is_rev and not is_np:
-            continue
+        vals_by_year = {}
         for i, cell in enumerate(data_cells):
             if i >= len(years_list):
                 break
             val = _parse_cafef_value(cell.get_text(strip=True))
             if val is None:
                 continue
-            y = years_list[i]
-            if is_rev and y not in rev_vals:
-                rev_vals[y] = val
-            if is_np and y not in np_vals:
-                np_vals[y] = val
+            vals_by_year[years_list[i]] = val
+        if not vals_by_year:
+            continue
+        row_data.append((label, vals_by_year))
+        if any(k in label for k in PROFIT_KEYS):
+            for y, v in vals_by_year.items():
+                np_vals.setdefault(y, v)
+
+    rev_vals: dict[int, float] = {}
+    for tier_kws in REVENUE_TIERS:
+        for label, vals_by_year in row_data:
+            if not any(k in label for k in tier_kws):
+                continue
+            for y, v in vals_by_year.items():
+                rev_vals.setdefault(y, v)  # chỉ điền năm CHƯA có từ tier trước
+        if set(years_list) <= set(rev_vals.keys()):
+            break  # đủ hết các năm rồi, không cần tier fallback nữa
 
     return {'revenue': rev_vals, 'net_profit': np_vals}
 
@@ -296,6 +328,62 @@ def _fetch_cafef_ajax_page(ticker: str, report_type: int, page: int) -> list | N
         return None
 
 
+def _ajax_extract_priority(items: list, priority: list) -> dict[int, float]:
+    """
+    [FIX 16] Trích {năm: giá_trị_tỷ} theo TIER PRIORITY thay vì 1 list
+    keyword phẳng. ROOT CAUSE của bug "2025 có dữ liệu nhưng sai doanh
+    thu thuần": _ajax_extract() cũ quét `items` theo ĐÚNG THỨ TỰ báo cáo
+    KQKD gốc (MS01 "Doanh thu bán hàng..." luôn đứng TRƯỚC MS10 "Doanh
+    thu thuần...") và match 1 list keyword phẳng gồm cả 'doanh thu thuần'
+    lẫn 'doanh thu bán hàng' — item nào khớp bất kỳ keyword nào TRƯỚC
+    trong danh sách items sẽ thắng, bất kể đó là keyword tier nào. Vì
+    gross (MS01) luôn đứng trước net (MS10) trong báo cáo, gross luôn
+    thắng mỗi khi nhánh CafeF fallback này được gọi tới (tức đúng những
+    năm mà nguồn chính — vnstock annual — bị thiếu, điển hình là năm mới
+    nhất/2025) → 2021-2024 (lấy từ vnstock, đúng) vẫn ổn, còn 2025 (lấy
+    từ CafeF fallback này) bị lấy nhầm gross.
+
+    Fix: quét TOÀN BỘ `items` cho tier 0 trước (vd 'doanh thu thuần'),
+    CHỈ rơi xuống tier 1 (vd 'doanh thu bán hàng') nếu không tier nào
+    trong toàn bộ items khớp — không còn phụ thuộc thứ tự xuất hiện.
+    """
+    if not items:
+        return {}
+    for keywords, exclude in priority:
+        for item in items:
+            name = str(item.get("Name", "")).lower().strip()
+            if not any(k in name for k in keywords):
+                continue
+            if exclude and any(k in name for k in exclude):
+                continue
+            unit_raw = str(item.get("Unit", "")).lower()
+            if "tỷ" in unit_raw:
+                divisor = 1.0
+            elif "triệu" in unit_raw or "million" in unit_raw:
+                divisor = 1e3
+            else:
+                divisor = 1e3  # CafeF mặc định: triệu VNĐ
+            result = {}
+            for pd_item in item.get("Data", []):
+                period = str(pd_item.get("Period", "")).strip()
+                m = re.search(r'(20\d{2})', period)
+                if not m:
+                    continue
+                yr = int(m.group(1))
+                raw_val = pd_item.get("Value")
+                if raw_val is None:
+                    continue
+                try:
+                    val = float(raw_val)
+                    result[yr] = round(val / divisor, 2)
+                except (ValueError, TypeError):
+                    pass
+            if result:
+                return result
+        # Tier này không có item nào khớp (hoặc khớp nhưng Data rỗng) → thử tier kế tiếp
+    return {}
+
+
 def _ajax_extract(items: list, keywords: list, exclude: list | None = None) -> dict[int, float]:
     """
     Trích xuất {năm: giá_trị_tỷ} từ JSON AJAX CafeF theo keyword.
@@ -303,44 +391,17 @@ def _ajax_extract(items: list, keywords: list, exclude: list | None = None) -> d
     Lưu ý: CafeF trả 4 năm/trang (không phải 5). page=1 → 2022-2025,
     page=2 → 2018-2021. Hàm này gom TẤT CẢ năm từ row khớp đầu tiên
     CÓ dữ liệu — bỏ qua row khớp nhưng Data rỗng thay vì return {} sớm.
+
+    Dùng cho các field KHÔNG có nguy cơ lẫn 2 khái niệm kế toán khác
+    nhau (equity, total_assets, net_profit). Với revenue — nơi gross
+    (MS01) và net (MS10) dễ lẫn — dùng _ajax_extract_priority() thay thế
+    (xem [FIX 16]).
     """
-    if not items:
-        return {}
-    for item in items:
-        name = str(item.get("Name", "")).lower().strip()
-        if not any(k in name for k in keywords):
-            continue
-        if exclude and any(k in name for k in exclude):
-            continue
-        unit_raw = str(item.get("Unit", "")).lower()
-        if "tỷ" in unit_raw:
-            divisor = 1.0
-        elif "triệu" in unit_raw or "million" in unit_raw:
-            divisor = 1e3
-        else:
-            divisor = 1e3  # CafeF mặc định: triệu VNĐ
-        result = {}
-        for pd_item in item.get("Data", []):
-            period = str(pd_item.get("Period", "")).strip()
-            m = re.search(r'(20\d{2})', period)
-            if not m:
-                continue
-            yr = int(m.group(1))
-            raw_val = pd_item.get("Value")
-            if raw_val is None:
-                continue
-            try:
-                val = float(raw_val)
-                result[yr] = round(val / divisor, 2)
-            except (ValueError, TypeError):
-                pass
-        # BUG FIX: chỉ return khi thực sự có data; nếu rỗng thử row tiếp theo
-        if result:
-            return result
-    return {}
+    return _ajax_extract_priority(items, [(keywords, exclude or [])])
 
 
-def _fetch_cafef_ajax_full(ticker: str, need_old_years: bool = False) -> dict:
+def _fetch_cafef_ajax_full(ticker: str, need_old_years: bool = False,
+                            is_bank: bool = False) -> dict:
     """
     Lấy equity, total_assets, revenue, net_profit từ AJAX API CafeF.
 
@@ -351,6 +412,10 @@ def _fetch_cafef_ajax_full(ticker: str, need_old_years: bool = False) -> dict:
     Luôn fetch cả 2 trang để đảm bảo có đủ 2021–2025. Tham số
     need_old_years giữ lại để tương thích ngược nhưng không còn
     ảnh hưởng hành vi (vì 2021 nằm trên page 2 nên luôn cần).
+
+    [FIX 16] revenue dùng _ajax_extract_priority() với tier ưu tiên theo
+    ngành thay vì 1 list keyword phẳng — tránh lấy nhầm gross (MS01)
+    thay vì net (MS10)/NII do MS01 luôn đứng trước trong báo cáo gốc.
     """
     REPORT_INCOME  = 1
     REPORT_BALANCE = 2
@@ -359,6 +424,20 @@ def _fetch_cafef_ajax_full(ticker: str, need_old_years: bool = False) -> dict:
     ta_d:     dict[int, float] = {}
     rev_d:    dict[int, float] = {}
     np_d:     dict[int, float] = {}
+
+    if is_bank:
+        _rev_priority = [
+            (['thu nhập lãi thuần'], ['chi phí', 'trước dự phòng', 'tương tự']),
+            (['tổng thu nhập hoạt động'], ['chi phí']),
+            (['thu nhập lãi và các khoản thu nhập tương tự'], []),
+        ]
+    else:
+        _rev_priority = [
+            (['doanh thu thuần'], ['giá vốn', 'chi phí']),
+            (['tổng doanh thu hoạt động', 'doanh thu hoạt động'], ['chi phí']),
+            (['doanh thu bán hàng'], ['giá vốn', 'chiết khấu', 'giảm giá']),
+            (['tổng doanh thu', 'net revenue'], []),
+        ]
 
     for page in (1, 2):  # luôn fetch cả 2 trang
         # Balance sheet
@@ -375,11 +454,7 @@ def _fetch_cafef_ajax_full(ticker: str, need_old_years: bool = False) -> dict:
         # Income statement
         inc_items = _fetch_cafef_ajax_page(ticker, REPORT_INCOME, page)
         if inc_items:
-            for yr, val in _ajax_extract(inc_items,
-                    ['doanh thu thuần', 'tổng doanh thu', 'net revenue',
-                     'doanh thu bán hàng', 'tổng thu nhập hoạt động',
-                     'thu nhập lãi thuần'],
-                    exclude=['giá vốn', 'chi phí lãi']).items():
+            for yr, val in _ajax_extract_priority(inc_items, _rev_priority).items():
                 rev_d.setdefault(yr, val)
             for yr, val in _ajax_extract(inc_items,
                     ['lợi nhuận sau thuế thu nhập doanh nghiệp',
@@ -396,7 +471,8 @@ def _fetch_cafef_ajax_full(ticker: str, need_old_years: bool = False) -> dict:
     }
 
 
-def fetch_cafef_yearly_full(ticker: str, years: list = None, debug: bool = False) -> dict:
+def fetch_cafef_yearly_full(ticker: str, years: list = None, debug: bool = False,
+                             is_bank: bool = False) -> dict:
     """
     Lấy đủ 4 chỉ tiêu (equity, total_assets, revenue, net_profit) từ CafeF.
     Trả về dict: mỗi key là pd.Series(index=năm int, values=tỷ VNĐ).
@@ -406,13 +482,17 @@ def fetch_cafef_yearly_full(ticker: str, years: list = None, debug: bool = False
                page=1 → 5 năm gần nhất (hiện tại: 2022-2026).
                page=2 → 5 năm trước đó (2017-2021) — bắt buộc nếu cần 2021.
       Tầng 2 — HTML scraping: fallback khi AJAX trả rỗng (hiếm gặp).
+
+    is_bank: [FIX 16] truyền xuống _fetch_cafef_ajax_full() để chọn đúng
+    tier ưu tiên cho revenue (NII cho bank, doanh thu thuần cho công ty
+    thường) — tránh lẫn gross/net như bug cũ.
     """
     empty_s = pd.Series(dtype=float)
     need_old = bool(years and any(y <= 2021 for y in years))
 
     try:
         # ── Tầng 1: AJAX API ─────────────────────────────────────────────
-        ajax = _fetch_cafef_ajax_full(ticker, need_old_years=need_old)
+        ajax = _fetch_cafef_ajax_full(ticker, need_old_years=need_old, is_bank=is_bank)
 
         merged: dict[str, dict[int, float]] = {
             'equity':       dict(ajax.get('equity',       {})),
@@ -434,10 +514,10 @@ def fetch_cafef_yearly_full(ticker: str, years: list = None, debug: bool = False
 
         if need_html:
             bs  = _scrape_cafef_balance(ticker, year=0)
-            inc = _scrape_cafef_income(ticker, year=0)
+            inc = _scrape_cafef_income(ticker, year=0, is_bank=is_bank)
             if need_old:
                 bs_old  = _scrape_cafef_balance(ticker, year=2021)
-                inc_old = _scrape_cafef_income(ticker, year=2021)
+                inc_old = _scrape_cafef_income(ticker, year=2021, is_bank=is_bank)
                 for k in ('equity', 'total_assets'):
                     for yr, val in bs_old.get(k, {}).items():
                         bs[k].setdefault(yr, val)
