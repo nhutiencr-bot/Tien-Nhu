@@ -27,6 +27,27 @@ import streamlit as st
 from datetime import datetime
 
 # ─────────────────────────────────────────────────────────────
+# [KHÔNG CÒN DÙNG] File này KHÔNG được app.py / equity_pipeline.py
+# import — đường chạy thật hiện tại là:
+#   app.py -> equity_pipeline.py -> pipeline_helpers.py / cafef_fallback.py
+#            / website_scraper.py -> financial_normalizer.py
+# Giữ lại file này chỉ để tham khảo lịch sử. Nếu không còn nhu cầu dùng
+# lại, có thể xoá hẳn khỏi repo mà không ảnh hưởng app đang chạy.
+#
+# [FIX 2026-09] Đồng bộ TARGET_YEARS/CURRENT_YEAR theo đúng cơ chế động
+# của financial_normalizer.py (TARGET_YEAR/TARGET_YEARS) thay vì tick
+# cứng range(2021, 2026). Lý do: hardcode 2021-2025 chỉ tình cờ đúng ở
+# thời điểm viết code — sang năm sau (2027 trở đi) danh sách này KHÔNG
+# tự trượt theo, phải sửa tay lại đúng chỗ này, rất dễ quên/sót — đây
+# chính là nguyên nhân sâu xa của lỗi "chỉ đúng 2021-2024, sai 2025"
+# từng xảy ra ở các phiên bản trước của pipeline.
+# ─────────────────────────────────────────────────────────────
+
+from financial_normalizer import TARGET_YEAR, TARGET_YEARS, IN_PROGRESS_YEAR
+
+CURRENT_YEAR = IN_PROGRESS_YEAR  # năm lịch thực tế hôm nay, CHƯA chắc đã đóng sổ
+
+# ─────────────────────────────────────────────────────────────
 # CONSTANTS — ngành đặc thù
 # ─────────────────────────────────────────────────────────────
 
@@ -41,9 +62,6 @@ BANK_TICKERS = {
     'VCB', 'BID', 'CTG', 'TCB', 'MBB', 'ACB', 'STB', 'VPB', 'HDB', 'TPB',
     'MSB', 'OCB', 'VIB', 'SHB', 'EIB', 'LPB', 'SSB', 'NAB', 'ABB', 'BAB',
 }
-
-TARGET_YEARS = list(range(2021, 2026))  # 2021–2025
-CURRENT_YEAR = datetime.today().year    # 2026
 
 # ─────────────────────────────────────────────────────────────
 # HELPER: parse số từ string bất kỳ
@@ -132,7 +150,7 @@ def _fetch_vnstock(ticker):
         from vnstock.api.financial import Finance
         from financial_normalizer import build_financial_table
 
-        YEARS = list(range(2021, 2026))  # 2021-2025
+        YEARS = list(TARGET_YEARS)  # động theo financial_normalizer.TARGET_YEARS
 
         inc_y, bal_y, rat_y = pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
