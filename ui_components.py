@@ -1076,8 +1076,14 @@ def render_tab_multiples(metrics, fundamentals, valuation_pkg):
     st.markdown(_MULTIPLES_CSS, unsafe_allow_html=True)
 
     is_bank       = metrics.get("is_bank", False)
-    current_year  = __import__('datetime').datetime.today().year
-    latest_year   = current_year - 1
+    # [FIX 2026-09] Trước đây tính "latest_year = năm hôm nay - 1" một cách
+    # thô — tình cờ đúng ở hầu hết thời điểm trong năm, nhưng sai vào
+    # tháng 1-3 (Q1) mỗi năm, vì lúc đó BCTC năm liền trước có thể CHƯA
+    # công bố xong (theo đúng logic đã cẩn thận xử lý trong
+    # financial_normalizer._compute_target_year()). Dùng lại TARGET_YEAR
+    # có sẵn để nhãn hiển thị luôn khớp với năm cuối bảng dữ liệu thật.
+    from financial_normalizer import TARGET_YEAR
+    latest_year   = TARGET_YEAR
 
     pe   = metrics.get("pe",  0.0) or 0.0
     pb   = metrics.get("pb",  0.0) or 0.0
