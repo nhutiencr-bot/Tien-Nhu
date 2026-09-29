@@ -1,3 +1,6 @@
+--extra-index-url https://vnstocks.com/api/simple
+vnstock==4.0.9
+vnai==2.6.2
 streamlit
 plotly 
 pandas
