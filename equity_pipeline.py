@@ -32,6 +32,7 @@ from valuation import (
     detect_stock_dividend_years, normalize_eps_bvps_series, estimate_wacc,
 )
 from cafef_fallback import fetch_cafef_yearly_full
+from series_consistency import harmonize_units, merge_consistent
 from website_scraper import fetch_website_financial_data
 from news_fetcher import fetch_news_with_fallback
 
@@ -107,6 +108,7 @@ def execute_equity_research_pipeline(ticker):
                                     'SHS', 'CTS', 'VDS', 'ORS', 'TVS']
         current_price = float(df_price['close_vnd'].iloc[-1])
 
+        _consistency_notes = []   # [FIX 17] log các lần chuẩn hoá đơn vị / loại nguồn lệch
         fin5 = build_5y_financial_table(df_income, df_balance, df_ratio, ticker=ticker)
 
         revenue_series            = normalize_to_billion_vnd(fin5['revenue'])
@@ -599,6 +601,13 @@ def execute_equity_research_pipeline(ticker):
                     break
             return vals
 
+        # [FIX 17] Đồng nhất đơn vị giữa các năm TRƯỚC khi sanity-check theo trung vị
+        # (nếu không, năm lệch ×1000 bị coi là outlier rồi bị thay bằng giá trị khác nguồn).
+        revenue_series      = harmonize_units(revenue_series,      _consistency_notes, 'revenue')
+        net_profit_series   = harmonize_units(net_profit_series,   _consistency_notes, 'net_profit')
+        equity_series       = harmonize_units(equity_series,       _consistency_notes, 'equity')
+        total_assets_series = harmonize_units(total_assets_series, _consistency_notes, 'total_assets')
+
         # ─────────────────────────────────────────────────────────────────
         # SANITY CHECK 1: Revenue bất thường — check CẢ 2 CHIỀU (cao & thấp)
         #
@@ -717,14 +726,10 @@ def execute_equity_research_pipeline(ticker):
 
         _cf_cf = pd.DataFrame()
 
-        def _merge_series(base: pd.Series, patch: pd.Series) -> pd.Series:
-            """Ghi đè giá trị NaN / missing trong base bằng patch."""
-            for yr, val in patch.items():
-                if pd.isna(val):
-                    continue
-                if yr not in base.index or pd.isna(base.get(yr)):
-                    base[yr] = val
-            return base.sort_index()
+        def _merge_series(base: pd.Series, patch: pd.Series, label: str = 'series') -> pd.Series:
+            """[FIX 17] Vá năm thiếu bằng patch NHƯNG chỉ khi patch cùng đơn vị + cùng
+            định nghĩa với base (so khớp trên các năm trùng). Xem series_consistency.py."""
+            return merge_consistent(base, patch, notes=_consistency_notes, label=label)
 
         def _cafef_extract_series(df, keywords, exclude=None):
             """Tìm dòng theo keyword trong CafeF DataFrame."""
@@ -797,20 +802,20 @@ def execute_equity_research_pipeline(ticker):
             _cafef_full.pop('__trace__', None)
 
             # Merge CafeF
-            revenue_series      = _merge_series(revenue_series,      _filter_years(_cafef_full.get('revenue',      pd.Series(dtype=float))))
+            revenue_series      = _merge_series(revenue_series,      _filter_years(_cafef_full.get('revenue',      pd.Series(dtype=float))), label='revenue')
             net_profit_series   = _merge_series(net_profit_series,   _filter_years(_cafef_full.get('net_profit',   pd.Series(dtype=float))))
             equity_series       = _merge_series(equity_series,       _filter_years(_cafef_full.get('equity',       pd.Series(dtype=float))))
             total_assets_series = _merge_series(total_assets_series, _filter_years(_cafef_full.get('total_assets', pd.Series(dtype=float))))
             eps_series          = _merge_series(eps_series,          _filter_years(_cafef_full.get('eps',          pd.Series(dtype=float))))
 
             # Merge DNSE
-            revenue_series      = _merge_series(revenue_series,      _filter_years(normalize_to_billion_vnd(_dnse_data.get('revenue',      pd.Series(dtype=float)))))
+            revenue_series      = _merge_series(revenue_series,      _filter_years(normalize_to_billion_vnd(_dnse_data.get('revenue',      pd.Series(dtype=float)))), label='revenue')
             net_profit_series   = _merge_series(net_profit_series,   _filter_years(normalize_to_billion_vnd(_dnse_data.get('net_profit',   pd.Series(dtype=float)))))
             equity_series       = _merge_series(equity_series,       _filter_years(normalize_to_billion_vnd(_dnse_data.get('equity',       pd.Series(dtype=float)))))
             total_assets_series = _merge_series(total_assets_series, _filter_years(normalize_to_billion_vnd(_dnse_data.get('total_assets', pd.Series(dtype=float)))))
 
             # Merge Yahoo
-            revenue_series      = _merge_series(revenue_series,      _filter_years(_yahoo_data.get('revenue',      pd.Series(dtype=float))))
+            revenue_series      = _merge_series(revenue_series,      _filter_years(_yahoo_data.get('revenue',      pd.Series(dtype=float))), label='revenue')
             net_profit_series   = _merge_series(net_profit_series,   _filter_years(_yahoo_data.get('net_profit',   pd.Series(dtype=float))))
             equity_series       = _merge_series(equity_series,       _filter_years(_yahoo_data.get('equity',       pd.Series(dtype=float))))
             total_assets_series = _merge_series(total_assets_series, _filter_years(_yahoo_data.get('total_assets', pd.Series(dtype=float))))
@@ -873,8 +878,7 @@ def execute_equity_research_pipeline(ticker):
                                       'doanh thu bán hàng', 'revenue']
                     _ws_rev = _filter_years(normalize_to_billion_vnd(
                         _ws_extract(_ws_income, _ws_rev_kw, exclude=['giá vốn', 'chi phí'])))
-                    revenue_series = _merge_series(revenue_series, _ws_rev)
-
+                    revenue_series = _merge_series(revenue_series, _ws_rev, label='revenue')
                     _ws_np_kw = ['lợi nhuận sau thuế của cổ đông của công ty mẹ',
                                  'lợi nhuận sau thuế', 'lãi sau thuế',
                                  'profit after tax', 'net profit', 'net income']
@@ -909,6 +913,12 @@ def execute_equity_research_pipeline(ticker):
         _years_have = (set(revenue_series.index) | set(net_profit_series.index)
                         | set(equity_series.index) | set(total_assets_series.index))
         _missing_years = sorted(_expected_years - _years_have)
+
+        # [FIX 17] Sau khi gộp mọi tầng (CafeF/DNSE/Yahoo/web): chuẩn hoá lại đơn vị từng năm.
+        revenue_series      = harmonize_units(revenue_series,      _consistency_notes, 'revenue')
+        net_profit_series   = harmonize_units(net_profit_series,   _consistency_notes, 'net_profit')
+        equity_series       = harmonize_units(equity_series,       _consistency_notes, 'equity')
+        total_assets_series = harmonize_units(total_assets_series, _consistency_notes, 'total_assets')
 
         def _cross_unit_recheck(np_s, rev_s, eq_s):
             if np_s.empty or (rev_s.empty and eq_s.empty):
@@ -1143,6 +1153,7 @@ def execute_equity_research_pipeline(ticker):
         net_debt_latest   = (short_debt_latest + long_debt_latest) - cash_latest_val
 
         clean_metrics.update({
+            "consistency_notes":       list(_consistency_notes),
             "revenue_latest_billion":  revenue_latest,
             "cfo_latest_billion":      cfo_latest,
             "cfo_is_estimated":        cfo_is_estimated,
