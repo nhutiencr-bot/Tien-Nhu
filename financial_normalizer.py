@@ -571,12 +571,32 @@ def _resolve_year_tiers(all_tier_series):
 
     base = all_tier_series[0].copy()
     base_has_target = TARGET_YEAR in base.index and pd.notna(base.get(TARGET_YEAR))
+
     if not base_has_target:
+        # [FIX 18] CHỈ mượn TARGET_YEAR từ tier sau nếu tier đó CÙNG khái niệm với base,
+        # kiểm chứng bằng tỷ lệ ≈ 1 trên các năm TRÙNG (lệch ≤ 8%).
+        # Trước đây mượn vô điều kiện -> HDB: 2022-2024 là Thu nhập lãi thuần
+        # (18,012 / 22,184 / 30,857) nhưng 2025 lấy từ Tổng thu nhập hoạt động
+        # (42,675 thay vì 34,746). Khác khái niệm thì tỷ lệ ~1.2x và bị loại;
+        # không có năm trùng để đối chiếu thì cũng KHÔNG mượn (thà trống để các
+        # nguồn sau — quý / CafeF — điền đúng khái niệm).
         for s in all_tier_series[1:]:
             v = s.get(TARGET_YEAR)
-            if pd.notna(v):
+            if pd.isna(v):
+                continue
+            common = [y for y in s.index
+                      if y != TARGET_YEAR and y in base.index
+                      and pd.notna(s[y]) and pd.notna(base[y]) and base[y] != 0]
+            if not common:
+                continue
+            ratios = [s[y] / base[y] for y in common if s[y] / base[y] > 0]
+            if not ratios:
+                continue
+            med = float(pd.Series(ratios).median())
+            if abs(med - 1.0) <= 0.08:
                 base.loc[TARGET_YEAR] = v
                 break
+
     return base.sort_index()
 
 
@@ -1165,9 +1185,10 @@ if __name__ == '__main__':
         (['doanh thu thuan'], []),
     ]
     result = _search_with_priority(df_combined, priority_test, 'year')
-    # Nên pick Doanh thu thuần (có Y4=999) vì NII thiếu Y4
-    assert result.get(Y4) == 999, f'FAIL priority fallback: {result.get(Y4)}'
-    print('✅ _search_with_priority: skip dòng thiếu năm mới nhất, fallback đúng sang dòng có đủ')
+    # [FIX 18] Doanh thu thuần (100..999) KHÁC khái niệm NII (42k..55k) -> không được mượn
+    assert Y4 not in result.index or pd.isna(result.get(Y4)), f'FAIL: mượn nhầm khái niệm: {result.get(Y4)}'
+    assert result.get(Y0) == 42273
+    print('✅ _search_with_priority [FIX 18]: không mượn năm mới nhất từ dòng khác khái niệm')
 
     # --- Test 4c: [ROOT-FIX v4] _resolve_year_tiers — tách theo TIER
     #     (khái niệm đặt tên rõ ràng), KHÔNG tách theo dòng khớp mờ như
@@ -1193,11 +1214,22 @@ if __name__ == '__main__':
     # Trường hợp 2 — tier 0 THỰC SỰ thiếu TARGET_YEAR (vd NaN thật) →
     # mới mượn từ tier 1, nhưng KHÔNG đụng tới 2021-2024 của tier 0.
     tier0_missing_target = pd.Series({Y0: 42273.0, Y1: 53246.0, Y2: 53615.0, Y3: 55406.0})
+    # [FIX 18] tier 1 KHÁC khái niệm (tỷ lệ ~1.2x, như TOI so với NII) -> KHÔNG được mượn
     resolved2 = _resolve_year_tiers([tier0_missing_target, tier1_bigger])
-    assert resolved2[Y4] == 69054.0, f'FAIL fallback target year: {resolved2.get(Y4)}'
-    assert resolved2[Y0] == 42273.0, 'FAIL: 2021-2024 của tier 0 bị đụng vào khi mượn tier 1'
-    print('✅ _resolve_year_tiers: tier 0 thật sự thiếu TARGET_YEAR → mượn đúng tier 1 '
-          'cho riêng năm đó, 2021-2024 vẫn giữ nguyên từ tier 0')
+    assert Y4 not in resolved2.index or pd.isna(resolved2.get(Y4)), (
+        f'FAIL: mượn TARGET_YEAR từ khái niệm khác: {resolved2.get(Y4)}')
+    assert resolved2[Y0] == 42273.0, 'FAIL: 2021-2024 của tier 0 bị đụng vào'
+    # tier 1 CÙNG khái niệm (khớp ±8% trên năm trùng) -> mượn được
+    tier1_same = pd.Series({Y0: 42300.0, Y1: 53200.0, Y2: 53700.0, Y3: 55400.0, Y4: 58771.0})
+    resolved3 = _resolve_year_tiers([tier0_missing_target, tier1_same])
+    assert resolved3[Y4] == 58771.0 and resolved3[Y0] == 42273.0, dict(resolved3)
+    # HDB: NII 2022-2024, tier sau là TOI (≈1.22x) có 2025 -> phải bỏ TOI
+    hdb_nii = pd.Series({2022: 18011.57, 2023: 22183.97, 2024: 30857.08})
+    hdb_toi = pd.Series({2022: 21900.0, 2023: 27000.0, 2024: 37600.0, 2025: 42675.0})
+    r_hdb = _resolve_year_tiers([hdb_nii, hdb_toi])
+    assert 2025 not in r_hdb.index, f'FAIL HDB: 2025 vẫn lấy từ TOI: {r_hdb.get(2025)}'
+    print('✅ _resolve_year_tiers [FIX 18]: chỉ mượn TARGET_YEAR khi cùng khái niệm; '
+          'HDB không còn lấy 2025=42,675 (TOI) thay cho NII')
 
     # --- Test 4b: [ROOT-FIX v2 regression] TARGET_YEAR phải là năm ĐÃ đóng sổ,
     #     KHÔNG bao giờ được bằng năm lịch hiện tại (IN_PROGRESS_YEAR) ---
