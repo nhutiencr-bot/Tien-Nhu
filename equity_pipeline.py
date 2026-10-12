@@ -108,6 +108,21 @@ def execute_equity_research_pipeline(ticker):
                                     'SHS', 'CTS', 'VDS', 'ORS', 'TVS']
         current_price = float(df_price['close_vnd'].iloc[-1])
 
+        # [FIX 18] Từ khoá doanh thu THEO NGÀNH, dùng chung cho Tầng 0b và sanity-check.
+        # Trước đây 2 chỗ đó dùng 'doanh thu thuần/revenue/tổng doanh thu' cho MỌI mã,
+        # nên với ngân hàng/CTCK năm vá lại có thể là khái niệm khác các năm còn lại.
+        if is_bank:
+            _REV_KW_SECTOR = ['thu nhập lãi thuần', 'net interest income']
+            _REV_EX_SECTOR = ['chi phí', 'expense', 'dự phòng', 'provision',
+                              'tương tự', 'dịch vụ', 'hoạt động khác']
+        elif is_securities:
+            _REV_KW_SECTOR = ['doanh thu hoạt động', 'operating revenue',
+                              'tổng doanh thu hoạt động']
+            _REV_EX_SECTOR = ['chi phí', 'expense', 'phí hoa hồng']
+        else:
+            _REV_KW_SECTOR = ['doanh thu thuần', 'net revenue', 'revenue', 'tổng doanh thu']
+            _REV_EX_SECTOR = ['giá vốn', 'chi phí']
+
         _consistency_notes = []   # [FIX 17] log các lần chuẩn hoá đơn vị / loại nguồn lệch
         fin5 = build_5y_financial_table(df_income, df_balance, df_ratio, ticker=ticker)
 
@@ -279,11 +294,13 @@ def execute_equity_research_pipeline(ticker):
             out = {}
 
             if is_bank:
+                # [FIX 18] Bank: CHỈ Thu nhập lãi thuần. Không fallback sang
+                # 'tổng thu nhập hoạt động thuần' (khái niệm khác, ~1.2x) vì sẽ làm
+                # năm mới nhất lệch định nghĩa so với các năm trước (HDB 2025).
                 _rev_kw_q = ['thu nhập lãi thuần', 'net interest income',
-                             'tổng thu nhập hoạt động thuần', 'thu nhập hoạt động thuần',
-                             'tong thu nhap lai thuan', 'lai thuan tu hoat dong kinh doanh']
+                             'tong thu nhap lai thuan']
                 _rev_ex_q = ['chi phí', 'expense', 'trước dự phòng', 'before provision',
-                             'dự phòng', 'provision']
+                             'dự phòng', 'provision', 'tương tự', 'dịch vụ', 'hoạt động khác']
             elif is_securities:
                 _rev_kw_q = ['doanh thu hoạt động', 'operating revenue',
                              'tổng doanh thu hoạt động',
@@ -424,10 +441,10 @@ def execute_equity_research_pipeline(ticker):
                 _annual_col = next((c for c in df_income.columns if str(c).strip() == _yr0_str), None)
                 if _annual_col is not None:
                     if is_bank:
-                        _rev_kw_annual = ['thu nhập lãi thuần', 'net interest income',
-                                          'tổng thu nhập hoạt động thuần',
-                                          'thu nhập hoạt động thuần']
-                        _rev_ex_annual = ['chi phí', 'expense', 'dự phòng', 'provision']
+                        # [FIX 18] Bank: CHỈ Thu nhập lãi thuần (xem ghi chú ở nhánh quý)
+                        _rev_kw_annual = ['thu nhập lãi thuần', 'net interest income']
+                        _rev_ex_annual = ['chi phí', 'expense', 'dự phòng', 'provision',
+                                          'tương tự', 'dịch vụ', 'hoạt động khác']
                     elif is_securities:
                         _rev_kw_annual = ['doanh thu hoạt động', 'operating revenue',
                                           'tổng doanh thu hoạt động',
@@ -528,8 +545,8 @@ def execute_equity_research_pipeline(ticker):
             if _yr0b not in revenue_series.index or pd.isna(revenue_series.get(_yr0b)):
                 _v = _raw_scan_annual(
                     df_income, _yr0b,
-                    ['doanh thu thuần', 'net revenue', 'revenue', 'tổng doanh thu'],
-                    exclude=['giá vốn', 'chi phí'])
+                    _REV_KW_SECTOR,
+                    exclude=_REV_EX_SECTOR)
                 if _v is not None:
                     revenue_series[_yr0b] = _v
 
@@ -653,8 +670,8 @@ def execute_equity_research_pipeline(ticker):
                     # Năm cũ: thử lấy từ annual
                     _rv_annual = _raw_scan_annual(
                         df_income, _rbyr,
-                        ['doanh thu thuần', 'net revenue', 'revenue', 'tổng doanh thu'],
-                        exclude=['giá vốn', 'chi phí'])
+                        _REV_KW_SECTOR,
+                        exclude=_REV_EX_SECTOR)
                     if _rv_annual is not None and _rv_annual < _rev_median * 10:
                         revenue_series[_rbyr] = _rv_annual
                     else:
