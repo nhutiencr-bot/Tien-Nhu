@@ -1,6 +1,6 @@
 # ruff: noqa
 # pylint: skip-file
-"""
+r"""
 financial_normalizer.py
 ------------------------
 Các sửa đổi so với bản trước (399 dòng):
@@ -43,6 +43,16 @@ Các sửa đổi so với bản trước (399 dòng):
            Trước đây: nếu index là [2021,2022,2023,2024] thì s.index[-1]=2024,
            s.dropna().index[-1]=2024 → điều kiện True → return sớm dù thiếu 2025.
            Sau fix: kiểm tra max(s.dropna().index) >= TARGET_YEAR (2025).
+
+[FIX 16] Tương thích vnstock bản mới (nguồn KBS mặc định) / TCBS mới:
+    - _col_year()/_col_quarter(): nhận diện nhãn cột năm/quý LINH HOẠT
+      (2025, '2025', 2025.0, '2025.0', '2025-Q4', 'Q4/2025', 'FY2025'...).
+      Trước đây fullmatch(r'\d{4}') loại cả cột '2025.0' (float) nên
+      2021-2024 vẫn đúng còn 2025 biến mất / bị vá từ tier khác.
+    - _prepare_df(): tự chuyển DataFrame dạng DÀI (cột date/year/quarter,
+      mỗi chỉ tiêu 1 cột) về dạng RỘNG (cột item + cột năm/quý) và chấp nhận
+      tên chỉ tiêu nằm ở index. Tên cột meta (Item/ITEM...) không phân biệt hoa thường.
+    - Key quý luôn chuẩn hoá về 'YYYY-Qn'.
 
   [FIX 14] _find_revenue_for_bank(): loại trừ keyword gây nhiễu mạnh hơn —
            thêm 'tuong tu' vào exclude để tránh pick dòng
@@ -243,6 +253,136 @@ def _norm_label(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# [FIX 16] Nhận diện nhãn cột năm/quý linh hoạt + adapter dữ liệu dạng dài
+# ---------------------------------------------------------------------------
+
+_META_COLS = {'item', 'item_en', 'item_id'}
+
+_RE_YEAR = re.compile(r'^(\d{4})(?:\.0+)?$')
+_RE_YEAR_Q4 = re.compile(r'^(?:(\d{4})\s*[-_/ ]?\s*Q4|Q4\s*[-_/ ]?\s*(\d{4}))$', re.I)
+_RE_FY = re.compile(r'^(?:FY|CY)\s*[-_ ]?(\d{4})$', re.I)
+_RE_Q_A = re.compile(r'^(\d{4})\s*[-_/ ]?\s*Q([1-4])$', re.I)
+_RE_Q_B = re.compile(r'^Q([1-4])\s*[-_/ ]?\s*(\d{4})$', re.I)
+
+
+def _col_year(c):
+    """Nhãn cột -> năm (int) nếu là cột NĂM; None nếu không phải.
+    Nhận: 2025, '2025', 2025.0, '2025.0', '2025-Q4', 'Q4/2025', 'FY2025'."""
+    s = str(c).strip()
+    for rx in (_RE_YEAR, _RE_FY):
+        m = rx.match(s)
+        if m:
+            return int(m.group(1))
+    m = _RE_YEAR_Q4.match(s)
+    if m:
+        return int(m.group(1) or m.group(2))
+    return None
+
+
+def _col_quarter(c):
+    """Nhãn cột -> 'YYYY-Qn' nếu là cột QUÝ; None nếu không."""
+    s = str(c).strip()
+    m = _RE_Q_A.match(s)
+    if m:
+        return f'{int(m.group(1))}-Q{int(m.group(2))}'
+    m = _RE_Q_B.match(s)
+    if m:
+        return f'{int(m.group(2))}-Q{int(m.group(1))}'
+    return None
+
+
+def _lower_meta_cols(df):
+    """Item/ITEM/Item_En -> item/item_en (không phân biệt hoa thường)."""
+    ren = {}
+    for c in df.columns:
+        lc = str(c).strip().lower()
+        if lc in _META_COLS and c != lc:
+            ren[c] = lc
+    return df.rename(columns=ren) if ren else df
+
+
+def _to_wide(df: pd.DataFrame, period='year'):
+    """
+    Dạng DÀI (mỗi hàng = 1 kỳ, mỗi chỉ tiêu = 1 cột; có cột date/year/quarter)
+    -> dạng RỘNG (cột 'item' + cột năm/quý) mà phần còn lại của file mong đợi.
+    Không đoán được thì trả nguyên df.
+    """
+    lower = {str(c).strip().lower(): c for c in df.columns}
+    date_key = next((lower[k] for k in
+                     ('date', 'period', 'time', 'report_date', 'reportdate',
+                      'ky_bao_cao', 'ngay') if k in lower), None)
+    year_key = lower.get('year') or lower.get('nam')
+    q_key = (lower.get('quarter') or lower.get('lengthreport')
+             or lower.get('quy') or lower.get('lengthReport'))
+
+    yrs, qs = None, None
+    if year_key is not None:
+        yrs = pd.to_numeric(df[year_key], errors='coerce')
+        if q_key is not None:
+            qs = pd.to_numeric(df[q_key], errors='coerce')
+    elif date_key is not None:
+        dt = pd.to_datetime(df[date_key], errors='coerce')
+        if dt.notna().sum() == 0:
+            return df
+        yrs = dt.dt.year.astype('float')
+        qs = dt.dt.quarter.astype('float')
+        mon = dt.dt.month
+    else:
+        return df
+
+    d = df.copy()
+    d['__y'] = yrs
+    d['__q'] = qs if qs is not None else float('nan')
+    d = d[d['__y'].notna()]
+    if d.empty:
+        return df
+
+    if period == 'quarter':
+        d = d[d['__q'].between(1, 4)]
+        d['__label'] = [f'{int(y)}-Q{int(q)}' for y, q in zip(d['__y'], d['__q'])]
+    else:
+        # Năm: nếu có nhiều kỳ/năm (dữ liệu quý) -> lấy kỳ cuối năm (Q4)
+        if qs is not None and d['__y'].duplicated().any():
+            d = d[(d['__q'] == 4) | (d['__q'].isna()) | (d['__q'] == 0) | (d['__q'] == 5)]
+        elif date_key is not None and year_key is None and d['__y'].duplicated().any():
+            d = d[mon.loc[d.index] == 12]
+        d = d.drop_duplicates('__y', keep='last')
+        d['__label'] = d['__y'].astype(int)
+
+    if d.empty:
+        return df
+
+    skip = {c for c in (date_key, year_key, q_key, '__y', '__q', '__label') if c is not None}
+    value_cols = [c for c in d.columns if c not in skip]
+    wide = d.set_index('__label')[value_cols].T
+    wide.index.name = None
+    wide.columns.name = None
+    wide = wide.reset_index().rename(columns={'index': 'item'})
+    wide['item_en'] = wide['item']
+    wide['item_id'] = wide['item']
+    return wide
+
+
+def _prepare_df(df: pd.DataFrame, period='year'):
+    """Chuẩn hoá mọi biến thể DataFrame đầu vào về dạng rộng: item + cột năm/quý."""
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return df
+    df = _lower_meta_cols(df)
+
+    has_period_cols = any(
+        (_col_year(c) is not None or _col_quarter(c) is not None)
+        for c in df.columns if c not in _META_COLS
+    )
+    if has_period_cols:
+        # Tên chỉ tiêu nằm ở index thay vì cột 'item'
+        if not (set(df.columns) & _META_COLS) and not pd.api.types.is_numeric_dtype(df.index):
+            df = df.reset_index().rename(columns={df.index.name or 'index': 'item'})
+        return df
+
+    return _to_wide(df, period=period)
+
+
+# ---------------------------------------------------------------------------
 # [FIX 11] Align 2025 key — chuẩn hoá '2025-Q4' → int 2025
 # ---------------------------------------------------------------------------
 
@@ -256,13 +396,9 @@ def _align_2025(s: pd.Series) -> pd.Series:
 
     new_index = {}
     for k, v in s.items():
-        k_str = str(k).strip()
-        # '2025-Q4' hoặc '2025' → int 2025
-        if re.fullmatch(r'\d{4}-Q4', k_str):
-            yr = int(k_str[:4])
-        elif re.fullmatch(r'\d{4}', k_str):
-            yr = int(k_str)
-        else:
+        # '2025-Q4' / '2025' / 2025.0 / 'FY2025' -> int 2025   [FIX 16]
+        yr = _col_year(k)
+        if yr is None:
             continue
         # Không ghi đè nếu đã có giá trị hợp lệ (FIX 12)
         if yr not in new_index or pd.isna(new_index[yr]):
@@ -279,16 +415,12 @@ def _align_2025(s: pd.Series) -> pd.Series:
 # ---------------------------------------------------------------------------
 
 def _get_year_columns(df: pd.DataFrame):
-    """Return annual columns — matches both '2024' and '2025-Q4'."""
-    meta_cols = {'item', 'item_en', 'item_id'}
+    """Return annual columns — '2024', 2024, 2024.0, '2025-Q4', 'FY2025'... [FIX 16]"""
     year_cols = [
         c for c in df.columns
-        if c not in meta_cols and (
-            re.fullmatch(r'\d{4}', str(c).strip())
-            or re.fullmatch(r'\d{4}-Q4', str(c).strip())
-        )
+        if c not in _META_COLS and _col_year(c) is not None
     ]
-    return sorted(year_cols, key=lambda col: int(str(col).strip()[:4]))
+    return sorted(year_cols, key=_col_year)
 
 
 def _quarter_sort_key(c):
@@ -297,12 +429,11 @@ def _quarter_sort_key(c):
 
 
 def _get_quarter_columns(df: pd.DataFrame):
-    meta_cols = {'item', 'item_en', 'item_id'}
     q_cols = [
         c for c in df.columns
-        if c not in meta_cols and re.fullmatch(r'\d{4}-Q[1-4]', str(c).strip())
+        if c not in _META_COLS and _col_quarter(c) is not None
     ]
-    return sorted(q_cols, key=_quarter_sort_key)
+    return sorted(q_cols, key=lambda c: _quarter_sort_key(_col_quarter(c)))
 
 
 # ---------------------------------------------------------------------------
@@ -311,6 +442,10 @@ def _get_quarter_columns(df: pd.DataFrame):
 
 def find_row_series(df: pd.DataFrame, keywords, exclude_keywords=None,
                     item_ids=None, prefer_top_level=True, period='year'):
+    if df is None or df.empty:
+        return pd.Series(dtype=float)
+
+    df = _prepare_df(df, period=period)   # [FIX 16] dạng dài / tên cột lạ -> dạng rộng
     if df is None or df.empty:
         return pd.Series(dtype=float)
 
@@ -391,10 +526,10 @@ def find_row_series(df: pd.DataFrame, keywords, exclude_keywords=None,
         val = pd.to_numeric(pd.Series([row[yc]]), errors='coerce').iloc[0]
         if pd.notna(val):
             if period == 'quarter':
-                result[str(yc).strip()] = float(val)
+                result[_col_quarter(yc)] = float(val)   # [FIX 16] key 'YYYY-Qn' chuẩn
             else:
                 # [FIX 12] Cột '2025-Q4' → key int 2025; không ghi đè key đã có
-                yr = int(str(yc).strip()[:4])
+                yr = _col_year(yc)   # [FIX 16]
                 if yr not in result or pd.isna(result.get(yr)):
                     result[yr] = float(val)
 
@@ -1096,5 +1231,41 @@ if __name__ == '__main__':
     assert Y4 in cfo.index, f'FAIL: CFO {Y4} vẫn thiếu'
     assert cfo[Y4] == 16000, f'FAIL CFO {Y4}: {cfo[Y4]}'
     print(f'✅ CFO fallback quarterly: {Y4}={cfo[Y4]:,.0f} tỷ')
+
+    # --- Test 7: [FIX 16] nhãn cột năm linh hoạt (float / int / 'Q4/2025' / 'FY2025') ---
+    for lbl in (f'{Y4}.0', float(Y4), int(Y4), f'FY{Y4}', f'Q4/{Y4}', f'{Y4}-Q4'):
+        cols_ok = {Y0: [42273], Y1: [53246], Y2: [53615], Y3: [55406], lbl: [58771]}
+        d = _make_df(['I. Thu nhập lãi thuần'], cols_ok)
+        r = build_financial_table(d, pd.DataFrame(), ticker='VCB')['revenue']
+        assert r.get(Y4) == 58771, f'FAIL nhãn cột {lbl!r}: {dict(r)}'
+    print('✅ [FIX 16] cột năm mới dạng 2025.0 / 2025 / FY2025 / Q4/2025 đều ra đúng 2025')
+
+    # --- Test 8: [FIX 16] DataFrame dạng DÀI (date + cột chỉ tiêu) ---
+    df_long = pd.DataFrame({
+        'date': [f'{Y0}-12-31', f'{Y1}-12-31', f'{Y2}-12-31', f'{Y3}-12-31', f'{Y4}-12-31'],
+        'Thu nhập lãi thuần': [42273, 53246, 53615, 55406, 58771],
+        'Doanh thu thuần': [1, 2, 3, 4, 69054],
+    })
+    r = build_financial_table(df_long, pd.DataFrame(), ticker='VCB')['revenue']
+    assert r.get(Y4) == 58771 and r.get(Y0) == 42273, f'FAIL dạng dài: {dict(r)}'
+    print('✅ [FIX 16] DataFrame dạng dài (date × chỉ tiêu) được chuyển đúng')
+
+    # --- Test 9: [FIX 16] dạng dài theo QUÝ -> CFO cộng 4 quý ---
+    df_cf_long_q = pd.DataFrame({
+        'date': [f'{Y4}-03-31', f'{Y4}-06-30', f'{Y4}-09-30', f'{Y4}-12-31'],
+        'Lưu chuyển tiền thuần từ hoạt động kinh doanh': [4200, 3800, 4100, 3900],
+    })
+    cfo2 = _find_cfo_with_quarterly_fallback(df_cf_y, df_cf_long_q)
+    assert cfo2.get(Y4) == 16000, f'FAIL CFO dạng dài theo quý: {dict(cfo2)}'
+    print('✅ [FIX 16] CFO từ dữ liệu quý dạng dài: 2025 = 16,000')
+
+    # --- Test 10: [FIX 16] tên chỉ tiêu ở index, cột Item viết hoa ---
+    d_idx = pd.DataFrame({Y3: [55406], f'{Y4}.0': [58771]}, index=['Thu nhập lãi thuần'])
+    r = build_financial_table(d_idx, pd.DataFrame(), ticker='VCB')['revenue']
+    assert r.get(Y4) == 58771, f'FAIL item ở index: {dict(r)}'
+    d_up = _make_df(['Thu nhập lãi thuần'], {Y3: [55406], Y4: [58771]}).rename(columns={'item': 'Item'})
+    r = build_financial_table(d_up, pd.DataFrame(), ticker='VCB')['revenue']
+    assert r.get(Y4) == 58771, f'FAIL cột Item viết hoa: {dict(r)}'
+    print('✅ [FIX 16] item ở index / cột "Item" viết hoa OK')
 
     print('\n🎉 Tất cả test pass!')
