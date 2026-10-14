@@ -35,6 +35,10 @@ from cafef_fallback import fetch_cafef_yearly_full
 from series_consistency import harmonize_units, merge_consistent
 from website_scraper import fetch_website_financial_data
 from news_fetcher import fetch_news_with_fallback
+from quarterly_view import build_quarter_pivot
+
+# 2021Q1 → 2026Q3 = 23 quý; lấy dư 5 quý để chịu được kỳ trống/lệch của nguồn.
+QUARTER_FETCH_LIMIT = 28
 
 # Các hàm/hằng số dùng chung được tách sang pipeline_helpers.py
 from pipeline_helpers import (
@@ -65,9 +69,9 @@ def execute_equity_research_pipeline(ticker):
             "ratio_y":    lambda: _fetch_ratio(ticker,             source_used, period='year',    limit=FETCH_LIMIT_YEAR),
             "balance_y":  lambda: _fetch_balance_sheet(ticker,     source_used, period='year',    limit=FETCH_LIMIT_YEAR),
             # quarterly: lấy 20 kỳ (~5 năm) để cover 2021-2025
-            "income_q":   lambda: _fetch_income_statement(ticker,  source_used, period='quarter', limit=20),
-            "ratio_q":    lambda: _fetch_ratio(ticker,             source_used, period='quarter', limit=20),
-            "balance_q":  lambda: _fetch_balance_sheet(ticker,     source_used, period='quarter', limit=40),
+            "income_q":   lambda: _fetch_income_statement(ticker,  source_used, period='quarter', limit=QUARTER_FETCH_LIMIT),
+            "ratio_q":    lambda: _fetch_ratio(ticker,             source_used, period='quarter', limit=QUARTER_FETCH_LIMIT),
+            "balance_q":  lambda: _fetch_balance_sheet(ticker,     source_used, period='quarter', limit=QUARTER_FETCH_LIMIT + 8),
             "news":       lambda: c_engine.news(),
         }
 
@@ -1248,6 +1252,7 @@ def execute_equity_research_pipeline(ticker):
         }
 
         df_quarter_table = pd.DataFrame()
+        quarter_pivot = {}
         try:
             fin_q  = build_financial_table(df_income_q, df_balance_q, df_ratio_q,
                                            ticker=ticker, period='quarter')
@@ -1284,6 +1289,28 @@ def execute_equity_research_pipeline(ticker):
             df_quarter_table = df_quarter_table.drop(columns=['_p'])
         except Exception:
             pass
+
+        # ── Bảng KQKD pivot theo quý: 2021–2025 đủ Q1..Q4, năm đang chạy Q1..Q3 ──
+        # Quý chưa công bố (vd Q3/2026) để TRỐNG. Số cả năm lấy từ chuỗi năm đã
+        # được kiểm toán chuẩn (revenue_series / net_profit_series) để Q4 = Năm − 3 quý.
+        try:
+            _fq = fin_q if 'fin_q' in locals() else None
+            if _fq is not None:
+                _rev_q_raw = normalize_to_billion_vnd(_fq['revenue'])
+                _eq_q_tmp  = normalize_to_billion_vnd(_fq['equity'])
+                _np_q_raw  = normalize_net_profit_with_anchor(
+                    _fq['net_profit'], _eq_q_tmp, _fq['roe'])
+                for _name, _qs, _ann in (
+                        ('revenue',    _rev_q_raw, revenue_series),
+                        ('net_profit', _np_q_raw,  net_profit_series)):
+                    quarter_pivot[_name] = build_quarter_pivot(
+                        _qs, _ann,
+                        start_year=min(allowed_years),
+                        end_year=IN_PROGRESS_YEAR,
+                        in_progress_year=IN_PROGRESS_YEAR)
+        except Exception:
+            quarter_pivot = {}
+        fundamentals_summary["quarter_pivot"] = quarter_pivot
 
         df_dupont = dupont_decomposition(
             revenue_series, net_profit_series, total_assets_series, equity_series)
