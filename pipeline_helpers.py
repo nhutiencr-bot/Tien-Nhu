@@ -61,18 +61,12 @@ from financials_core import (  # noqa: E402,F401
     normalize_net_profit_with_anchor,
 )
 
-# 2021Q1 → 2026Q3 = 23 quý; lấy dư 5 quý để chịu được kỳ trống/lệch của nguồn.
-QUARTER_FETCH_LIMIT = 28
-
 # Mỗi mục: (tên hàm của Finance, period, limit)
 _BUNDLE_SPEC = {
     'income_y':   ('income_statement', 'year',    FETCH_LIMIT_YEAR),
     'balance_y':  ('balance_sheet',    'year',    FETCH_LIMIT_YEAR),
     'ratio_y':    ('ratio',            'year',    FETCH_LIMIT_YEAR),
     'cashflow_y': ('cash_flow',        'year',    FETCH_LIMIT_YEAR),
-    'income_q':   ('income_statement', 'quarter', QUARTER_FETCH_LIMIT),
-    'balance_q':  ('balance_sheet',    'quarter', QUARTER_FETCH_LIMIT + 8),
-    'ratio_q':    ('ratio',            'quarter', QUARTER_FETCH_LIMIT),
 }
 
 
@@ -91,8 +85,8 @@ def _fetch_one_statement(ticker, source, which, period, limit):
 
 def fetch_source_bundle(ticker, source):
     """
-    Lấy TẤT CẢ báo cáo (năm + quý) từ MỘT nguồn, song song. Không gộp cột giữa các nguồn —
-    mỗi nguồn là một bó nguyên vẹn để pipeline chọn cả bó, không chọn từng năm.
+    Lấy các báo cáo NĂM (KQKD, CĐKT, chỉ số, LCTT) từ MỘT nguồn, song song. Mỗi nguồn là một
+    bó nguyên vẹn; việc ghép nguồn (có kiểm chứng) làm ở financials_core.merge_cores.
     """
     from concurrent.futures import ThreadPoolExecutor
     with ThreadPoolExecutor(max_workers=len(_BUNDLE_SPEC)) as ex:
