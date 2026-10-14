@@ -1,21 +1,18 @@
 """
 financials_core.py
 ------------------
-MỘT luật duy nhất cho mọi năm 2021 → TARGET_YEAR. Không có tầng vá riêng cho năm nào.
+MỘT luật duy nhất cho mọi năm trong TARGET_YEARS (2021 → 2025). Không có tầng vá riêng
+cho năm nào.
 
 Nguyên tắc
-  1. Mỗi chỉ tiêu lấy từ MỘT dòng báo cáo của MỘT nguồn (vnstock KBS / DNSE / VCI) cho
-     toàn bộ các năm. Không trộn cột giữa các nguồn, không vá năm cuối bằng nguồn khác.
-  2. Khái niệm doanh thu theo NGÀNH (financial_normalizer._find_revenue_for_*):
-       Ngân hàng = Thu nhập lãi thuần (NII) · CTCK = Doanh thu hoạt động ·
+  1. Mỗi chỉ tiêu lấy từ MỘT dòng báo cáo (khái niệm theo ngành, xem financial_normalizer):
+       Ngân hàng = Thu nhập lãi thuần · CTCK = Doanh thu hoạt động ·
        Bảo hiểm = Doanh thu phí bảo hiểm · Còn lại = Doanh thu thuần.
-  3. Giá trị mỗi năm tính BẰNG CÙNG MỘT HÀM:
-       - chỉ tiêu dòng chảy (doanh thu, LNST, EPS): cột năm của dòng đó; nếu nguồn không có
-         cột năm đó thì = tổng 4 quý CỦA CHÍNH DÒNG ĐÓ;
-       - chỉ tiêu số dư (vốn CSH, tổng tài sản): cột năm; nếu thiếu = quý 4 của chính dòng đó.
-     Thiếu cả hai -> để TRỐNG (không đoán, không mượn khái niệm khác).
-  4. Chọn nguồn theo ĐỘ ĐỦ của cả bảng (không chọn theo từng năm).
-  5. Đơn vị chuẩn hoá về tỷ VNĐ một lần cho cả chuỗi.
+  2. Với từng chỉ tiêu, nguồn được chọn là nguồn có ĐỦ NĂM NHẤT.
+  3. Năm còn thiếu chỉ được bù từ nguồn khác nếu nguồn đó KHỚP với nguồn chính trên
+     >= 2 năm trùng (lệch <= 3%). Điều kiện này kiểm cả định nghĩa lẫn đơn vị, và áp
+     dụng giống hệt cho mọi năm. Không khớp / không đủ năm trùng -> để TRỐNG.
+  4. Đơn vị chuẩn hoá về tỷ VNĐ một lần cho cả chuỗi.
 
 Module thuần pandas/numpy — không import streamlit/vnstock nên test được độc lập.
 """
@@ -25,10 +22,14 @@ import numpy as np
 import pandas as pd
 
 from financial_normalizer import build_financial_table
-from quarterly_view import quarter_year_sums, _parse_q_key, _num
+
+FIELDS = ('revenue', 'net_profit', 'equity', 'total_assets', 'eps')
+SCORE_FIELDS = ('revenue', 'net_profit', 'equity', 'total_assets')
+OVERLAP_MIN = 2          # số năm trùng tối thiểu để tin một nguồn bù
+OVERLAP_TOL = 0.03       # lệch tối đa trên năm trùng
+
 
 # ────────────────────────── chuẩn hoá đơn vị ──────────────────────────────
-
 
 def normalize_to_billion_vnd(series):
     """
@@ -105,7 +106,7 @@ def normalize_net_profit_with_anchor(net_profit_raw, equity_series, roe_series):
     return pd.Series(fixed)
 
 
-# ────────────────────────── luật tính từng năm ────────────────────────────
+# ────────────────────────── tiện ích ──────────────────────────────────────
 
 def _int_year(k):
     try:
@@ -115,110 +116,121 @@ def _int_year(k):
 
 
 def filter_years(s, years):
-    """Giữ đúng các năm trong `years`, index về int."""
+    """Giữ đúng các năm trong `years`, index về int, bỏ NaN."""
     if s is None or len(s) == 0:
         return pd.Series(dtype=float)
+    years = set(years)
     out = {}
     for k, v in s.items():
         y = _int_year(k)
-        fv = _num(v)
-        if y in years and fv is not None and y not in out:
+        try:
+            fv = float(v)
+        except (TypeError, ValueError):
+            continue
+        if y in years and not np.isnan(fv) and y not in out:
             out[y] = fv
-    return pd.Series(out, dtype=float).sort_index()
-
-
-def _annual_map(annual) -> dict:
-    return {} if annual is None or len(annual) == 0 else filter_years(annual, set(range(1900, 2200))).to_dict()
-
-
-def resolve_flow(annual, quarterly, years, notes=None, label='') -> pd.Series:
-    """
-    Chỉ tiêu dòng chảy. Mỗi năm: cột năm; thiếu thì tổng 4 quý của CHÍNH dòng đó.
-    Cùng một hàm cho mọi năm. Có cả hai mà lệch >5% -> chỉ GHI CHÚ, không thay số.
-    """
-    ann = _annual_map(annual)
-    qsum = quarter_year_sums(quarterly)
-    out = {}
-    for y in sorted(years):
-        a, q = ann.get(y), qsum.get(y)
-        if a is not None:
-            out[y] = a
-            if notes is not None and q and abs(a - q) / abs(q) > 0.05:
-                notes.append(f'{label}[{y}]: cột năm {a:,.2f} lệch {abs(a - q) / abs(q):.0%} '
-                             f'so với tổng 4 quý {q:,.2f} — kiểm tra nguồn')
-        elif q is not None:
-            out[y] = q
-    return pd.Series(out, dtype=float).sort_index()
-
-
-def resolve_stock(annual, quarterly, years) -> pd.Series:
-    """Chỉ tiêu số dư: cột năm; thiếu thì quý 4 của chính dòng đó."""
-    ann = _annual_map(annual)
-    q4 = {}
-    if quarterly is not None and len(quarterly) > 0:
-        for k, v in quarterly.items():
-            pk = _parse_q_key(k)
-            fv = _num(v)
-            if pk and pk[1] == 4 and fv is not None:
-                q4[pk[0]] = fv
-    out = {}
-    for y in sorted(years):
-        if ann.get(y) is not None:
-            out[y] = ann[y]
-        elif q4.get(y) is not None:
-            out[y] = q4[y]
     return pd.Series(out, dtype=float).sort_index()
 
 
 # ────────────────────────── dựng lõi từ MỘT nguồn ─────────────────────────
 
-CORE_FIELDS = ('revenue', 'net_profit', 'equity', 'total_assets')
-
-
 def build_core(bundle: dict, ticker: str, years) -> dict:
     """
-    bundle: {'income_y','balance_y','ratio_y','cashflow_y','income_q','balance_q','ratio_q'}
-            — các DataFrame của CÙNG MỘT nguồn.
-    Trả về dict series đã chuẩn hoá (tỷ VNĐ) + fin_y / fin_q thô + notes + score.
+    bundle: {'income_y','balance_y','ratio_y','cashflow_y'} — DataFrame của CÙNG MỘT nguồn.
+    Trả về các chuỗi năm đã chuẩn hoá (tỷ VNĐ), bảng fin_y thô và điểm đủ-dữ-liệu.
     """
     years = set(years)
-    notes: list = []
     fin_y = build_financial_table(bundle.get('income_y'), bundle.get('balance_y'),
                                   bundle.get('ratio_y'), ticker=ticker, period='year')
-    fin_q = build_financial_table(bundle.get('income_q'), bundle.get('balance_q'),
-                                  bundle.get('ratio_q'), ticker=ticker, period='quarter')
-
-    rev_y, rev_q = normalize_to_billion_vnd(fin_y['revenue']), normalize_to_billion_vnd(fin_q['revenue'])
-    eq_y, eq_q = normalize_to_billion_vnd(fin_y['equity']), normalize_to_billion_vnd(fin_q['equity'])
-    ta_y, ta_q = normalize_to_billion_vnd(fin_y['total_assets']), normalize_to_billion_vnd(fin_q['total_assets'])
-    np_y = normalize_net_profit_with_anchor(fin_y['net_profit'], eq_y, fin_y['roe'])
-    np_q = normalize_net_profit_with_anchor(fin_q['net_profit'], eq_q, fin_q['roe'])
-
+    equity = normalize_to_billion_vnd(fin_y['equity'])
     core = {
-        'revenue':      resolve_flow(rev_y, rev_q, years, notes, 'revenue'),
-        'net_profit':   resolve_flow(np_y, np_q, years, notes, 'net_profit'),
-        'equity':       resolve_stock(eq_y, eq_q, years),
-        'total_assets': resolve_stock(ta_y, ta_q, years),
-        'eps':          resolve_flow(fin_y['eps'], fin_q['eps'], years),
-        'fin_y': fin_y, 'fin_q': fin_q,
-        'rev_q': rev_q, 'np_q': np_q, 'eq_q': eq_q, 'ta_q': ta_q,
-        'notes': notes,
+        'revenue':      filter_years(normalize_to_billion_vnd(fin_y['revenue']), years),
+        'net_profit':   filter_years(
+            normalize_net_profit_with_anchor(fin_y['net_profit'], equity, fin_y['roe']), years),
+        'equity':       filter_years(equity, years),
+        'total_assets': filter_years(normalize_to_billion_vnd(fin_y['total_assets']), years),
+        'eps':          filter_years(fin_y['eps'], years),
+        'fin_y':        fin_y,
     }
-    core['score'] = sum(int(core[f].notna().sum()) for f in CORE_FIELDS)
+    core['score'] = sum(len(core[f]) for f in SCORE_FIELDS)
     return core
 
 
-def pick_best_source(cores: dict, order, years) -> str | None:
-    """Chọn MỘT nguồn cho cả bảng: điểm đủ-dữ-liệu cao nhất, hòa thì theo thứ tự ưu tiên."""
+def is_complete(core: dict, years) -> bool:
+    return core is not None and core['score'] >= len(set(years)) * len(SCORE_FIELDS)
+
+
+def pick_best_source(cores: dict, order, years=None):
+    """Nguồn có điểm đủ-dữ-liệu cao nhất; hòa thì theo thứ tự ưu tiên."""
     best, best_score = None, -1
     for src in order:
         c = cores.get(src)
-        if c is None:
-            continue
-        if c['score'] > best_score:
+        if c is not None and c['score'] > best_score:
             best, best_score = src, c['score']
     return best
 
 
-def is_complete(core: dict, years) -> bool:
-    return core is not None and core['score'] >= len(set(years)) * len(CORE_FIELDS)
+# ────────────────────────── gộp nguồn có kiểm chứng ────────────────────────
+
+def _agrees(base: pd.Series, other: pd.Series):
+    """(khớp?, lý do). Trên các năm trùng: trung vị tỷ lệ phải ≈ 1 và >= OVERLAP_MIN năm."""
+    common = [y for y in other.index if y in base.index and base[y] != 0 and other[y] != 0]
+    if len(common) < OVERLAP_MIN:
+        return False, f'chỉ {len(common)} năm trùng (cần >= {OVERLAP_MIN})'
+    ratios = [other[y] / base[y] for y in common]
+    med = float(np.median(ratios))
+    if abs(med - 1.0) > OVERLAP_TOL:
+        return False, f'lệch {med:.3f}x so với nguồn chính (khác định nghĩa/đơn vị)'
+    return True, ''
+
+
+def merge_cores(cores: dict, order, years) -> dict:
+    """
+    Gộp các nguồn theo từng chỉ tiêu: nguồn nhiều năm nhất làm gốc, năm thiếu chỉ được bù
+    từ nguồn khác khi nguồn đó khớp gốc trên >= 2 năm trùng. Cùng một luật cho mọi năm.
+    Trả về {field: Series, 'notes': [...], 'sources': {field: nguồn gốc}}.
+    """
+    years = sorted(set(years))
+    notes: list = []
+    out: dict = {'sources': {}}
+    avail = [s for s in order if s in cores]
+    for field in FIELDS:
+        ranked = sorted(avail, key=lambda s: (-len(cores[s][field]), order.index(s)))
+        if not ranked:
+            out[field] = pd.Series(dtype=float)
+            continue
+        base_src = ranked[0]
+        base = cores[base_src][field].copy()
+        out['sources'][field] = base_src
+        for src in ranked[1:]:
+            missing = [y for y in years if y not in base.index]
+            if not missing:
+                break
+            other = cores[src][field]
+            patch = {y: other[y] for y in missing if y in other.index}
+            if not patch:
+                continue
+            ok, why = _agrees(cores[base_src][field], other)
+            if ok:
+                for y, v in patch.items():
+                    base[y] = v
+                notes.append(f'{field}: bù {sorted(patch)} từ {src} (khớp {base_src} trên năm trùng)')
+            else:
+                notes.append(f'{field}: KHÔNG bù {sorted(patch)} từ {src} — {why}')
+        out[field] = base.sort_index()
+    out['notes'] = notes
+    return out
+
+
+def coverage_text(merged: dict, years) -> str:
+    """Ví dụ: 'Doanh thu 5/5 · LNST 5/5 · Vốn CSH thiếu 2021 · Tổng TS 5/5'."""
+    years = sorted(set(years))
+    labels = {'revenue': 'Doanh thu', 'net_profit': 'LNST',
+              'equity': 'Vốn CSH', 'total_assets': 'Tổng TS'}
+    parts = []
+    for f, lab in labels.items():
+        have = set(merged.get(f, pd.Series(dtype=float)).index)
+        miss = [y for y in years if y not in have]
+        parts.append(f'{lab} {len(years)}/{len(years)}' if not miss
+                     else f'{lab} thiếu {", ".join(map(str, miss))}')
+    return ' · '.join(parts)
