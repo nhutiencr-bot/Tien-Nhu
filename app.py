@@ -220,6 +220,7 @@ st.markdown(
 )
 st.caption(
     f"Nguồn dữ liệu: vnstock ({metrics.get('source_used', 'N/A')}) · "
+    f"Phủ dữ liệu: {metrics.get('coverage_note', 'N/A')} · "
     f"Cập nhật: {today_str} · "
     "Không phải lời khuyên đầu tư · Đầu tư cổ phiếu có rủi ro mất vốn."
 )
