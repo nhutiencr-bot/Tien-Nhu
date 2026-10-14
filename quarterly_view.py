@@ -155,29 +155,3 @@ def quarter_year_sums(q_series) -> dict:
             vals = _decumulate(vals)
         out[yr] = round(sum(vals), 2)
     return out
-
-
-def reconcile_with_quarters(annual: pd.Series, q_sums: dict, years, tol: float = 0.05,
-                            notes=None, label: str = 'revenue') -> pd.Series:
-    """
-    Đối chiếu chuỗi năm với tổng 4 quý:
-      - năm THIẾU  -> điền bằng tổng 4 quý;
-      - năm LỆCH > tol so với tổng 4 quý -> thay bằng tổng 4 quý (cột năm bị gọi sai tên /
-        trộn định nghĩa), ghi chú vào notes.
-    """
-    s = annual.copy() if annual is not None else pd.Series(dtype=float)
-    for yr in sorted(years):
-        qs = q_sums.get(yr)
-        if qs is None or qs <= 0:
-            continue
-        cur = s.get(yr) if yr in s.index else None
-        if cur is None or pd.isna(cur):
-            s[yr] = qs
-            if notes is not None:
-                notes.append(f'{label}[{yr}]: thiếu số năm -> lấy tổng 4 quý {qs:,.2f}')
-        elif abs(cur - qs) / qs > tol:
-            if notes is not None:
-                notes.append(f'{label}[{yr}]: số năm {cur:,.2f} lệch {abs(cur - qs) / qs:.0%} so với '
-                             f'tổng 4 quý {qs:,.2f} -> dùng tổng 4 quý')
-            s[yr] = qs
-    return s.sort_index()
