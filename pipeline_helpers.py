@@ -345,7 +345,7 @@ def _parse_year_from_col(col_str: str):
 # ════════════════════════════════════════════════════════════════════════
 # DNSE FALLBACK — public JSON API, không cần auth
 # ════════════════════════════════════════════════════════════════════════
-def _fetch_dnse_financials(ticker: str, allowed_years: set) -> dict:
+def _fetch_dnse_financials(ticker: str, allowed_years: set, is_bank: bool = False) -> dict:
     """
     Fetch dữ liệu tài chính từ DNSE public API.
     Trả về dict: {
@@ -393,8 +393,11 @@ def _fetch_dnse_financials(ticker: str, allowed_years: set) -> dict:
                         val = float(val)
                     except Exception:
                         continue
-                    if any(k in name for k in ["doanh thu thuần", "net revenue", "revenue"]):
-                        if "giá vốn" not in name and "chi phí" not in name:
+                    # [FIX 20] Ngân hàng: chỉ nhận Thu nhập lãi thuần (NII), không nhận "revenue"
+                    _rev_names = (["thu nhập lãi thuần", "net interest income"] if is_bank
+                                  else ["doanh thu thuần", "net revenue", "revenue"])
+                    if any(k in name for k in _rev_names):
+                        if not any(x in name for x in ("giá vốn", "chi phí", "tương tự", "dịch vụ")):
                             result["revenue"][yr] = val
                     elif any(k in name for k in ["lợi nhuận sau thuế", "lnst", "net profit", "net income"]):
                         if "trước" not in name and "thiểu số" not in name:
