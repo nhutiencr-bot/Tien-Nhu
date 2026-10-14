@@ -3,85 +3,19 @@
 r"""
 financial_normalizer.py
 ------------------------
-Các sửa đổi so với bản trước (399 dòng):
+Tìm DÒNG chỉ tiêu trong báo cáo tài chính vnstock và đọc các cột năm/quý của dòng đó.
 
-  [FIX 1] _find_revenue_for_bank(): đảo priority — Thu nhập lãi thuần lên ƯU TIÊN #1.
-          Bản cũ để "doanh thu hoạt động" đầu tiên → TPB bị lấy 30,751 tỷ thay vì 13,371 tỷ.
-
-  [FIX 2] _find_revenue_for_securities(): tách riêng CTCK khỏi ngân hàng.
-          CTCK dùng "Doanh thu hoạt động" (đúng), ngân hàng dùng NII (đúng).
-
-  [FIX 3] _norm_label(): fix bug chữ đ/Đ bị drop hoàn toàn khi unicodedata strip dấu.
-          "hoạt động" → "hoat ong" (sai) → giờ → "hoat dong" (đúng).
-
-  [FIX 4] find_row_series(): thêm _norm_label() vào matching để không phụ thuộc
-          vào dấu tiếng Việt trong keyword.
-
-  [FIX 5] Bổ sung OILGAS_TICKERS, CONSTRUCTION_TICKERS vào sector detection.
-
-  [FIX 6] build_financial_table(): thêm field 'cfo' — lấy CFO từ cashflow năm,
-          fallback tự cộng 4 quý gần nhất khi cashflow năm 2025 chưa có.
-
-  [FIX 7] _get_year_columns(): match r'\d{4}-Q4' — vnstock annual format.
-
-  [FIX 8] find_row_series(): khi nhiều dòng match, ưu tiên dòng có data ở năm MỚI NHẤT.
-
-  [FIX 9] _search_with_priority(): không return ngay khi s not empty — ưu tiên
-          series có data ở latest year.
-
-  [FIX 10] vnstock v3.2.8 — Tidy Data + Semantic ID.
-
-  [FIX 11] _align_2025(): chuẩn hoá key năm 2025 — merge dữ liệu từ cột '2025-Q4'
-           vào key int 2025, đảm bảo mọi Series đều có index thống nhất là int năm.
-           Áp dụng sau mỗi find_row_series() call trong build_financial_table().
-
-  [FIX 12] find_row_series(): khi map cột '2025-Q4' → year key 2025, KHÔNG ghi đè
-           nếu key 2025 đã có giá trị hợp lệ từ cột '2025' (tránh double-write).
-
-  [FIX 13] _search_with_priority(): so sánh latest year bằng int năm thực tế
-           (max của index) thay vì s.index[-1] == s.index[-1] (luôn True).
-           Trước đây: nếu index là [2021,2022,2023,2024] thì s.index[-1]=2024,
-           s.dropna().index[-1]=2024 → điều kiện True → return sớm dù thiếu 2025.
-           Sau fix: kiểm tra max(s.dropna().index) >= TARGET_YEAR (2025).
-
-[FIX 16] Tương thích vnstock bản mới (nguồn KBS mặc định) / TCBS mới:
-    - _col_year()/_col_quarter(): nhận diện nhãn cột năm/quý LINH HOẠT
-      (2025, '2025', 2025.0, '2025.0', '2025-Q4', 'Q4/2025', 'FY2025'...).
-      Trước đây fullmatch(r'\d{4}') loại cả cột '2025.0' (float) nên
-      2021-2024 vẫn đúng còn 2025 biến mất / bị vá từ tier khác.
-    - _prepare_df(): tự chuyển DataFrame dạng DÀI (cột date/year/quarter,
-      mỗi chỉ tiêu 1 cột) về dạng RỘNG (cột item + cột năm/quý) và chấp nhận
-      tên chỉ tiêu nằm ở index. Tên cột meta (Item/ITEM...) không phân biệt hoa thường.
-    - Key quý luôn chuẩn hoá về 'YYYY-Qn'.
-
-  [FIX 14] _find_revenue_for_bank(): loại trừ keyword gây nhiễu mạnh hơn —
-           thêm 'tuong tu' vào exclude để tránh pick dòng
-           "Thu nhập lãi và các khoản thu nhập tương tự" (gross) thay vì NII (net).
-           Fallback gross chỉ dùng khi NII thực sự rỗng.
-
-  [FIX 15] _find_revenue_general() / _find_revenue_for_retail() /
-           _find_revenue_for_realestate(): ĐẢO PRIORITY — "doanh thu thuần"
-           (MS10, net) lên tier 0, "doanh thu bán hàng và cung cấp dịch vụ"
-           (MS01, gross) xuống tier fallback.
-
-           ROOT CAUSE của bug "2021-2024 đúng, 2025 sai": 3 hàm này để
-           gross revenue (MS01) làm tier 0, net revenue (MS10) làm tier 1.
-           Vì _resolve_year_tiers() lấy base = TOÀN BỘ series của tier 0,
-           và CHỈ vá riêng TARGET_YEAR (2025) từ tier sau nếu tier 0 thiếu
-           đúng năm đó — nên:
-             - Với đa số công ty, MS01 ≈ MS10 (không có/ít khoản giảm trừ
-               doanh thu) ở 2021-2024 → sai lệch không lộ ra, nhìn "đúng".
-             - Ở 2025, nếu dòng MS01 bị thiếu cột năm 2025 trong dữ liệu
-               cào về (annual report năm 2025 mới publish, dòng MS01 có
-               format cột khác/chưa đủ) → toàn bộ base (gồm cả các năm cũ)
-               vẫn là MS01 gross, nhưng riêng 2025 lại bị "vá" từ MS10 —
-               HOẶC ngược lại, nếu MS01 vẫn có cột 2025 nhưng giá trị đó
-               không tương đương MS10 (khoản giảm trừ doanh thu năm 2025
-               lớn hơn các năm trước) → 2025 hiển thị sai thành gross
-               trong khi cột "Doanh thu thuần" phải là net.
-           Fix: coi "doanh thu thuần" là khái niệm ĐÚNG NGAY TỪ ĐẦU (đây
-           mới là MS10 — đúng với tên cột hiển thị "Doanh thu thuần"),
-           gross chỉ dùng khi công ty không có dòng MS10 tách riêng.
+Luật (không có xử lý riêng cho năm nào):
+  - Doanh thu theo NGÀNH, mỗi ngành MỘT khái niệm:
+      Ngân hàng = Thu nhập lãi thuần · CTCK = Doanh thu hoạt động ·
+      Bảo hiểm = Doanh thu phí bảo hiểm · Còn lại = Doanh thu thuần (MS10).
+    Chọn tier ưu tiên đầu tiên có dữ liệu và dùng cho TOÀN BỘ các năm.
+  - Khi nhiều dòng cùng khớp từ khoá: xếp hạng theo độ khớp NHÃN (nguyên văn > bắt đầu
+    bằng > chứa), trừ điểm nhãn nhiễu (giảm trừ, tỷ lệ, tài chính...), rồi mới tới số ô
+    có dữ liệu, cuối cùng nhãn ngắn nhất.
+  - Cột năm thuần ('2025', 2025.0) luôn thắng cột '2025-Q4'.
+  - Nhãn được chuẩn hoá bỏ dấu (đ/Đ -> d) trước khi so khớp.
+Việc ghép năm thiếu bằng tổng 4 quý nằm ở financials_core.py.
 """
 
 import re
@@ -91,42 +25,9 @@ import pandas as pd
 
 
 # ---------------------------------------------------------------------------
-# [ROOT-FIX v2] Có HAI khái niệm "năm hiện tại" khác nhau, KHÔNG được
-# gộp làm một (bản vá trước của tôi đã mắc đúng lỗi này):
-#
-#   1. TARGET_YEAR — năm CUỐI CÙNG của bảng 5 năm hiển thị (2021-2025...).
-#      Đây phải là năm đã ĐÓNG SỔ, tức đã/gần như chắc chắn có báo cáo
-#      tài chính năm (thường công bố trong Q1 năm sau, hạn chót ~31/3
-#      theo quy định UBCKNN). KHÔNG được để bằng năm lịch hiện tại,
-#      nếu không năm đang chạy dở (chỉ có 1-3 quý) sẽ lọt vào bảng.
-#
-#   2. IN_PROGRESS_YEAR — năm lịch THỰC TẾ hôm nay (datetime.today().year),
-#      dùng để nhận diện "năm này chắc chắn CHƯA có báo cáo năm đầy đủ,
-#      phải ưu tiên cộng dồn quý". Đây là khái niệm dùng trong
-#      equity_pipeline.py cho Tầng 0 / SANITY CHECK.
-#
-# Bug trước đây (2 lượt sửa gộp chung 1 biến TARGET_YEAR cho cả 2 việc):
-#   (a) Lượt 1: TARGET_YEAR hardcode = 2025 mãi mãi trong khi
-#       equity_pipeline.py dùng datetime.today().year động ⇒ khi lịch hệ
-#       thống đã sang 2026, điều kiện "_yr0 == datetime.today().year" cho
-#       2025 luôn False ⇒ toàn bộ cơ chế cộng-dồn-quý/sanity-check ngừng
-#       áp dụng cho 2025 ⇒ tin nhầm annual value có thể sai/thiếu.
-#   (b) Lượt 2 (bản vá trước của tôi): đổi TARGET_YEAR = ngày_hôm_nay.year
-#       (2026) để "đồng bộ" — nhưng làm vậy khiến khung 5 năm TRÔI theo
-#       lịch thực thành 2022-2026, kéo theo:
-#         - Cào thêm năm 2026 (mới có 2 quý, chưa đóng sổ) vào bảng.
-#         - Làm rớt năm 2021 ra khỏi allowed_years.
-#         - _is_current_year giờ so sánh _yr0 == 2026 nên KHÔNG BAO GIỜ
-#           đúng với 2025 nữa ⇒ 2025 (dù đã đóng sổ) bị coi là "năm chưa
-#           đóng sổ" ở một chỗ khác của logic cũ và ngược lại tuỳ nơi —
-#           vẫn sai, chỉ là sai kiểu khác.
-#
-# Sửa đúng: tách hẳn 2 hằng số, KHÔNG bao giờ dùng lẫn cho nhau.
-# equity_pipeline.py phải import CẢ HAI và dùng đúng ngữ cảnh:
-#   - "X in allowed_years" / "_is_current_year" / "đừng tin annual"
-#     → dùng IN_PROGRESS_YEAR.
-#   - Khung hiển thị 5 năm (ALLOWED_YEARS, TABLE_END_YEAR)
-#     → dùng TARGET_YEAR.
+# Khung năm hiển thị. TARGET_YEAR = năm cuối ĐÃ đóng sổ (BCTC năm công bố hạn chót ~31/3
+# năm sau, nên từ tháng 4 trở đi mới coi năm trước là đã đóng sổ).
+# IN_PROGRESS_YEAR = năm lịch hiện tại, chỉ dùng cho bảng quý (Q1..Qn).
 # ---------------------------------------------------------------------------
 
 def _compute_target_year(today: _dt.date = None) -> int:
@@ -201,24 +102,20 @@ CONSTRUCTION_TICKERS = {
 # [FIX 10] Semantic ID (Taxonomy) — vnstock v3.2.8
 # ---------------------------------------------------------------------------
 
+# [FIX 21] Ngành tài chính: MỘT khái niệm doanh thu duy nhất, không rơi sang khái niệm khác.
 BANK_REVENUE_IDS = [
-    'NI_NET_INTEREST_INCOME',
-    'NI_TOTAL_NET_OPERATING_INCOME',
-    'NI_TOTAL_OPERATING_INCOME',
-    'NI_NET_INCOME_FROM_SERVICES',
+    'NI_NET_INTEREST_INCOME',          # Thu nhập lãi thuần (NII)
 ]
 
 SECURITIES_REVENUE_IDS = [
     'NI_OPERATING_REVENUE',
     'NI_TOTAL_OPERATING_REVENUE',
-    'NI_NET_REVENUE',
 ]
 
 INSURANCE_REVENUE_IDS = [
     'NI_NET_PREMIUM_REVENUE',
     'NI_INSURANCE_OPERATING_REVENUE',
     'NI_TOTAL_OPERATING_REVENUE',
-    'NI_NET_REVENUE',
 ]
 
 NET_PROFIT_IDS = [
@@ -512,29 +409,6 @@ def find_row_series(df: pd.DataFrame, keywords, exclude_keywords=None,
     if matched.empty:
         return pd.Series(dtype=float)
 
-    # ------------------------------------------------------------------
-    # [ROOT-FIX v3 → REVERTED] Từng thử tách chọn dòng riêng cho
-    # 2021-2024 vs TARGET_YEAR NGAY TRONG find_row_series (tức trong tập
-    # "matched" — các dòng cùng khớp MỘT bộ từ khoá lỏng lẻo). Hậu quả
-    # thực tế trên VCB: 2021-2024 vẫn đúng (Thu nhập lãi thuần), nhưng
-    # 2025 bị "mượn" giá trị từ một dòng KHÁC trong cùng tập matched —
-    # dòng đó cũng khớp lỏng bộ từ khoá (vd cũng chứa "thu nhập"/"thuần")
-    # nhưng là MỘT KHÁI NIỆM KẾ TOÁN KHÁC (rộng hơn NII), cho ra 69,054
-    # thay vì 58,771.41 đúng. Tách ở lớp "matched rows của 1 bộ từ khoá"
-    # là KHÔNG AN TOÀN vì các dòng trong "matched" không đảm bảo cùng
-    # khái niệm — chúng chỉ đảm bảo cùng khớp từ khoá.
-    #
-    # → Chuyển việc tách 2021-2024 / TARGET_YEAR lên _search_with_priority()
-    # thay vì làm ở đây. Ở đó, mỗi "tier" trong priority list là MỘT khái
-    # niệm kế toán được đặt tên rõ ràng, xếp hạng ưu tiên bởi người viết
-    # (NII → Tổng thu nhập HĐ thuần → ...). Nếu tier ưu tiên nhất thiếu
-    # đúng TARGET_YEAR, ta mới thử tier kế tiếp CHỈ CHO NĂM ĐÓ — không
-    # bao giờ trộn 2 dòng chưa rõ cùng khái niệm hay không như ở đây.
-    #
-    # Ở find_row_series, quay lại logic chọn 1 dòng duy nhất cho toàn bộ
-    # keyword-set (an toàn hơn — mọi dòng trong "matched" ít nhất đã cùng
-    # khớp 1 bộ từ khoá, nhưng KHÔNG trộn giá trị giữa các dòng đó nữa).
-    # ------------------------------------------------------------------
     if len(matched) > 1:
         # [FIX 19] "BẪY TÊN GỌI": trước đây chọn dòng có NHIỀU ô có dữ liệu nhất
         # trong số dòng khớp từ khoá lỏng → dễ trúng dòng phụ/dòng tỷ lệ
@@ -600,56 +474,18 @@ def find_row_series(df: pd.DataFrame, keywords, exclude_keywords=None,
 
 def _resolve_year_tiers(all_tier_series):
     """
-    [ROOT-FIX v4] Nhận danh sách Series đã tìm được, xếp theo THỨ TỰ ƯU
-    TIÊN (phần tử 0 = ưu tiên cao nhất — có thể là taxonomy ID match hoặc
-    keyword tier, miễn là người viết code đã xếp hạng có chủ đích).
+    [FIX 21] Nhận danh sách Series theo THỨ TỰ ƯU TIÊN (mỗi phần tử = MỘT khái niệm kế
+    toán). Trả về tier đầu tiên có dữ liệu, dùng cho TOÀN BỘ các năm.
 
-    Trả về 1 Series: base = tier ưu tiên cao nhất có dữ liệu (dùng cho
-    TOÀN BỘ các năm, kể cả TARGET_YEAR nếu tier đó có). CHỈ khi base
-    thiếu đúng TARGET_YEAR, mới tìm ở các tier sau để lấy value TARGET_YEAR
-    — không đụng tới các năm còn lại của base.
-
-    Dùng chung cho _search_with_priority() và các hàm _find_revenue_for_*
-    (nơi taxonomy-ID match và keyword-priority match trước đây bị xử lý
-    tách rời — taxonomy match thiếu TARGET_YEAR từng bị VỨT BỎ HOÀN TOÀN
-    (kể cả phần lịch sử đúng), buộc phải tìm lại từ đầu bằng keyword và có
-    thể ra một dòng khác cho toàn bộ chuỗi — đây là nguồn gốc thực sự của
-    lỗi 2025=69,054 thay vì 58,771 ở VCB).
+    Đã BỎ cơ chế cũ "tier đầu thiếu TARGET_YEAR thì mượn riêng năm đó từ tier sau":
+    đó chính là cách trộn 2 khái niệm trong cùng một chuỗi (HDB/TCB 2025 = Tổng thu nhập
+    hoạt động thay vì NII). Thiếu năm nào thì để trống; pipeline chỉ bù bằng tổng 4 quý
+    của CHÍNH dòng đó (financials_core.resolve_flow).
     """
-    all_tier_series = [s for s in all_tier_series
-                        if s is not None and not s.empty and not s.dropna().empty]
-    if not all_tier_series:
-        return pd.Series(dtype=float)
-
-    base = all_tier_series[0].copy()
-    base_has_target = TARGET_YEAR in base.index and pd.notna(base.get(TARGET_YEAR))
-
-    if not base_has_target:
-        # [FIX 18] CHỈ mượn TARGET_YEAR từ tier sau nếu tier đó CÙNG khái niệm với base,
-        # kiểm chứng bằng tỷ lệ ≈ 1 trên các năm TRÙNG (lệch ≤ 8%).
-        # Trước đây mượn vô điều kiện -> HDB: 2022-2024 là Thu nhập lãi thuần
-        # (18,012 / 22,184 / 30,857) nhưng 2025 lấy từ Tổng thu nhập hoạt động
-        # (42,675 thay vì 34,746). Khác khái niệm thì tỷ lệ ~1.2x và bị loại;
-        # không có năm trùng để đối chiếu thì cũng KHÔNG mượn (thà trống để các
-        # nguồn sau — quý / CafeF — điền đúng khái niệm).
-        for s in all_tier_series[1:]:
-            v = s.get(TARGET_YEAR)
-            if pd.isna(v):
-                continue
-            common = [y for y in s.index
-                      if y != TARGET_YEAR and y in base.index
-                      and pd.notna(s[y]) and pd.notna(base[y]) and base[y] != 0]
-            if not common:
-                continue
-            ratios = [s[y] / base[y] for y in common if s[y] / base[y] > 0]
-            if not ratios:
-                continue
-            med = float(pd.Series(ratios).median())
-            if abs(med - 1.0) <= 0.08:
-                base.loc[TARGET_YEAR] = v
-                break
-
-    return base.sort_index()
+    for s in all_tier_series:
+        if s is not None and not s.empty and not s.dropna().empty:
+            return s.sort_index()
+    return pd.Series(dtype=float)
 
 
 def _search_with_priority(df_income, priority: list, period: str):
@@ -691,24 +527,11 @@ def _find_revenue_for_bank(df_income, period='year'):
     """
     priority = [
         (
-            # Priority 1: NII — loại trừ "tương tự" để không pick gross
+            # NII — loại trừ "tương tự" để không pick gross interest income
             ['thu nhap lai thuan', 'net interest income', 'lai thuan', 'nii'],
-            ['chi phi lai', 'interest expense', 'tuong tu',          # [FIX 14] thêm 'tuong tu'
+            ['chi phi lai', 'interest expense', 'tuong tu',
              'cac khoan thu nhap', 'hoat dong khac', 'dich vu',
-             'thu nhap lai va'],                                       # loại trừ gross label
-        ),
-        (
-            ['tong thu nhap hoat dong thuan', 'thu nhap hoat dong thuan',
-             'net operating income', 'total operating income'],
-            ['chi phi', 'expense', 'truoc du phong'],
-        ),
-        (
-            ['tong thu nhap hoat dong', 'thu nhap hoat dong'],
-            ['chi phi', 'expense'],
-        ),
-        (
-            ['thu nhap thuan', 'net income from', 'total net income'],
-            ['loi nhuan', 'profit', 'sau thue'],
+             'thu nhap lai va', 'du phong'],
         ),
     ]
 
@@ -752,10 +575,6 @@ def _find_revenue_for_securities(df_income, period='year'):
             ['doanh thu thuan ve hoat dong kinh doanh', 'doanh thu thuan hoat dong'],
             ['chi phi'],
         ),
-        (
-            ['doanh thu thuan', 'net revenue'],
-            ['chi phi', 'gia von', 'cost'],
-        ),
     ]
 
     if period != 'year':
@@ -796,10 +615,6 @@ def _find_revenue_for_insurance(df_income, period='year'):
         (
             ['tong doanh thu hoat dong', 'tong thu nhap hoat dong'],
             ['chi phi'],
-        ),
-        (
-            ['doanh thu thuan', 'net revenue'],
-            ['chi phi', 'gia von'],
         ),
     ]
 
@@ -907,46 +722,8 @@ def _find_revenue_general(df_income, period='year'):
 # ---------------------------------------------------------------------------
 
 def _find_cfo_with_quarterly_fallback(df_cashflow_y, df_cashflow_q=None):
-    cfo_annual = find_row_series(
-        df_cashflow_y,
-        keywords=CFO_KEYWORDS,
-        period='year',
-    )
-
-    if df_cashflow_q is None or df_cashflow_q.empty:
-        return cfo_annual
-
-    current_year = TARGET_YEAR
-    if cfo_annual.empty or current_year not in cfo_annual.index:
-        cfo_q = find_row_series(
-            df_cashflow_q,
-            keywords=CFO_KEYWORDS,
-            period='quarter',
-        )
-        if not cfo_q.empty:
-            current_year_quarters = [
-                k for k in cfo_q.index
-                if str(k).startswith(str(current_year))
-            ]
-            if len(current_year_quarters) >= 1:
-                cfo_current = cfo_q[current_year_quarters].sum()
-                if not cfo_annual.empty:
-                    cfo_annual = cfo_annual.copy()
-                    cfo_annual[current_year] = cfo_current
-                else:
-                    years_in_q = sorted(set(
-                        int(str(k).split('-Q')[0]) for k in cfo_q.index
-                    ))
-                    result = {}
-                    for yr in years_in_q:
-                        qs = [k for k in cfo_q.index if str(k).startswith(str(yr))]
-                        if len(qs) == 4:
-                            result[yr] = cfo_q[qs].sum()
-                        elif yr == current_year and len(qs) >= 1:
-                            result[yr] = cfo_q[qs].sum()
-                    cfo_annual = pd.Series(result).sort_index()
-
-    return cfo_annual
+    """CFO theo năm từ dòng LCTT hoạt động kinh doanh (không có nhánh riêng cho năm nào)."""
+    return find_row_series(df_cashflow_y, keywords=CFO_KEYWORDS, period='year')
 
 
 # ---------------------------------------------------------------------------
@@ -958,6 +735,9 @@ def build_financial_table(df_income, df_balance, df_ratio=None,
                           df_cashflow_y=None, df_cashflow_q=None):
     data = {}
     t = (ticker or '').upper().strip()
+    # Chuẩn hoá khóa '2025-Q4' -> 2025 CHỈ áp dụng cho dữ liệu NĂM. Với dữ liệu quý phải giữ
+    # nguyên khóa 'YYYY-Qn', nếu không 4 quý của một năm bị gộp thành 1 ô.
+    _align_keys = _align_2025 if period == 'year' else (lambda s: s)
 
     # --- Sector detection & Revenue ---
     if t in BANK_TICKERS:
@@ -976,10 +756,10 @@ def build_financial_table(df_income, df_balance, df_ratio=None,
             data['revenue'] = _find_revenue_for_retail(df_income, period=period)
 
     # [FIX 11] Align 2025 cho revenue
-    data['revenue'] = _align_2025(data['revenue'])
+    data['revenue'] = _align_keys(data['revenue'])
 
     # --- Lợi nhuận sau thuế ---
-    data['net_profit'] = _align_2025(find_row_series(
+    data['net_profit'] = _align_keys(find_row_series(
         df_income,
         ['loi nhuan sau thue', 'net profit', 'profit after tax', 'net income',
          'loi nhuan thuan', 'lai sau thue'],
@@ -989,14 +769,14 @@ def build_financial_table(df_income, df_balance, df_ratio=None,
     ))
 
     # --- EPS từ income statement ---
-    data['eps_income_stmt'] = _align_2025(find_row_series(
+    data['eps_income_stmt'] = _align_keys(find_row_series(
         df_income,
         ['lai co ban tren co phieu', 'earnings per share', 'eps'],
         item_ids=['eps'], period=period,
     ))
 
     # --- Balance sheet ---
-    data['equity'] = _align_2025(find_row_series(
+    data['equity'] = _align_keys(find_row_series(
         df_balance,
         ['von chu so huu', "owner's equity", 'owners equity', 'total equity',
          'equity', 'vcsh'],
@@ -1004,7 +784,7 @@ def build_financial_table(df_income, df_balance, df_ratio=None,
         period=period,
     ))
 
-    data['total_assets'] = _align_2025(find_row_series(
+    data['total_assets'] = _align_keys(find_row_series(
         df_balance,
         ['tong cong tai san', 'total assets', 'tong tai san'],
         period=period,
@@ -1012,7 +792,7 @@ def build_financial_table(df_income, df_balance, df_ratio=None,
 
     # --- CFO với fallback quý ---
     if period == 'year' and df_cashflow_y is not None:
-        data['cfo'] = _align_2025(_find_cfo_with_quarterly_fallback(df_cashflow_y, df_cashflow_q))
+        data['cfo'] = _align_keys(_find_cfo_with_quarterly_fallback(df_cashflow_y, df_cashflow_q))
     elif df_cashflow_y is not None:
         data['cfo'] = find_row_series(df_cashflow_y, keywords=CFO_KEYWORDS, period=period)
     else:
@@ -1039,7 +819,7 @@ def build_financial_table(df_income, df_balance, df_ratio=None,
 
     if df_ratio is not None and not df_ratio.empty:
         for field_name, keywords in ratio_fields:
-            data[field_name] = _align_2025(find_row_series(df_ratio, keywords, period=period))
+            data[field_name] = _align_keys(find_row_series(df_ratio, keywords, period=period))
     else:
         for field_name, _ in ratio_fields:
             data[field_name] = pd.Series(dtype=float)
