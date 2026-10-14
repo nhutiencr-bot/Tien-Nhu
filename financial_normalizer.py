@@ -436,6 +436,30 @@ def _get_quarter_columns(df: pd.DataFrame):
     return sorted(q_cols, key=lambda c: _quarter_sort_key(_col_quarter(c)))
 
 
+
+# [FIX 19] Helper cho việc xếp hạng dòng + phân biệt cột năm / cột Q4
+_NOISE_TOKENS = (
+    'giam tru', 'ty le', 'ty suat', 'tang truong', 'growth', 'margin', 'bien ',
+    '%', 'tai chinh', 'financial', 'khac', 'other', 'lien doanh', 'lien ket',
+    'cho thue', 'noi bo', 'intersegment', 'tren co phieu', 'per share',
+)
+_RE_LEAD_NUM = re.compile(r'^(?:[ivxlcdm]+|\d+)(?:\.\d+)*[\.\)]\s*', re.I)
+
+
+def _clean_row_label(text) -> str:
+    """Nhãn dòng chuẩn hoá: bỏ dấu, bỏ số thứ tự đầu dòng ('10. ', 'II. ', '1.1 ')."""
+    t = _norm_label(str(text) if text is not None else '')
+    prev = None
+    while prev != t:            # bóc nhiều lớp: "I. 1. ..."
+        prev = t
+        t = _RE_LEAD_NUM.sub('', t).strip()
+    return t
+
+
+def _is_q4_col(c) -> int:
+    """1 nếu cột là dạng '2025-Q4' / 'Q4/2025', 0 nếu là cột năm thuần."""
+    return 1 if _RE_YEAR_Q4.match(str(c).strip()) else 0
+
 # ---------------------------------------------------------------------------
 # Core row finder
 # ---------------------------------------------------------------------------
@@ -512,16 +536,44 @@ def find_row_series(df: pd.DataFrame, keywords, exclude_keywords=None,
     # khớp 1 bộ từ khoá, nhưng KHÔNG trộn giá trị giữa các dòng đó nữa).
     # ------------------------------------------------------------------
     if len(matched) > 1:
+        # [FIX 19] "BẪY TÊN GỌI": trước đây chọn dòng có NHIỀU ô có dữ liệu nhất
+        # trong số dòng khớp từ khoá lỏng → dễ trúng dòng phụ/dòng tỷ lệ
+        # ("Doanh thu thuần hoạt động tài chính", "Tăng trưởng doanh thu thuần"...)
+        # có nhiều năm hơn dòng chuẩn → doanh thu năm mới nhất lệch.
+        # Giờ xếp hạng theo ĐỘ KHỚP NHÃN: khớp nguyên văn từ khoá > bắt đầu bằng
+        # từ khoá > chỉ chứa từ khoá; trừ điểm dòng có từ nhiễu; rồi mới tới
+        # số ô có dữ liệu, cuối cùng là nhãn ngắn nhất (dòng tổng thường gọn hơn).
         latest_col = year_cols[-1]
         has_latest = matched[latest_col].notna()
         candidates = matched[has_latest] if has_latest.any() else matched
         non_na_counts = candidates[year_cols].notna().sum(axis=1)
-        row = candidates.loc[non_na_counts.idxmax()]
+        primary = 'item' if 'item' in candidates.columns else search_cols[0]
+        kws_norm = [_norm_label(k) for k in keywords]
+
+        def _rank(idx):
+            lab = _clean_row_label(candidates.at[idx, primary])
+            if any(lab == k for k in kws_norm):
+                mr = 0
+            elif any(lab.startswith(k) for k in kws_norm):
+                mr = 1
+            else:
+                mr = 2
+            noise = sum(1 for t in _NOISE_TOKENS if t in lab)
+            return (mr, noise, -int(non_na_counts.at[idx]), len(lab))
+
+        best_idx = min(candidates.index, key=_rank)
+        row = candidates.loc[best_idx]
     else:
         row = matched.iloc[0]
 
     # Build result dict
     result = {}
+    # [FIX 19] Cột NĂM thuần ('2025', 2025.0) luôn được xử lý TRƯỚC cột '2025-Q4'.
+    # Cột '2025-Q4' có thể là số RIÊNG QUÝ 4 (không phải cả năm); nếu nó đứng trước
+    # '2025' trong DataFrame thì cơ chế "không ghi đè" cũ giữ nhầm số quý làm
+    # doanh thu cả năm 2025. Chỉ dùng Q4 khi năm đó không có cột năm thuần.
+    if period != 'quarter':
+        year_cols = sorted(year_cols, key=lambda c: (_col_year(c), _is_q4_col(c)))
     for yc in year_cols:
         val = pd.to_numeric(pd.Series([row[yc]]), errors='coerce').iloc[0]
         if pd.notna(val):
