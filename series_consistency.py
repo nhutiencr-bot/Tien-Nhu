@@ -73,7 +73,8 @@ def _nearest_power_of_1000(ratio):
     return 0
 
 
-def merge_consistent(base, patch, tol=0.08, notes=None, label='series'):
+def merge_consistent(base, patch, tol=0.08, notes=None, label='series',
+                     require_overlap=False):
     """
     Vá các năm THIẾU của base bằng patch, nhưng chỉ khi patch cùng đơn vị + cùng định nghĩa:
 
@@ -120,6 +121,14 @@ def merge_consistent(base, patch, tol=0.08, notes=None, label='series'):
                          f'(tỷ lệ {med:.3f}) -> loại nguồn (khác định nghĩa/đơn vị)')
             return base.sort_index()
     else:
+        # [FIX 20] Không có năm trùng thì KHÔNG THỂ kiểm tra định nghĩa (NII vs Tổng thu
+        # nhập HĐ vs Total Revenue của Yahoo...). Với chỉ tiêu nhạy định nghĩa
+        # (doanh thu, LNST) thà để trống còn hơn nhận số khác khái niệm — lỗi TCB 2025
+        # (52,316 thay vì NII 38,155) lọt qua đúng nhánh này.
+        if require_overlap:
+            _note(notes, f'{label}: nguồn vá không có năm trùng để đối chiếu định nghĩa '
+                         f'-> loại nguồn')
+            return base.sort_index()
         accepted = {}
         for yr, val in patch.items():
             if val == 0:
