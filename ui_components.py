@@ -261,6 +261,63 @@ def render_tab_kqkd(df_5y_table, fundamentals, period_col='Năm'):
         "Ô '—' = nguồn không cung cấp dữ liệu năm đó."
     )
 
+    if period_col == 'Năm':
+        _render_quarter_pivot(fundamentals.get('quarter_pivot') if fundamentals else None)
+
+
+def _fmt_q(v):
+    """Ô quý: có số → '1,234'; chưa có (vd Q3/2026) → để TRỐNG."""
+    try:
+        if v is None or v != v:
+            return ""
+        return f"{float(v):,.0f}"
+    except (TypeError, ValueError):
+        return ""
+
+
+def _quarter_pivot_html(df):
+    cols = list(df.columns)
+    head = "".join(
+        f'<th style="padding:8px 12px;text-align:{"left" if c == "Năm" else "right"}">{c}</th>'
+        for c in cols)
+    body = ""
+    last_year = df['Năm'].max()
+    for _, r in df.iterrows():
+        hi = "background:rgba(30,58,95,0.45);" if r['Năm'] == last_year else ""
+        body += f'<tr style="{hi}">'
+        for c in cols:
+            if c == 'Năm':
+                body += (f'<td style="padding:7px 12px;font-weight:600;'
+                         f'border-bottom:1px solid rgba(255,255,255,0.06)">{int(r[c])}</td>')
+            else:
+                body += (f'<td style="padding:7px 12px;text-align:right;'
+                         f'border-bottom:1px solid rgba(255,255,255,0.06)">{_fmt_q(r[c])}</td>')
+        body += "</tr>"
+    return (
+        '<div style="overflow-x:auto;border-radius:12px;'
+        'border:1px solid rgba(255,255,255,0.08);margin:6px 0 14px 0">'
+        '<table style="width:100%;border-collapse:collapse;font-size:13.5px;'
+        'font-family:monospace"><thead><tr style="background:rgba(30,30,50,0.8);'
+        f'color:#94a3b8;font-size:11px">{head}</tr></thead><tbody>{body}</tbody>'
+        '</table></div>')
+
+
+def _render_quarter_pivot(pivot):
+    """Doanh thu / LNST theo quý: 2021–2025 đủ Q1-Q4, năm đang chạy Q1-Q3."""
+    if not pivot:
+        return
+    st.markdown("### Theo Quý (tỷ VNĐ)")
+    st.caption(
+        "Số riêng từng quý (đã tự đổi từ lũy kế nếu nguồn trả về lũy kế). "
+        "Ô trống = quý chưa công bố / nguồn chưa có. "
+        "Năm đang chạy: cột cuối là lũy kế các quý đã có.")
+    for key, title in (('revenue', 'Doanh thu thuần'), ('net_profit', 'LNST')):
+        df = pivot.get(key)
+        if df is None or df.empty:
+            continue
+        st.markdown(f"**{title}**")
+        st.markdown(_quarter_pivot_html(df), unsafe_allow_html=True)
+
 
 _PBV_CARD_CSS = """
 <style>
