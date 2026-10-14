@@ -6,10 +6,10 @@ from concurrent.futures import ThreadPoolExecutor
 
 from financial_normalizer import (
     find_row_series, get_latest, get_latest_n_years, cagr,
-    BANK_TICKERS, SECURITIES_TICKERS, IN_PROGRESS_YEAR,
+    BANK_TICKERS, SECURITIES_TICKERS,
 )
-from financials_core import build_core, pick_best_source, is_complete, filter_years
-from quarterly_view import build_quarter_pivot
+from financials_core import (build_core, merge_cores, pick_best_source, is_complete,
+                             filter_years, coverage_text)
 from valuation import (
     dupont_decomposition, dcf_fcff_scenarios, reverse_dcf_implied_growth,
     graham_number, ddm_gordon, nine_methods_valuation, summarize_valuation,
@@ -46,25 +46,27 @@ def execute_equity_research_pipeline(ticker):
         with ThreadPoolExecutor(max_workers=len(light_tasks)) as executor:
             light_futs = {k: executor.submit(_safe_fetch, fn) for k, fn in light_tasks.items()}
 
-            # Báo cáo tài chính: lấy NGUYÊN BÓ từ MỘT nguồn; chỉ hỏi nguồn kế tiếp khi cả
-            # bảng (4 chỉ tiêu × 5 năm) của nguồn này chưa đủ. Chọn cả nguồn, không chọn
-            # từng năm, không trộn cột giữa các nguồn.
+            # Báo cáo tài chính (NĂM): hỏi nguồn đầu tiên; chỉ hỏi nguồn kế tiếp khi cả
+            # bảng (4 chỉ tiêu × 5 năm) của các nguồn đã hỏi chưa đủ.
             for src in order:
                 bundles[src] = fetch_source_bundle(ticker, src)
                 try:
                     cores[src] = build_core(bundles[src], ticker, years)
                 except Exception:
                     continue
-                if is_complete(cores[src], years):
+                merged_try = merge_cores(cores, order, years)
+                if all(len(merged_try[f]) >= len(years) for f in ('revenue', 'net_profit',
+                                                                  'equity', 'total_assets')):
                     break
             results = {k: f.result() for k, f in light_futs.items()}
 
-        chosen = pick_best_source(cores, order, years)
-        if chosen is None:
-            chosen = source_used
-            bundles.setdefault(chosen, {})
-            cores[chosen] = build_core({}, ticker, years)
-        bundle, core = bundles[chosen], cores[chosen]
+        primary = pick_best_source(cores, order, years)
+        if primary is None:
+            primary = source_used
+            bundles.setdefault(primary, {})
+            cores[primary] = build_core({}, ticker, years)
+        merged = merge_cores(cores, order, years)
+        bundle, core = bundles[primary], cores[primary]
 
         df_price     = results.get("price",    pd.DataFrame())
         df_overview  = results.get("overview", pd.DataFrame())
@@ -83,21 +85,22 @@ def execute_equity_research_pipeline(ticker):
         is_bank       = ticker in BANK_TICKERS
         is_securities = ticker in SECURITIES_TICKERS
         current_price = float(df_price['close_vnd'].iloc[-1])
-        source_used   = chosen                       # nguồn của báo cáo tài chính
-        _consistency_notes = list(core['notes'])
+        source_used   = primary                      # nguồn chính của báo cáo tài chính
+        _consistency_notes = list(merged['notes'])
+        _coverage_note = coverage_text(merged, years)
 
         def _filter_years(s):
             return filter_years(s, allowed_years)
 
         # ── Các chuỗi lõi: đã tính bằng MỘT luật cho mọi năm (financials_core) ──
         fin5 = core['fin_y']
-        revenue_series      = core['revenue']
+        revenue_series      = merged['revenue']
         if not revenue_series.empty:
             revenue_series = revenue_series[revenue_series > 0]
-        net_profit_series   = core['net_profit']
-        equity_series       = core['equity']
-        total_assets_series = core['total_assets']
-        eps_series          = core['eps']
+        net_profit_series   = merged['net_profit']
+        equity_series       = merged['equity']
+        total_assets_series = merged['total_assets']
+        eps_series          = merged['eps']
 
         bvps_series               = _filter_years(fin5['bvps'])
         roe_series                = _filter_years(fin5['roe'])
@@ -287,6 +290,7 @@ def execute_equity_research_pipeline(ticker):
 
         clean_metrics.update({
             "consistency_notes":       list(_consistency_notes),
+            "coverage_note":           _coverage_note,
             "revenue_latest_billion":  revenue_latest,
             "cfo_latest_billion":      cfo_latest,
             "cfo_is_estimated":        cfo_is_estimated,
@@ -363,50 +367,7 @@ def execute_equity_research_pipeline(ticker):
             "roa_latest":          get_latest(roa_series, default=None),
         }
 
-        # ── Bảng theo quý: cùng nguồn, cùng dòng với bảng năm ──
-        df_quarter_table = pd.DataFrame()
-        quarter_pivot = {}
-        try:
-            fin_q  = core['fin_q']
-            rev_q, np_q, eq_q, ta_q = core['rev_q'], core['np_q'], core['eq_q'], core['ta_q']
-            eps_q  = fin_q['eps']
-            bvps_q = fin_q['bvps']
-            roe_q  = _normalize_pct_series(fin_q['roe'])
-            roa_q  = _normalize_pct_series(fin_q['roa'])
-            quarters = sorted(
-                set(rev_q.index) | set(np_q.index) | set(eq_q.index) | set(ta_q.index),
-                key=lambda c: (int(str(c).split('-Q')[0]), int(str(c).split('-Q')[1])))
-            df_quarter_table = pd.DataFrame({'_p': quarters})
-            df_quarter_table['Quý'] = df_quarter_table['_p'].apply(
-                lambda c: f"Q{str(c).split('-Q')[1]}/{str(c).split('-Q')[0]}")
-            df_quarter_table['Doanh thu thuần (tỷ)'] = df_quarter_table['_p'].map(rev_q)
-            df_quarter_table['LNST (tỷ)']            = df_quarter_table['_p'].map(np_q)
-            df_quarter_table['Vốn CSH (tỷ)']         = df_quarter_table['_p'].map(eq_q)
-            df_quarter_table['Tổng tài sản (tỷ)']    = df_quarter_table['_p'].map(ta_q)
-            df_quarter_table['EPS (đ)']              = df_quarter_table['_p'].map(eps_q)
-            df_quarter_table['BVPS (đ)']             = df_quarter_table['_p'].map(bvps_q)
-            df_quarter_table['ROE (%)'] = df_quarter_table['_p'].map(lambda y: roe_q.get(y, None))
-            df_quarter_table['ROA (%)'] = df_quarter_table['_p'].map(lambda y: roa_q.get(y, None))
-            def _ros_q(p):
-                r = rev_q.get(p) if p in rev_q.index else None
-                n = np_q.get(p)  if p in np_q.index  else None
-                if (r is not None and n is not None
-                        and pd.notna(r) and pd.notna(n) and r != 0):
-                    return n / r * 100
-                return None
-            df_quarter_table['ROS (%)'] = df_quarter_table['_p'].map(_ros_q)
-            df_quarter_table = df_quarter_table.drop(columns=['_p'])
-
-            # Pivot Q1..Q4 theo năm: 2021–TARGET_YEAR đủ 4 quý, năm đang chạy chỉ Q1..Qn,
-            # quý chưa công bố để TRỐNG.
-            for _name, _qs, _ann in (('revenue',    rev_q, revenue_series),
-                                     ('net_profit', np_q,  net_profit_series)):
-                quarter_pivot[_name] = build_quarter_pivot(
-                    _qs, _ann, start_year=min(allowed_years),
-                    end_year=IN_PROGRESS_YEAR, in_progress_year=IN_PROGRESS_YEAR)
-        except Exception:
-            pass
-        fundamentals_summary["quarter_pivot"] = quarter_pivot
+        df_quarter_table = pd.DataFrame()   # (tạm bỏ phần quý — test sau)
 
         df_dupont = dupont_decomposition(
             revenue_series, net_profit_series, total_assets_series, equity_series)
